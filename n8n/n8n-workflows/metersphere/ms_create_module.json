@@ -1,0 +1,61 @@
+{
+  "name": "ms_create_module",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "name"
+            },
+            {
+              "name": "parent_id"
+            },
+            {
+              "name": "level"
+            }
+          ]
+        }
+      },
+      "id": "trigger",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst accessKey = 'yCrnfHeNp7sKC5h3';\nconst secretKey = 'Em2sPDj0VaRGvnnY';\nconst baseUrl = 'https://metersphere.devops.moego.pet';\nconst projectId = '20a78db9-19aa-11ee-a261-5a66b98c4036';\nconst workspaceId = '20a7019f-19aa-11ee-a261-5a66b98c4036';\n\nconst timestamp = Date.now();\nconst uuid = crypto.randomUUID();\nconst comboxKey = `${accessKey}|${uuid}|${timestamp}`;\nconst k = Buffer.from(secretKey.slice(0, 16), 'utf-8');\nconst iv = Buffer.from(accessKey.slice(0, 16), 'utf-8');\nconst cipher = crypto.createCipheriv('aes-128-cbc', k, iv);\nlet signature = cipher.update(comboxKey, 'utf-8', 'base64');\nsignature += cipher.final('base64');\n\nconst input = $input.first().json;\nif (!input.name) throw new Error('name is required');\n\nconst level = input.level ? parseInt(input.level) : (input.parent_id ? 2 : 1);\n\nconst body = {\n  level,\n  type: 'add',\n  parentId: input.parent_id || null,\n  name: input.name,\n  label: input.name,\n  projectId,\n};\n\nconst response = await helpers.httpRequest({\n  method: 'POST',\n  url: `${baseUrl}/track/case/node/add`,\n  headers: {\n    'Content-Type': 'application/json',\n    'ACCEPT': 'application/json',\n    'accessKey': accessKey,\n    'signature': signature,\n    'project': projectId,\n    'workspace': workspaceId,\n  },\n  body: JSON.stringify(body),\n  json: false,\n});\n\nconst data = typeof response === 'string' ? JSON.parse(response) : response;\nif (!data.success) throw new Error(`MeterSphere error: ${data.message}`);\nconst result = data.data;\nconst id = typeof result === 'string' ? result : (result && result.id ? result.id : null);\nreturn [{ json: { id, name: input.name, parent_id: input.parent_id || null, level, message: 'Module created successfully' } }];\n"
+      },
+      "id": "code",
+      "name": "Create Module",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Create Module",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "binaryMode": "separate"
+  }
+}

@@ -1,0 +1,140 @@
+{
+  "name": "ms_list_case_reviews",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "page"
+            },
+            {
+              "name": "page_size"
+            }
+          ]
+        }
+      },
+      "id": "trigger",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const crypto = require('crypto');\nconst accessKey = 'yCrnfHeNp7sKC5h3';\nconst secretKey = 'Em2sPDj0VaRGvnnY';\nconst baseUrl = 'https://metersphere.devops.moego.pet';\nconst timestamp = Date.now();\nconst uuid = crypto.randomUUID();\nconst comboxKey = `${accessKey}|${uuid}|${timestamp}`;\nconst key = Buffer.from(secretKey.slice(0, 16), 'utf-8');\nconst iv = Buffer.from(accessKey.slice(0, 16), 'utf-8');\nconst cipher = crypto.createCipheriv('aes-128-cbc', key, iv);\nlet encrypted = cipher.update(comboxKey, 'utf-8', 'base64');\nencrypted += cipher.final('base64');\nconst input = $input.first().json;\nconst projectId = '20a78db9-19aa-11ee-a261-5a66b98c4036';\nconst page = input.page || 1;\nconst pageSize = input.page_size || 20;\nreturn [{ json: { baseUrl, page, pageSize, body: { projectId }, headers: { 'Content-Type': 'application/json', 'ACCEPT': 'application/json', 'accessKey': accessKey, 'signature': encrypted } } }];\n"
+      },
+      "id": "sign",
+      "name": "Generate Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.baseUrl }}/track/test/case/review/list/{{ $json.page }}/{{ $json.pageSize }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "ACCEPT",
+              "value": "application/json"
+            },
+            {
+              "name": "accessKey",
+              "value": "={{ $json.headers.accessKey }}"
+            },
+            {
+              "name": "signature",
+              "value": "={{ $json.headers.signature }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "http",
+      "name": "List Reviews",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const response = $input.first().json;\nif (!response.success) throw new Error(`MeterSphere API error: ${response.message}`);\nconst data = response.data || {};\nconst reviews = (data.listObject || []).map(r => ({ id: r.id, name: r.name, status: r.status, creator: r.creatorName || r.creator, pass_rate: r.passRate, case_count: r.caseCount, reviewers: (r.reviewers || []).map(u => u.name).join(', '), end_time: r.endTime ? new Date(r.endTime).toISOString() : null, create_time: r.createTime ? new Date(r.createTime).toISOString() : null }));\nreturn [{ json: { reviews, total: data.itemCount || 0, page_count: data.pageCount || 0 } }];\n"
+      },
+      "id": "format",
+      "name": "Format Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Generate Signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Signature": {
+      "main": [
+        [
+          {
+            "node": "List Reviews",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Reviews": {
+      "main": [
+        [
+          {
+            "node": "Format Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  }
+}

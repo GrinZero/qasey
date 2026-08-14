@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.mastra/
+.env
+.env.local
+.qasey/*
+artifacts/
+playwright-report/
+test-results/
+*.log
+.DS_Store
+!.qasey/mcp.json

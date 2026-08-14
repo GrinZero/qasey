@@ -1,0 +1,624 @@
+{
+  "name": "Figma MCP Server",
+  "nodes": [
+    {
+      "parameters": {
+        "authentication": "n8nOAuth2",
+        "path": "figma-mcp"
+      },
+      "type": "@n8n/n8n-nodes-langchain.mcpTrigger",
+      "typeVersion": 2,
+      "position": [
+        464,
+        -80
+      ],
+      "id": "mcp-trigger",
+      "name": "MCP Server Trigger",
+      "webhookId": "aa913fd7-752d-46f3-902a-7bb4b8604ef3"
+    },
+    {
+      "parameters": {
+        "name": "figma_list_pages",
+        "description": "列出 Figma 文件的所有页面（Page）。返回页面 ID 和名称列表。这是浏览设计稿的入口——先获取页面列表，再用 page_id 查看具体页面结构。file_key 可从 Figma URL 中获取（figma.com/design/<file_key>/...），也支持 branch key。",
+        "workflowId": {
+          "__rl": true,
+          "value": "Mwjs5faEuXJbBug5",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/Mwjs5faEuXJbBug5",
+          "cachedResultName": "figma_list_pages"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "file_key": "={{ $fromAI('file_key', '必填。Figma 文件 key 或 branch key', 'string', '') }}"
+          },
+          "matchingColumns": [
+            "file_key"
+          ],
+          "schema": [
+            {
+              "id": "file_key",
+              "displayName": "file_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2,
+      "position": [
+        0,
+        208
+      ],
+      "id": "tool-list-pages",
+      "name": "List Pages"
+    },
+    {
+      "parameters": {
+        "name": "figma_get_page_structure",
+        "description": "获取指定页面的结构摘要，返回标准化节点树（含 frame/组件/文本、层级、variant 轴）。这是定位具体界面的主路径，比 query_nodes 便宜得多，应优先使用。\n参数：depth 控制展开深度（默认 2，范围 1-5）；text_only=true 只看文本节点；include_layout=true 才输出像素尺寸（默认不输出——尺寸占输出体积约 1/3 且写用例基本用不到）；filter_code 传 JS 表达式做二次过滤（输入变量 nodes，须返回数组）。\n布尔参数传字符串 \"true\"/\"false\" 均可正确识别。\n输出超 token 预算时会返回 truncated=true 与 next_offset，把 next_offset 传回 offset 即可续取剩余部分，不会重复也不会漏。不要把截断结果当全量下结论。",
+        "workflowId": {
+          "__rl": true,
+          "value": "LpGobmBnYGd0QdOo",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/LpGobmBnYGd0QdOo",
+          "cachedResultName": "figma_get_page_structure"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "file_key": "={{ $fromAI('file_key', '必填。Figma 文件 key', 'string', '') }}",
+            "page_id": "={{ $fromAI('page_id', '必填。页面节点 ID（从 figma_list_pages 获取）', 'string', '') }}",
+            "depth": "={{ $fromAI('depth', '展开深度，默认 2', 'number', 2) }}",
+            "text_only": "={{ $fromAI('text_only', '是否只返回文本节点，默认 false', 'boolean', false) }}",
+            "filter_code": "={{ $fromAI('filter_code', '可选。JS 过滤表达式，如 nodes.filter(n => n.type === \"TEXT\")', 'string', '') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "file_key",
+              "displayName": "file_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "page_id",
+              "displayName": "page_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "depth",
+              "displayName": "depth",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "text_only",
+              "displayName": "text_only",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "filter_code",
+              "displayName": "filter_code",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "include_layout",
+              "displayName": "include_layout",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "offset",
+              "displayName": "offset",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2,
+      "position": [
+        208,
+        208
+      ],
+      "id": "tool-page-structure",
+      "name": "Get Page Structure"
+    },
+    {
+      "parameters": {
+        "name": "figma_get_node_detail",
+        "description": "获取指定节点的详细属性，用于 drill-down 查看某个 frame/组件的结构、样式、交互。node_ids 逗号分隔，最多 10 个。\n参数：include_styles=false 可关掉填充/描边/字体（能显著减小输出）；max_depth 控制展开深度（默认 6）——原实现无深度上限，深层设计稿会把输出撑爆。色值以 #rrggbb 返回。\n输出超 token 预算时会返回 truncated=true 与 next_offset，把 next_offset 传回 offset 即可续取剩余部分，不会重复也不会漏。不要把截断结果当全量下结论。",
+        "workflowId": {
+          "__rl": true,
+          "value": "utW6xeVjsG5DokL8",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/utW6xeVjsG5DokL8",
+          "cachedResultName": "figma_get_node_detail"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "file_key": "={{ $fromAI('file_key', '必填。Figma 文件 key', 'string', '') }}",
+            "node_ids": "={{ $fromAI('node_ids', '必填。逗号分隔的节点 ID，最多 10 个', 'string', '') }}",
+            "include_styles": "={{ $fromAI('include_styles', '是否包含样式信息（fills/strokes/corner_radius），默认 true', 'boolean', true) }}",
+            "filter_code": "={{ $fromAI('filter_code', '可选。JS 过滤表达式', 'string', '') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "file_key",
+              "displayName": "file_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "node_ids",
+              "displayName": "node_ids",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "include_styles",
+              "displayName": "include_styles",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "filter_code",
+              "displayName": "filter_code",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "max_depth",
+              "displayName": "max_depth",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "offset",
+              "displayName": "offset",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2,
+      "position": [
+        400,
+        208
+      ],
+      "id": "tool-node-detail",
+      "name": "Get Node Detail"
+    },
+    {
+      "parameters": {
+        "name": "figma_export_image",
+        "description": "导出指定节点为截图 URL（PNG/SVG/PDF）。用于获取设计稿的视觉预览。URL 30 天有效。node_ids 逗号分隔，最多 5 个。",
+        "workflowId": {
+          "__rl": true,
+          "value": "eEmA2e1FtsrKlYbA",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/eEmA2e1FtsrKlYbA",
+          "cachedResultName": "figma_export_image"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "file_key": "={{ $fromAI('file_key', '必填。Figma 文件 key', 'string', '') }}",
+            "node_ids": "={{ $fromAI('node_ids', '必填。逗号分隔的节点 ID，最多 5 个', 'string', '') }}",
+            "format": "={{ $fromAI('format', '导出格式：png/svg/pdf，默认 png', 'string', 'png') }}",
+            "scale": "={{ $fromAI('scale', '缩放倍数 0.01-4，默认 2', 'number', 2) }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "file_key",
+              "displayName": "file_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "node_ids",
+              "displayName": "node_ids",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "format",
+              "displayName": "format",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "scale",
+              "displayName": "scale",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2,
+      "position": [
+        608,
+        208
+      ],
+      "id": "tool-export-image",
+      "name": "Export Image"
+    },
+    {
+      "parameters": {
+        "name": "figma_get_components",
+        "description": "列出文件中所有组件，并按 component set 聚合出 variant 轴 —— 直接回答「某个控件有哪些状态」，例如 Button 会返回 state / size 各自的全部取值。这是查控件状态最省的路径，做状态覆盖时优先用它，不要用 query_nodes 去翻整棵树。\n输出超 token 预算时会返回 truncated=true 与 next_offset，把 next_offset 传回 offset 即可续取剩余部分，不会重复也不会漏。不要把截断结果当全量下结论。",
+        "workflowId": {
+          "__rl": true,
+          "value": "d1o6srECh5wJnLqt",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/d1o6srECh5wJnLqt",
+          "cachedResultName": "figma_get_components"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "file_key": "={{ $fromAI('file_key', '必填。Figma 文件 key', 'string', '') }}",
+            "filter_code": "={{ $fromAI('filter_code', '可选。JS 过滤表达式，输入变量为 components 数组', 'string', '') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "file_key",
+              "displayName": "file_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "filter_code",
+              "displayName": "filter_code",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "offset",
+              "displayName": "offset",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2,
+      "position": [
+        800,
+        208
+      ],
+      "id": "tool-components",
+      "name": "Get Components"
+    },
+    {
+      "parameters": {
+        "name": "figma_get_comments",
+        "description": "获取设计稿上的评审备注，按话题聚合：回复挂在父评论的 replies[] 下，不再拉平成散列评论。设计师备注常含交互说明和 edge case。已解决的话题带 resolved=true；只看未解决用 filter_code=comments.filter(c => !c.resolved)。\nfilter_code 的输入变量是 comments（每项为一个话题），须返回数组。\n输出超 token 预算时会返回 truncated=true 与 next_offset，把 next_offset 传回 offset 即可续取剩余部分，不会重复也不会漏。不要把截断结果当全量下结论。",
+        "workflowId": {
+          "__rl": true,
+          "value": "xPIPElbNex3hSmrl",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/xPIPElbNex3hSmrl",
+          "cachedResultName": "figma_get_comments"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "file_key": "={{ $fromAI('file_key', '必填。Figma 文件 key', 'string', '') }}",
+            "filter_code": "={{ $fromAI('filter_code', '可选。JS 过滤表达式，输入变量为 comments 数组，如 comments.filter(c => !c.resolved)', 'string', '') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "file_key",
+              "displayName": "file_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "filter_code",
+              "displayName": "filter_code",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "offset",
+              "displayName": "offset",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2,
+      "position": [
+        1008,
+        208
+      ],
+      "id": "tool-comments",
+      "name": "Get Comments"
+    },
+    {
+      "parameters": {
+        "name": "figma_query_nodes",
+        "description": "高级查询——对整棵文件树 flatten 后执行 JS 过滤，filter_code 必填，每个节点带 parent_id。\n⚠️ 这是最贵的调用：要拉取整个文件，也是最容易触发 Figma 限流的一个。只在需要跨页面全局搜索时才用（例如「找全文件所有 error state 组件」）。若目标在某一个页面内，改用 list_pages + get_page_structure；若只是想知道某控件有哪些状态，用 get_components。\nmax_depth 默认 3（范围 1-5），越大越贵。\n输出超 token 预算时返回 truncated=true 与 next_offset，把 next_offset 传回 offset 续取。",
+        "workflowId": {
+          "__rl": true,
+          "value": "ukDzWq6FCDJ3II1x",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/ukDzWq6FCDJ3II1x",
+          "cachedResultName": "figma_query_nodes"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "file_key": "={{ $fromAI('file_key', '必填。Figma 文件 key', 'string', '') }}",
+            "max_depth": "={{ $fromAI('max_depth', 'API 请求的最大深度，默认 5', 'number', 5) }}",
+            "filter_code": "={{ $fromAI('filter_code', '必填。JS 过滤表达式，输入变量为 nodes（flatten 后的全部节点数组），需返回数组', 'string', '') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "file_key",
+              "displayName": "file_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "max_depth",
+              "displayName": "max_depth",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "filter_code",
+              "displayName": "filter_code",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "offset",
+              "displayName": "offset",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        208
+      ],
+      "id": "tool-query-nodes",
+      "name": "Query Nodes"
+    }
+  ],
+  "connections": {
+    "List Pages": {
+      "ai_tool": [
+        [
+          {
+            "node": "MCP Server Trigger",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Page Structure": {
+      "ai_tool": [
+        [
+          {
+            "node": "MCP Server Trigger",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Node Detail": {
+      "ai_tool": [
+        [
+          {
+            "node": "MCP Server Trigger",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Export Image": {
+      "ai_tool": [
+        [
+          {
+            "node": "MCP Server Trigger",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Components": {
+      "ai_tool": [
+        [
+          {
+            "node": "MCP Server Trigger",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Comments": {
+      "ai_tool": [
+        [
+          {
+            "node": "MCP Server Trigger",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Nodes": {
+      "ai_tool": [
+        [
+          {
+            "node": "MCP Server Trigger",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true,
+    "binaryMode": "separate"
+  }
+}

@@ -1,0 +1,88 @@
+{
+  "name": "ms_edit_test_case",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "case_id"
+            },
+            {
+              "name": "name"
+            },
+            {
+              "name": "node_id"
+            },
+            {
+              "name": "priority"
+            },
+            {
+              "name": "maintainer"
+            },
+            {
+              "name": "prerequisite"
+            },
+            {
+              "name": "step_model"
+            },
+            {
+              "name": "step_description"
+            },
+            {
+              "name": "expected_result"
+            },
+            {
+              "name": "steps"
+            },
+            {
+              "name": "tags"
+            },
+            {
+              "name": "status"
+            }
+          ]
+        }
+      },
+      "id": "trigger",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst accessKey = 'yCrnfHeNp7sKC5h3';\nconst secretKey = 'Em2sPDj0VaRGvnnY';\nconst baseUrl = 'https://metersphere.devops.moego.pet';\nconst projectId = '20a78db9-19aa-11ee-a261-5a66b98c4036';\nconst workspaceId = '20a7019f-19aa-11ee-a261-5a66b98c4036';\n\nconst timestamp = Date.now();\nconst uuid = crypto.randomUUID();\nconst comboxKey = `${accessKey}|${uuid}|${timestamp}`;\nconst k = Buffer.from(secretKey.slice(0, 16), 'utf-8');\nconst iv = Buffer.from(accessKey.slice(0, 16), 'utf-8');\nconst cipher = crypto.createCipheriv('aes-128-cbc', k, iv);\nlet signature = cipher.update(comboxKey, 'utf-8', 'base64');\nsignature += cipher.final('base64');\n\nconst input = $input.first().json;\nif (!input.case_id) throw new Error('case_id is required');\nif (!input.name) throw new Error('name is required');\n\nconst priority = input.priority || 'P2';\nconst maintainer = input.maintainer || 'jiabowang@moego.pet';\nconst status = input.status || 'Prepare';\n\n\nfunction normalizeArrayField(value, fieldName, fallback) {\n  if (value === undefined || value === null || value === '') {\n    return JSON.stringify(fallback);\n  }\n\n  let parsed = value;\n  if (typeof value === 'string') {\n    const trimmed = value.trim();\n    if (!trimmed) return JSON.stringify(fallback);\n\n    if (trimmed.startsWith('[')) {\n      try {\n        parsed = JSON.parse(trimmed);\n      } catch (error) {\n        throw new Error(fieldName + ' must be valid JSON: ' + error.message);\n      }\n    } else {\n      const example = fieldName === 'tags'\n        ? '[\"回归\",\"P0\"]'\n        : '[{\"num\":1,\"desc\":\"操作步骤\",\"result\":\"预期结果\"}]';\n      throw new Error(fieldName + ' must be a JSON array string, for example: ' + example);\n    }\n  }\n\n  if (!Array.isArray(parsed)) {\n    throw new Error(fieldName + ' must be an array');\n  }\n\n  if (fieldName === 'tags') {\n    parsed = parsed.map((tag) => String(tag).trim()).filter(Boolean);\n  } else if (fieldName === 'steps') {\n    parsed = parsed.map((step, index) => {\n      if (!step || typeof step !== 'object' || Array.isArray(step)) {\n        throw new Error('steps[' + index + '] must be an object');\n      }\n      return {\n        ...step,\n        id: step.id || crypto.randomUUID().replace(/-/g, '').slice(0, 8),\n        num: Number.isFinite(Number(step.num)) ? Number(step.num) : index + 1,\n        desc: String(step.desc ?? ''),\n        result: String(step.result ?? ''),\n      };\n    });\n  }\n\n  return JSON.stringify(parsed);\n}\n\n\nasync function resolveNodePath(nodeId) {\n  const response = await helpers.httpRequest({\n    method: 'GET',\n    url: baseUrl + '/track/case/node/list/' + projectId,\n    headers: {\n      'Content-Type': 'application/json',\n      'ACCEPT': 'application/json',\n      'accessKey': accessKey,\n      'signature': signature,\n      'project': projectId,\n      'workspace': workspaceId,\n    },\n    json: true,\n  });\n\n  const data = typeof response === 'string' ? JSON.parse(response) : response;\n  if (!data.success) throw new Error('Unable to resolve module path: ' + data.message);\n\n  function find(nodes, parents) {\n    for (const node of nodes || []) {\n      const names = parents.concat(node.name);\n      if (node.id === nodeId) return '/' + names.join('/');\n      const childPath = find(node.children, names);\n      if (childPath) return childPath;\n    }\n    return '';\n  }\n\n  const path = find(data.data, []);\n  if (!path) throw new Error('node_id was not found in the MeterSphere module tree: ' + nodeId);\n  return path;\n}\n\nlet targetNodeId = input.node_id;\nif (!targetNodeId && input.case_id) {\n  const detailResponse = await helpers.httpRequest({\n    method: 'GET',\n    url: baseUrl + '/track/test/case/get/' + input.case_id,\n    headers: {\n      'Content-Type': 'application/json',\n      'ACCEPT': 'application/json',\n      'accessKey': accessKey,\n      'signature': signature,\n      'project': projectId,\n      'workspace': workspaceId,\n    },\n    json: true,\n  });\n  const detail = typeof detailResponse === 'string' ? JSON.parse(detailResponse) : detailResponse;\n  if (!detail.success) throw new Error('Unable to read existing test case: ' + detail.message);\n  targetNodeId = detail.data.nodeId;\n}\nif (!targetNodeId) throw new Error('node_id is required');\nconst nodePath = await resolveNodePath(targetNodeId);\n\nconst body = {\n  id: input.case_id,\n  name: input.name,\n  num: '',\n  nodePath,\n  maintainer,\n  priority,\n  type: 'functional',\n  method: '',\n  prerequisite: input.prerequisite || '',\n  testId: '[]',\n  nodeId: targetNodeId,\n  steps: normalizeArrayField(input.steps, 'steps', []),\n  stepDesc: '',\n  stepResult: '',\n  selected: [],\n  remark: '',\n  tags: normalizeArrayField(input.tags, 'tags', []),\n  demandId: '',\n  demandName: '',\n  status,\n  reviewStatus: 'Prepare',\n  stepDescription: input.step_description || '',\n  expectedResult: input.expected_result || '',\n  stepModel: input.step_model || 'STEP',\n  customNum: '',\n  followPeople: '',\n  versionId: '3570d801-19aa-11ee-a261-5a66b98c4036',\n  follows: [],\n  projectId,\n  casePublic: false,\n  refId: input.case_id,\n  latest: true,\n  copyCaseId: input.case_id,\n  addFields: [],\n  editFields: [\n    {fieldId: '46065143-9d1d-11eb-b418-0242ac120002', value: JSON.stringify(maintainer)},\n    {fieldId: '4619cc23-9d1d-11eb-b418-0242ac120002', value: JSON.stringify(priority)},\n    {fieldId: '45f2de57-9d1d-11eb-b418-0242ac120002', value: JSON.stringify(status)},\n  ],\n  requestFields: [\n    {id: '46065143-9d1d-11eb-b418-0242ac120002', name: '责任人', customData: null, type: 'member', value: maintainer},\n    {id: '4619cc23-9d1d-11eb-b418-0242ac120002', name: '用例等级', customData: null, type: 'select', value: priority},\n    {id: '45f2de57-9d1d-11eb-b418-0242ac120002', name: '用例状态', customData: null, type: 'select', value: status},\n  ],\n  fields: [\n    {id: '45f2de57-9d1d-11eb-b418-0242ac120002', value: status},\n    {id: '46065143-9d1d-11eb-b418-0242ac120002', value: maintainer},\n    {id: '4619cc23-9d1d-11eb-b418-0242ac120002', value: priority},\n  ],\n};\n\nconst boundary = '------WebKitFormBoundary' + crypto.randomUUID().replace(/-/g, '').slice(0, 16);\nconst rawBody = '--' + boundary + '\\r\\nContent-Disposition: form-data; name=\"request\"; filename=\"blob\"\\r\\nContent-Type: application/json\\r\\n\\r\\n' + JSON.stringify(body) + '\\r\\n--' + boundary + '--\\r\\n';\n\nconst response = await helpers.httpRequest({\n  method: 'POST',\n  url: `${baseUrl}/track/test/case/edit`,\n  headers: {\n    'Content-Type': `multipart/form-data; boundary=${boundary}`,\n    'ACCEPT': 'application/json',\n    'accessKey': accessKey,\n    'signature': signature,\n    'project': projectId,\n    'workspace': workspaceId,\n  },\n  body: rawBody,\n  json: false,\n});\n\nconst data = typeof response === 'string' ? JSON.parse(response) : response;\nif (!data.success) throw new Error(`MeterSphere error: ${data.message}`);\nconst c = data.data;\nreturn [{ json: { id: c.id, num: c.num, name: c.name, project_id: c.projectId, node_id: c.nodeId, priority: c.priority, status: c.status, maintainer: c.maintainer, update_time: c.updateTime ? new Date(c.updateTime).toISOString() : null, message: 'Test case updated successfully' } }];\n"
+      },
+      "id": "code",
+      "name": "Edit Test Case",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Edit Test Case",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "binaryMode": "separate"
+  }
+}

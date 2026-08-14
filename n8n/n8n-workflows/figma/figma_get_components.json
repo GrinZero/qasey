@@ -1,0 +1,179 @@
+{
+  "name": "figma_get_components",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "file_key"
+            },
+            {
+              "name": "filter_code"
+            },
+            {
+              "name": "offset"
+            }
+          ]
+        }
+      },
+      "id": "trigger",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.figma.com/v1/files/{{ $json.file_key }}/components",
+        "authentication": "genericCredentialType",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 30000
+        },
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "id": "fetch_components",
+      "name": "Fetch Components",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "1GVlPTDvNkM2MRoV",
+          "name": "Figma PAT"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.figma.com/v1/files/{{ $('When Executed by Another Workflow').first().json.file_key }}/component_sets",
+        "authentication": "genericCredentialType",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 30000
+        },
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "id": "fetch_component_sets",
+      "name": "Fetch Component Sets",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        200
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "1GVlPTDvNkM2MRoV",
+          "name": "Figma PAT"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "/**\n * figma_get_components — 预处理 Code Node\n *\n * 输入: 两个 HTTP node 的结果（/components 和 /component_sets）\n * 输出: [{ json: { components: [...], total_sets, total_standalone } }]\n *\n * 和旧实现的关键区别：\n *\n * 1) 按 component set 聚合 variant 轴。旧实现每个 variant 组合单独输出一行，\n *    Button 有 3 个 state × 3 个 size 就是 9 行，每行 variants 只有一个组合值\n *    （如 {state:\"hover\", size:\"md\"}）。agent 想知道「Button 有哪些 state」\n *    得自己把 9 行归并。现在直接给出轴：{state:[...], size:[...]}，一行讲完。\n * 2) 去掉 thumbnail_url。那是 200-400 字符的 S3 签名 URL，每个组件一条，\n *    是输出里最大的单项噪音，而 agent 读不了图片。需要看图用 export_image。\n * 3) 去掉 file_key（入参里就有，回显无意义）和 updated_at（写用例用不到）。\n *\n * 不在这里截断 —— 交给下游 Apply Filter 按 token 预算切。\n */\n\nconst items = $input.all();\n\nlet rawComponents = [];\nlet rawSets = [];\nfor (const item of items) {\n  const meta = item.json.meta || {};\n  if (meta.components) rawComponents = rawComponents.concat(meta.components);\n  if (meta.component_sets) rawSets = rawSets.concat(meta.component_sets);\n}\n\n// 从组件名解析 variant 键值对。Figma 的命名约定是 \"state=hover, size=md\"。\nfunction parsePairs(name) {\n  const out = {};\n  if (!name || name.indexOf('=') === -1) return out;\n  for (const pair of name.split(',')) {\n    const idx = pair.indexOf('=');\n    if (idx === -1) continue;\n    const k = pair.slice(0, idx).trim();\n    const v = pair.slice(idx + 1).trim();\n    if (k && v) out[k] = v;\n  }\n  return out;\n}\n\n// set 的 node_id -> 聚合容器。用普通对象做去重表，不要用 Set：\n// n8n 沙箱会把 Set 序列化成 {\"hover\":true} 而不是数组。\nconst setById = new Map();\nfor (const cs of rawSets) {\n  setById.set(cs.node_id, {\n    type: 'COMPONENT_SET',\n    name: cs.name || '',\n    key: cs.key,\n    node_id: cs.node_id || '',\n    description: cs.description || '',\n    containing_frame: cs.containing_frame?.name || '',\n    _axes: {},          // { state: {hover:true, ...} }\n    _count: 0,\n  });\n}\n\nconst standalone = [];\nfor (const c of rawComponents) {\n  const parentId = c.containing_frame?.nodeId;\n  const parent = parentId ? setById.get(parentId) : undefined;\n  const pairs = parsePairs(c.name);\n\n  if (parent && Object.keys(pairs).length) {\n    // 属于某个 set 的一个 variant 组合：只把值累进轴里，不单独输出一行\n    for (const [k, v] of Object.entries(pairs)) {\n      parent._axes[k] = parent._axes[k] || {};\n      parent._axes[k][v] = true;\n    }\n    parent._count++;\n    continue;\n  }\n\n  const o = {\n    type: 'COMPONENT',\n    name: c.name || '',\n    key: c.key,\n    node_id: c.node_id || '',\n  };\n  if (c.description) o.description = c.description;\n  const frame = c.containing_frame?.name;\n  if (frame) o.containing_frame = frame;\n  standalone.push(o);\n}\n\n// 收尾：把去重表转成数组，丢掉内部字段\nconst sets = [];\nfor (const s of setById.values()) {\n  const out = {\n    type: s.type,\n    name: s.name,\n    key: s.key,\n    node_id: s.node_id,\n  };\n  if (s.description) out.description = s.description;\n  if (s.containing_frame) out.containing_frame = s.containing_frame;\n  const axes = {};\n  for (const [k, seen] of Object.entries(s._axes)) axes[k] = Object.keys(seen);\n  if (Object.keys(axes).length) out.variants = axes;\n  if (s._count) out.variant_count = s._count;\n  sets.push(out);\n}\n\n// component set 排前面 —— 它们才是「控件有哪些状态」的答案\nconst components = sets.concat(standalone);\n\nreturn [{\n  json: {\n    components,\n    total_sets: sets.length,\n    total_standalone: standalone.length,\n  },\n}];\n"
+      },
+      "id": "preprocess",
+      "name": "Merge & Preprocess",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "/**\n * 通用过滤 + 输出预算 Code Node — 所有 figma workflow 的最后一步\n *\n * 输入: 上游预处理结果（含 nodes / components / threads 之一）\n * 输出: 过滤 + 按 token 预算切片后的结果，附续取信息\n *\n * 为什么不用「最多 N 条」：\n *   旧实现是 MAX_RESULTS=200 的固定条数上限。条数和 token 不成比例 ——\n *   200 个浅层节点可能只有 3k token，而 200 条中文评论轻松超 20k。\n *   所以这里改成按 token 预算切，条数不设限。\n *\n * 为什么要 CJK 感知：\n *   英文 JSON 大约 4 字符/token，中文大约 1.5 字符/token，差 2.6 倍。\n *   评论正文是中文为主，用固定「字符数/4」估算会严重低估，切完照样超预算。\n *\n * 截断语义：不静默丢弃。超预算时返回 truncated=true + next_offset，\n * 并在 hint 里用中文写清怎么续取 —— 和 qa_experience_read 的翻页语义保持一致。\n * 切片边界永远落在完整条目（完整话题 / 完整顶层子树）上，不切碎结构。\n */\n\n// MCP 单次响应上限 25000 token，留 20% 余量给外层包装和 hint 文本\nconst TOKEN_BUDGET = 20000;\n\nconst input = $input.first().json;\nconst params = $('When Executed by Another Workflow').first().json;\nconst filterCode = params.filter_code || '';\n\nfunction asInt(v, dflt, min, max) {\n  const n = parseInt(v, 10);\n  if (Number.isNaN(n)) return dflt;\n  return Math.min(Math.max(n, min), max);\n}\nconst offset = asInt(params.offset, 0, 0, 1000000);\n\n// CJK 感知的 token 估算：CJK 约 1.5 字符/token，其余约 4 字符/token\nfunction estimateTokens(str) {\n  if (!str) return 0;\n  let cjk = 0;\n  for (const ch of str) {\n    const c = ch.codePointAt(0);\n    if ((c >= 0x4e00 && c <= 0x9fff) || (c >= 0x3040 && c <= 0x30ff) ||\n        (c >= 0xac00 && c <= 0xd7af) || (c >= 0xf900 && c <= 0xfaff)) cjk++;\n  }\n  const other = str.length - cjk;\n  return Math.ceil(cjk / 1.5 + other / 4);\n}\n\n// --- 确定要处理哪个数组 ---\nlet data, varName, outputKey;\nif (Array.isArray(input.nodes)) {\n  data = input.nodes; varName = 'nodes'; outputKey = 'nodes';\n} else if (Array.isArray(input.components)) {\n  data = input.components; varName = 'components'; outputKey = 'components';\n} else if (Array.isArray(input.threads)) {\n  // filter_code 里变量名沿用 comments，对 agent 更直观\n  data = input.threads; varName = 'comments'; outputKey = 'threads';\n} else {\n  return [{ json: input }];\n}\n\n// --- 执行 agent 传入的过滤 ---\nlet filtered = data;\nlet filterError = null;\nif (filterCode) {\n  try {\n    const fn = new Function(varName, `return (${filterCode})`);\n    const r = fn(data);\n    if (!Array.isArray(r)) {\n      filterError = 'filter_code 必须返回数组';\n      filtered = [];\n    } else {\n      filtered = r;\n    }\n  } catch (e) {\n    filterError = `filter_code 执行出错: ${e.message}`;\n    filtered = [];\n  }\n}\n\nconst total = filtered.length;\nconst windowed = filtered.slice(offset);\n\n// --- 按 token 预算逐条累加，切在完整条目边界 ---\nconst picked = [];\nlet used = 0;\nlet truncated = false;\nfor (const item of windowed) {\n  const cost = estimateTokens(JSON.stringify(item));\n  if (picked.length > 0 && used + cost > TOKEN_BUDGET) {\n    truncated = true;\n    break;\n  }\n  picked.push(item);\n  used += cost;\n  // 单条就超预算：已收下它保证有进展，但立即停下\n  if (used > TOKEN_BUDGET) {\n    truncated = windowed.length > picked.length;\n    break;\n  }\n}\n\n// --- 组装输出 ---\nconst output = {};\nfor (const [k, v] of Object.entries(input)) {\n  if (k !== outputKey) output[k] = v;\n}\noutput[outputKey] = picked;\noutput.returned = picked.length;\noutput.total = total;\n\nif (offset > 0) output.offset = offset;\nif (filterError) output.filter_error = filterError;\n\nif (truncated) {\n  const nextOffset = offset + picked.length;\n  output.truncated = true;\n  output.next_offset = nextOffset;\n  output.hint =\n    `输出达 token 预算，本次返回第 ${offset + 1}-${nextOffset} 条，共 ${total} 条。` +\n    `把 offset=${nextOffset} 传回本工具可续取剩余部分；` +\n    `或用 filter_code 收窄范围以减少无关内容。`;\n}\n\nreturn [{ json: output }];\n"
+      },
+      "id": "filter",
+      "name": "Apply Filter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        100
+      ]
+    }
+  ],
+  "connections": {
+    "Fetch Components": {
+      "main": [
+        [
+          {
+            "node": "Merge & Preprocess",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Component Sets": {
+      "main": [
+        [
+          {
+            "node": "Merge & Preprocess",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge & Preprocess": {
+      "main": [
+        [
+          {
+            "node": "Apply Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Fetch Components",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Component Sets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": []
+}

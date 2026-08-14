@@ -1,0 +1,130 @@
+{
+  "name": "figma_get_comments",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "file_key"
+            },
+            {
+              "name": "filter_code"
+            },
+            {
+              "name": "offset"
+            }
+          ]
+        }
+      },
+      "id": "trigger",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.figma.com/v1/files/{{ $json.file_key }}/comments?as_md=true",
+        "authentication": "genericCredentialType",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 30000
+        },
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "id": "fetch_comments",
+      "name": "Fetch Comments",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "1GVlPTDvNkM2MRoV",
+          "name": "Figma PAT"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "/**\n * figma_get_comments — 预处理 Code Node\n *\n * 输入: Figma GET /v1/files/:key/comments?as_md=true 响应\n * 输出: [{ json: { threads: [...], total_threads, total_comments } }]\n *\n * 两处和旧实现的关键区别：\n *\n * 1) 按话题聚合，不再拉平。旧实现把 405 条评论按时间倒序拉平后砍到 50 条，\n *    回复和它的父评论被切散在不同位置甚至被丢掉，agent 拿到一堆接不上的碎片。\n *    设计评审的信息恰恰在「谁回了谁」里，所以改成 replies 挂在父评论下。\n * 2) 不再输出恒空字段。实测 resolved_at / node_id / node_offset 100% 为 null，\n *    order_date 和 created_at 完全重复，这些每条都占位置却零信息量。\n *    改成只在真有值时才出现。\n *\n * 截断不在这里做 —— 交给下游 Apply Filter 按 token 预算切，且切在完整话题边界上。\n */\n\nconst input = $input.first().json;\nconst rawComments = input.comments || [];\n\n// 设计评审只需要日期，秒级精度是噪音\nfunction toDate(iso) {\n  if (!iso) return '';\n  return String(iso).slice(0, 10);\n}\n\nfunction shape(c) {\n  const o = {\n    id: c.id,\n    author: c.user?.handle || c.user?.name || 'unknown',\n    date: toDate(c.created_at),\n    message: c.message || '',\n  };\n  // 以下字段只在反常/有值时输出\n  if (c.resolved_at) o.resolved = true;\n  const nodeId = c.client_meta?.node_id;\n  if (nodeId) o.node_id = nodeId;\n  return o;\n}\n\n// --- 按 parent_id 聚合成话题 ---\nconst byId = new Map();\nconst roots = [];\n\nfor (const c of rawComments) {\n  byId.set(c.id, { raw: c, shaped: shape(c) });\n  if (!c.parent_id) roots.push(c.id);\n}\n\n// 挂回复。父评论可能不在本次响应里（被删等），这类回复升级为独立话题，避免静默丢失。\nconst repliesOf = new Map();\nfor (const c of rawComments) {\n  if (!c.parent_id) continue;\n  if (!byId.has(c.parent_id)) {\n    roots.push(c.id);\n    continue;\n  }\n  if (!repliesOf.has(c.parent_id)) repliesOf.set(c.parent_id, []);\n  repliesOf.get(c.parent_id).push(c.id);\n}\n\nfunction buildThread(rootId) {\n  const entry = byId.get(rootId);\n  if (!entry) return null;\n  const thread = { ...entry.shaped };\n  const replyIds = repliesOf.get(rootId) || [];\n  if (replyIds.length) {\n    // 回复按时间正序，读起来就是对话本身的顺序\n    replyIds.sort((a, b) => {\n      const ra = byId.get(a), rb = byId.get(b);\n      return new Date(ra.raw.created_at) - new Date(rb.raw.created_at);\n    });\n    thread.replies = replyIds.map((id) => byId.get(id).shaped);\n  }\n  return thread;\n}\n\n// 话题按最新活动时间倒序（含回复），活跃讨论排在前面\nfunction lastActivity(rootId) {\n  const ids = [rootId].concat(repliesOf.get(rootId) || []);\n  let max = 0;\n  for (const id of ids) {\n    const t = new Date(byId.get(id).raw.created_at).getTime() || 0;\n    if (t > max) max = t;\n  }\n  return max;\n}\n\nconst threads = roots\n  .map((id) => ({ id, ts: lastActivity(id) }))\n  .sort((a, b) => b.ts - a.ts)\n  .map((x) => buildThread(x.id))\n  .filter(Boolean);\n\nconst totalComments = threads.reduce(\n  (n, t) => n + 1 + (t.replies ? t.replies.length : 0),\n  0\n);\n\nreturn [{\n  json: {\n    threads,\n    total_threads: threads.length,\n    total_comments: totalComments,\n  },\n}];\n"
+      },
+      "id": "preprocess",
+      "name": "Preprocess Comments",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "/**\n * 通用过滤 + 输出预算 Code Node — 所有 figma workflow 的最后一步\n *\n * 输入: 上游预处理结果（含 nodes / components / threads 之一）\n * 输出: 过滤 + 按 token 预算切片后的结果，附续取信息\n *\n * 为什么不用「最多 N 条」：\n *   旧实现是 MAX_RESULTS=200 的固定条数上限。条数和 token 不成比例 ——\n *   200 个浅层节点可能只有 3k token，而 200 条中文评论轻松超 20k。\n *   所以这里改成按 token 预算切，条数不设限。\n *\n * 为什么要 CJK 感知：\n *   英文 JSON 大约 4 字符/token，中文大约 1.5 字符/token，差 2.6 倍。\n *   评论正文是中文为主，用固定「字符数/4」估算会严重低估，切完照样超预算。\n *\n * 截断语义：不静默丢弃。超预算时返回 truncated=true + next_offset，\n * 并在 hint 里用中文写清怎么续取 —— 和 qa_experience_read 的翻页语义保持一致。\n * 切片边界永远落在完整条目（完整话题 / 完整顶层子树）上，不切碎结构。\n */\n\n// MCP 单次响应上限 25000 token，留 20% 余量给外层包装和 hint 文本\nconst TOKEN_BUDGET = 20000;\n\nconst input = $input.first().json;\nconst params = $('When Executed by Another Workflow').first().json;\nconst filterCode = params.filter_code || '';\n\nfunction asInt(v, dflt, min, max) {\n  const n = parseInt(v, 10);\n  if (Number.isNaN(n)) return dflt;\n  return Math.min(Math.max(n, min), max);\n}\nconst offset = asInt(params.offset, 0, 0, 1000000);\n\n// CJK 感知的 token 估算：CJK 约 1.5 字符/token，其余约 4 字符/token\nfunction estimateTokens(str) {\n  if (!str) return 0;\n  let cjk = 0;\n  for (const ch of str) {\n    const c = ch.codePointAt(0);\n    if ((c >= 0x4e00 && c <= 0x9fff) || (c >= 0x3040 && c <= 0x30ff) ||\n        (c >= 0xac00 && c <= 0xd7af) || (c >= 0xf900 && c <= 0xfaff)) cjk++;\n  }\n  const other = str.length - cjk;\n  return Math.ceil(cjk / 1.5 + other / 4);\n}\n\n// --- 确定要处理哪个数组 ---\nlet data, varName, outputKey;\nif (Array.isArray(input.nodes)) {\n  data = input.nodes; varName = 'nodes'; outputKey = 'nodes';\n} else if (Array.isArray(input.components)) {\n  data = input.components; varName = 'components'; outputKey = 'components';\n} else if (Array.isArray(input.threads)) {\n  // filter_code 里变量名沿用 comments，对 agent 更直观\n  data = input.threads; varName = 'comments'; outputKey = 'threads';\n} else {\n  return [{ json: input }];\n}\n\n// --- 执行 agent 传入的过滤 ---\nlet filtered = data;\nlet filterError = null;\nif (filterCode) {\n  try {\n    const fn = new Function(varName, `return (${filterCode})`);\n    const r = fn(data);\n    if (!Array.isArray(r)) {\n      filterError = 'filter_code 必须返回数组';\n      filtered = [];\n    } else {\n      filtered = r;\n    }\n  } catch (e) {\n    filterError = `filter_code 执行出错: ${e.message}`;\n    filtered = [];\n  }\n}\n\nconst total = filtered.length;\nconst windowed = filtered.slice(offset);\n\n// --- 按 token 预算逐条累加，切在完整条目边界 ---\nconst picked = [];\nlet used = 0;\nlet truncated = false;\nfor (const item of windowed) {\n  const cost = estimateTokens(JSON.stringify(item));\n  if (picked.length > 0 && used + cost > TOKEN_BUDGET) {\n    truncated = true;\n    break;\n  }\n  picked.push(item);\n  used += cost;\n  // 单条就超预算：已收下它保证有进展，但立即停下\n  if (used > TOKEN_BUDGET) {\n    truncated = windowed.length > picked.length;\n    break;\n  }\n}\n\n// --- 组装输出 ---\nconst output = {};\nfor (const [k, v] of Object.entries(input)) {\n  if (k !== outputKey) output[k] = v;\n}\noutput[outputKey] = picked;\noutput.returned = picked.length;\noutput.total = total;\n\nif (offset > 0) output.offset = offset;\nif (filterError) output.filter_error = filterError;\n\nif (truncated) {\n  const nextOffset = offset + picked.length;\n  output.truncated = true;\n  output.next_offset = nextOffset;\n  output.hint =\n    `输出达 token 预算，本次返回第 ${offset + 1}-${nextOffset} 条，共 ${total} 条。` +\n    `把 offset=${nextOffset} 传回本工具可续取剩余部分；` +\n    `或用 filter_code 收窄范围以减少无关内容。`;\n}\n\nreturn [{ json: output }];\n"
+      },
+      "id": "filter",
+      "name": "Apply Filter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Fetch Comments": {
+      "main": [
+        [
+          {
+            "node": "Preprocess Comments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preprocess Comments": {
+      "main": [
+        [
+          {
+            "node": "Apply Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Fetch Comments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": []
+}

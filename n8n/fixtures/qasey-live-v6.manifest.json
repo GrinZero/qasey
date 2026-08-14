@@ -1,0 +1,24 @@
+{
+  "sourceWorkflowId": "Vw8YbsOWTmqlNR3o",
+  "sourceName": "Qasey",
+  "capturedAt": "2026-08-13T00:00:00+08:00",
+  "sourceUpdatedAt": "2026-08-11T02:49:56.721Z",
+  "promptVersion": 6,
+  "channels": ["slack", "jira", "n8n_chat"],
+  "slackEvents": ["app_mention", "message.im"],
+  "intents": ["qa_quick_query", "qa_review", "case_create_full", "case_maintain_fast", "experience_read", "experience_write", "meta_or_out_of_scope", "unknown"],
+  "memory": { "backend": "postgres", "recentHistoryMessages": 6 },
+  "models": { "orchestrator": "gpt-5.6-sol", "fallback": "gpt-5.5", "router": "gpt-5.4-mini", "researcher": "gpt-5.6-luna" },
+  "mcpServers": ["metersphere", "figma", "qa_experience", "moego_rag", "lark"],
+  "subworkflows": ["NGToJD8vw6Fyt57x", "umXhKwCR0IBtU0jj", "uVCYlqy2EtqMhKmR", "KJCHhS3A6Gvwyf1Y"],
+  "invariants": [
+    "Slack channel mentions use thread-scoped memory",
+    "Slack DMs use DM-channel-scoped memory",
+    "Jira comments use issue-scoped memory",
+    "Unknown intent is read-only",
+    "QA Experience writes require Slack approval and readback",
+    "MeterSphere writes require case_create_full or case_maintain_fast",
+    "Evidence researcher is strictly read-only",
+    "Slack lifecycle is eyes then success or failure"
+  ]
+}

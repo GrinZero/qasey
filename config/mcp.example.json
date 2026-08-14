@@ -1,0 +1,24 @@
+{
+  "servers": {
+    "metersphere": {
+      "url": "https://metersphere-mcp.example.com/mcp",
+      "auth": { "type": "bearer", "tokenEnv": "QASEY_N8N_MCP_TOKEN" }
+    },
+    "figma": {
+      "url": "https://mcp.figma.com/mcp",
+      "auth": { "type": "bearer", "tokenEnv": "QASEY_N8N_MCP_TOKEN" }
+    },
+    "qaExperience": {
+      "url": "https://qa-experience-mcp.example.com/mcp",
+      "auth": { "type": "bearer", "tokenEnv": "QASEY_N8N_MCP_TOKEN" }
+    },
+    "rag": {
+      "url": "https://rag-mcp.example.com/mcp",
+      "auth": { "type": "bearer", "tokenEnv": "MOEGO_RAG_MCP_TOKEN" }
+    },
+    "lark": {
+      "url": "https://lark-mcp.example.com/mcp",
+      "auth": { "type": "bearer", "tokenEnv": "QASEY_N8N_MCP_TOKEN" }
+    }
+  }
+}

@@ -1,0 +1,142 @@
+{
+  "name": "figma_get_page_structure",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "file_key"
+            },
+            {
+              "name": "page_id"
+            },
+            {
+              "name": "depth"
+            },
+            {
+              "name": "text_only"
+            },
+            {
+              "name": "filter_code"
+            },
+            {
+              "name": "include_layout"
+            },
+            {
+              "name": "offset"
+            }
+          ]
+        }
+      },
+      "id": "trigger",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://api.figma.com/v1/files/{{ $json.file_key }}/nodes?ids={{ $json.page_id }}&depth={{ $json.depth || 2 }}",
+        "authentication": "genericCredentialType",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 30000
+        },
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "id": "fetch_nodes",
+      "name": "Fetch Page Nodes",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "1GVlPTDvNkM2MRoV",
+          "name": "Figma PAT"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "/**\n * figma_get_page_structure — 预处理 Code Node\n * 将 Figma API 返回的节点树转为标准化 FigmaNode[]\n *\n * 输入: Figma GET /v1/files/:key/nodes 响应\n * 输出: [{ json: { page_name, nodes, total_count } }]\n */\n\nconst input = $input.first().json;\nconst params = $('When Executed by Another Workflow').first().json;\n// MCP 的入参 schema 全是 string，agent 传 false 到达时是字符串 \"false\"（真值），\n// 传 0 会被 || 吃掉。两者都必须先归一化。\nfunction asBool(v, dflt) {\n  if (v === undefined || v === null || v === '') return dflt;\n  if (typeof v === 'boolean') return v;\n  return !['false', '0', 'no', 'off'].includes(String(v).trim().toLowerCase());\n}\nfunction asInt(v, dflt, min, max) {\n  const n = parseInt(v, 10);\n  if (Number.isNaN(n)) return dflt;\n  return Math.min(Math.max(n, min), max);\n}\n\nconst depth = asInt(params.depth, 2, 1, 5);\nconst textOnly = asBool(params.text_only, false);\nconst includeLayout = asBool(params.include_layout, false);\n\n/**\n * 取 variant 轴。两个来源，缺一不可：\n *  1) componentPropertyDefinitions 里 type==='VARIANT' 的项 —— 标准来源；\n *  2) 子 COMPONENT 的名字，形如 \"state=hover, size=md\" —— MoeGo 设计系统实际用的是\n *     TEXT / INSTANCE_SWAP 属性，VARIANT 项为空，真正的 variant 值只在子组件名里。\n * 只走来源 1 会恒得 {}，这就是之前 variants 永远是空对象的原因。\n * 用普通对象做去重表，不要用 Set：n8n 沙箱会把 Set 序列化成 {\"hover\":true} 而非数组。\n */\nfunction extractVariants(node) {\n  const axes = {};\n  const defs = node.componentPropertyDefinitions || {};\n  for (const [rawKey, def] of Object.entries(defs)) {\n    if (!def || def.type !== 'VARIANT' || !Array.isArray(def.variantOptions)) continue;\n    const k = rawKey.split('#')[0];\n    axes[k] = axes[k] || {};\n    for (const opt of def.variantOptions) axes[k][opt] = true;\n  }\n  for (const child of (node.children || [])) {\n    if (!child.name || child.name.indexOf('=') === -1) continue;\n    for (const pair of child.name.split(',')) {\n      const idx = pair.indexOf('=');\n      if (idx === -1) continue;\n      const k = pair.slice(0, idx).trim();\n      const val = pair.slice(idx + 1).trim();\n      if (!k || !val) continue;\n      axes[k] = axes[k] || {};\n      axes[k][val] = true;\n    }\n  }\n  const out = {};\n  for (const [k, seen] of Object.entries(axes)) out[k] = Object.keys(seen);\n  return Object.keys(out).length ? out : undefined;\n}\n\n// --- 转换函数 ---\nfunction transformNode(node, currentDepth, maxDepth, textOnlyMode) {\n  if (!node) return null;\n\n  const result = {\n    id: node.id,\n    name: node.name || '',\n    type: node.type || 'UNKNOWN',\n  };\n  // visible 绝大多数为 true，是默认值。只在反常（隐藏）时输出，省掉每个节点的固定开销。\n  if (node.visible === false) result.hidden = true;\n\n  if (node.type === 'TEXT') {\n    result.characters = node.characters || '';\n  }\n\n  if (node.type === 'INSTANCE' && node.componentId) {\n    result.component_id = node.componentId;\n  }\n\n  if (node.type === 'COMPONENT_SET' || node.type === 'COMPONENT') {\n    const v = extractVariants(node);\n    if (v) result.variants = v;   // 空对象整个字段不输出，不占噪音\n  }\n\n  // 像素尺寸实测占输出 34% 的体积，但写测试用例几乎用不到，默认不输出。\n  // 需要看间距/尺寸时显式传 include_layout=true。\n  // layout_mode（HORIZONTAL/VERTICAL）是理解结构的信息，不是尺寸噪音，故始终保留。\n  if (includeLayout && node.absoluteBoundingBox) {\n    result.layout = {\n      width: Math.round(node.absoluteBoundingBox.width),\n      height: Math.round(node.absoluteBoundingBox.height),\n    };\n  }\n  if (node.layoutMode && node.layoutMode !== 'NONE') {\n    result.layout_mode = node.layoutMode;\n  }\n\n  if (node.children && node.children.length > 0) {\n    if (currentDepth < maxDepth) {\n      const children = node.children\n        .map(child => transformNode(child, currentDepth + 1, maxDepth, textOnlyMode))\n        .filter(Boolean);\n      if (children.length > 0) {\n        result.children = children;\n      }\n      result.children_count = node.children.length;\n    } else {\n      result.children_count = node.children.length;\n    }\n  }\n\n  if (textOnlyMode && node.type !== 'TEXT') {\n    if (!result.children || result.children.length === 0) {\n      return null;\n    }\n  }\n\n  return result;\n}\n\n// --- 计数 ---\nfunction countNodes(node) {\n  if (!node) return 0;\n  let count = 1;\n  if (node.children) {\n    for (const child of node.children) {\n      count += countNodes(child);\n    }\n  }\n  return count;\n}\n\n// --- 主逻辑 ---\nconst nodesMap = input.nodes || {};\nconst pageId = params.page_id;\nconst pageData = nodesMap[pageId];\n\nif (!pageData || !pageData.document) {\n  return [{ json: { error: `Page node ${pageId} not found`, nodes: [] } }];\n}\n\nconst rootNode = pageData.document;\nconst transformed = transformNode(rootNode, 0, depth, textOnly);\nconst nodes = transformed ? (transformed.children || []) : [];\nconst totalCount = countNodes(rootNode) - 1; // 减去 page 本身\n\nreturn [{\n  json: {\n    page_name: rootNode.name || '',\n    page_id: pageId,\n    nodes,\n    total_count: totalCount,\n    depth_used: depth,\n    text_only: textOnly,\n  }\n}];\n"
+      },
+      "id": "preprocess",
+      "name": "Preprocess Nodes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "/**\n * 通用过滤 + 输出预算 Code Node — 所有 figma workflow 的最后一步\n *\n * 输入: 上游预处理结果（含 nodes / components / threads 之一）\n * 输出: 过滤 + 按 token 预算切片后的结果，附续取信息\n *\n * 为什么不用「最多 N 条」：\n *   旧实现是 MAX_RESULTS=200 的固定条数上限。条数和 token 不成比例 ——\n *   200 个浅层节点可能只有 3k token，而 200 条中文评论轻松超 20k。\n *   所以这里改成按 token 预算切，条数不设限。\n *\n * 为什么要 CJK 感知：\n *   英文 JSON 大约 4 字符/token，中文大约 1.5 字符/token，差 2.6 倍。\n *   评论正文是中文为主，用固定「字符数/4」估算会严重低估，切完照样超预算。\n *\n * 截断语义：不静默丢弃。超预算时返回 truncated=true + next_offset，\n * 并在 hint 里用中文写清怎么续取 —— 和 qa_experience_read 的翻页语义保持一致。\n * 切片边界永远落在完整条目（完整话题 / 完整顶层子树）上，不切碎结构。\n */\n\n// MCP 单次响应上限 25000 token，留 20% 余量给外层包装和 hint 文本\nconst TOKEN_BUDGET = 20000;\n\nconst input = $input.first().json;\nconst params = $('When Executed by Another Workflow').first().json;\nconst filterCode = params.filter_code || '';\n\nfunction asInt(v, dflt, min, max) {\n  const n = parseInt(v, 10);\n  if (Number.isNaN(n)) return dflt;\n  return Math.min(Math.max(n, min), max);\n}\nconst offset = asInt(params.offset, 0, 0, 1000000);\n\n// CJK 感知的 token 估算：CJK 约 1.5 字符/token，其余约 4 字符/token\nfunction estimateTokens(str) {\n  if (!str) return 0;\n  let cjk = 0;\n  for (const ch of str) {\n    const c = ch.codePointAt(0);\n    if ((c >= 0x4e00 && c <= 0x9fff) || (c >= 0x3040 && c <= 0x30ff) ||\n        (c >= 0xac00 && c <= 0xd7af) || (c >= 0xf900 && c <= 0xfaff)) cjk++;\n  }\n  const other = str.length - cjk;\n  return Math.ceil(cjk / 1.5 + other / 4);\n}\n\n// --- 确定要处理哪个数组 ---\nlet data, varName, outputKey;\nif (Array.isArray(input.nodes)) {\n  data = input.nodes; varName = 'nodes'; outputKey = 'nodes';\n} else if (Array.isArray(input.components)) {\n  data = input.components; varName = 'components'; outputKey = 'components';\n} else if (Array.isArray(input.threads)) {\n  // filter_code 里变量名沿用 comments，对 agent 更直观\n  data = input.threads; varName = 'comments'; outputKey = 'threads';\n} else {\n  return [{ json: input }];\n}\n\n// --- 执行 agent 传入的过滤 ---\nlet filtered = data;\nlet filterError = null;\nif (filterCode) {\n  try {\n    const fn = new Function(varName, `return (${filterCode})`);\n    const r = fn(data);\n    if (!Array.isArray(r)) {\n      filterError = 'filter_code 必须返回数组';\n      filtered = [];\n    } else {\n      filtered = r;\n    }\n  } catch (e) {\n    filterError = `filter_code 执行出错: ${e.message}`;\n    filtered = [];\n  }\n}\n\nconst total = filtered.length;\nconst windowed = filtered.slice(offset);\n\n// --- 按 token 预算逐条累加，切在完整条目边界 ---\nconst picked = [];\nlet used = 0;\nlet truncated = false;\nfor (const item of windowed) {\n  const cost = estimateTokens(JSON.stringify(item));\n  if (picked.length > 0 && used + cost > TOKEN_BUDGET) {\n    truncated = true;\n    break;\n  }\n  picked.push(item);\n  used += cost;\n  // 单条就超预算：已收下它保证有进展，但立即停下\n  if (used > TOKEN_BUDGET) {\n    truncated = windowed.length > picked.length;\n    break;\n  }\n}\n\n// --- 组装输出 ---\nconst output = {};\nfor (const [k, v] of Object.entries(input)) {\n  if (k !== outputKey) output[k] = v;\n}\noutput[outputKey] = picked;\noutput.returned = picked.length;\noutput.total = total;\n\nif (offset > 0) output.offset = offset;\nif (filterError) output.filter_error = filterError;\n\nif (truncated) {\n  const nextOffset = offset + picked.length;\n  output.truncated = true;\n  output.next_offset = nextOffset;\n  output.hint =\n    `输出达 token 预算，本次返回第 ${offset + 1}-${nextOffset} 条，共 ${total} 条。` +\n    `把 offset=${nextOffset} 传回本工具可续取剩余部分；` +\n    `或用 filter_code 收窄范围以减少无关内容。`;\n}\n\nreturn [{ json: output }];\n"
+      },
+      "id": "filter",
+      "name": "Apply Filter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Fetch Page Nodes": {
+      "main": [
+        [
+          {
+            "node": "Preprocess Nodes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preprocess Nodes": {
+      "main": [
+        [
+          {
+            "node": "Apply Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Fetch Page Nodes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": []
+}
