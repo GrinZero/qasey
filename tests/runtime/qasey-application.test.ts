@@ -24,5 +24,11 @@ describe("Qasey application access policy", () => {
     ]);
     expect(application.access.agents["qasey-main"]?.audiences).not.toContain("api");
     expect(application.access.agents["qasey-main"]?.audiences).not.toContain("channel");
+    expect(application.access.agents["qasey-intent-router"]?.audiences).toEqual([
+      "admin-ui",
+      "service",
+    ]);
+    expect(application.access.agents["qasey-intent-router"]?.audiences).not.toContain("api");
+    expect(application.access.agents["qasey-intent-router"]?.audiences).not.toContain("channel");
   });
 });

@@ -43,6 +43,6 @@ COPY .env .env.testing .env.devops ./
 COPY ci ./ci
 RUN corepack enable && git --version
 RUN chown pwuser:pwuser /app
-USER pwuser
+USER 1001
 EXPOSE 4111
 CMD ["sh", "ci/start.sh", "api"]

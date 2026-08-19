@@ -5,6 +5,7 @@ import { conversationScope } from "../../platform/context/conversation-scope.ts"
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../../platform/context/schema.ts";
 import { config } from "../../mastra/runtime.ts";
 import { runQaseyTaskWorkflow } from "../../mastra/qasey-task-workflow.ts";
+import { slackPhaseMessage } from "./slack-progress.ts";
 
 type NativeMessage = Parameters<ChannelHandler>[1];
 type NativeThread = Parameters<ChannelHandler>[0];
@@ -68,8 +69,8 @@ function createQaseyChannels(): ChannelConfig | undefined {
         requestContext,
         events: {
           onPhase: async ({ phase }) => {
-            if (phase === "routing") await thread.post("正在识别任务类型并准备所需能力…");
-            if (phase === "workflow") await thread.post("分析计划已冻结，正在执行并回查外部变更…");
+            const status = slackPhaseMessage(phase);
+            if (status) await thread.post(status);
           },
           onAgentProgress: async report => {
             await thread.post({ markdown: `*${report.title}*\n${report.detail}${report.next ? `\n下一步：${report.next}` : ""}` });

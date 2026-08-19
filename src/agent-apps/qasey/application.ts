@@ -51,7 +51,7 @@ export async function createQaseyApplication(
         // routing and deterministic completion checks cannot be bypassed.
         // The OAuth/RBAC-protected Studio remains available for inspection.
         "qasey-main": { permission: "qasey.agent.execute", audiences: ["admin-ui", "service"] },
-        "qasey-intent-router": { permission: "qasey.intent.route", audiences: ["service"] },
+        "qasey-intent-router": { permission: "qasey.intent.route", audiences: ["admin-ui", "service"] },
       },
       workflows: {
         "qasey-task": { permission: "qasey.task.execute", audiences: ["service"] },
