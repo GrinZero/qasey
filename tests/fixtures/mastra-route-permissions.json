@@ -3,6 +3,8 @@
   { "method": "POST", "path": "/studio/api/agents/alpha-main/stream", "type": "agent", "id": "alpha-main", "action": "execute" },
   { "method": "POST", "path": "/studio/api/workflows/alpha-job/start", "type": "workflow", "id": "alpha-job", "action": "execute" },
   { "method": "POST", "path": "/studio/api/workflows/alpha-job/resume", "type": "workflow", "id": "alpha-job", "action": "execute" },
+  { "method": "GET", "path": "/studio/api/workflows/run-counts", "type": "platform", "id": "workflow-catalog", "action": "read" },
+  { "method": "POST", "path": "/studio/api/workflows/events", "type": "platform", "id": "workflow-events", "action": "execute" },
   { "method": "GET", "path": "/studio/api/scorers/alpha-quality", "type": "scorer", "id": "alpha-quality", "action": "read" },
   { "method": "POST", "path": "/studio/api/agents/alpha-main/channels/slack/webhook", "type": "channel", "id": "slack", "action": "receive" },
   { "method": "GET", "path": "/studio/api/agents", "type": "platform", "id": "catalog", "action": "list" },

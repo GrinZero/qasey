@@ -135,6 +135,36 @@ describe("permission route coverage", () => {
     }
   });
 
+  it("uses the workflow application scope for collection run counts", async () => {
+    const middleware = createAuthorizationMiddleware({
+      catalog: [{ ...entries[1]!, audiences: ["admin-ui"] }],
+      permissions: { authorize: vi.fn(async () => true) } as unknown as PermissionService,
+      audit: { write: vi.fn(async () => undefined) },
+      studioUiEnabled: true,
+      resolvePrincipal: () => OAuthPrincipalSchema.parse({
+        subjectId: "user-1", tenantId: "tenant-1", roles: ["user"], audience: "admin-ui",
+      }),
+    });
+    const requestContext = new RequestContext();
+    const next = vi.fn(async () => undefined);
+    const raw = new Request("http://localhost:4111/studio/api/workflows/run-counts");
+
+    await (middleware as Exclude<typeof middleware, { path: string }>)({
+      req: {
+        path: new URL(raw.url).pathname,
+        method: raw.method,
+        raw,
+        header: (name: string) => name.toLowerCase() === "x-mastra-client-type" ? "studio" : undefined,
+      },
+      get: (key: string) => key === "requestContext" ? requestContext : undefined,
+      json: vi.fn(),
+    } as never, next);
+
+    expect(next).toHaveBeenCalledOnce();
+    expect(requestContext.get("applicationId")).toBe("alpha");
+    expect(requestContext.get(MASTRA_RESOURCE_ID_KEY)).toBe("alpha:tenant-1:user-1");
+  });
+
   it("classifies the pinned Mastra 1.59 route surface and denies unknown routes", () => {
     const catalog = new Map(entries.map(entry => [`${entry.resourceType}:${entry.resourceId}`, entry]));
     for (const expected of manifest) {

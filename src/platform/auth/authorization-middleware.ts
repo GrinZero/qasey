@@ -80,13 +80,22 @@ export function isMastraStudioRequest(request: {
   }
 }
 
-async function applicationIdForConversationScope(
+async function applicationIdForRequestScope(
   request: { raw: Request; path: string },
   fallback: string,
   catalog: ReadonlyMap<string, CatalogEntry>,
 ): Promise<string> {
   const mastraPath = stripMastraApiPrefix(request.path);
-  if (!mastraPath || !/^\/memory(?:\/|$)/u.test(mastraPath)) return fallback;
+  if (!mastraPath) return fallback;
+  if (/^\/workflows\/run-counts\/?$/u.test(mastraPath)) {
+    const applicationIds = new Set(
+      [...catalog.values()]
+        .filter(entry => entry.resourceType === "workflow")
+        .map(entry => entry.applicationId),
+    );
+    return applicationIds.size === 1 ? [...applicationIds][0]! : fallback;
+  }
+  if (!/^\/memory(?:\/|$)/u.test(mastraPath)) return fallback;
 
   const url = new URL(request.raw.url);
   let agentId = url.searchParams.get("agentId");
@@ -141,7 +150,7 @@ export function createAuthorizationMiddleware(options: AuthorizationMiddlewareOp
     const allowed = await options.permissions.authorize({ principal, ...resource });
     await options.audit.write(auditRecord(requestId, resource, principal, allowed ? "allow" : "deny", allowed ? "permission_granted" : "permission_denied"));
     if (!allowed) return c.json({ error: "not_found", requestId }, 404);
-    const scopeApplicationId = await applicationIdForConversationScope(c.req, resource.applicationId, catalog);
+    const scopeApplicationId = await applicationIdForRequestScope(c.req, resource.applicationId, catalog);
     requestContext.set("platform-principal", principal);
     requestContext.set("requestId", requestId);
     requestContext.set("applicationId", scopeApplicationId);
@@ -201,6 +210,18 @@ export function classifyRuntimeRoute(
     return {
       applicationId: "platform", resourceType: "platform", resourceId: "runtime",
       action: actionFor(method, path), permission: "platform.runtime.inspect", audiences: ["admin-ui", "service"],
+    };
+  }
+  if (mastraPath && /^\/workflows\/run-counts\/?$/u.test(mastraPath)) {
+    return {
+      applicationId: "platform", resourceType: "platform", resourceId: "workflow-catalog",
+      action: "read", permission: "platform.catalog.read", audiences: ["admin-ui", "service"],
+    };
+  }
+  if (mastraPath && /^\/workflows\/events\/?$/u.test(mastraPath)) {
+    return {
+      applicationId: "platform", resourceType: "platform", resourceId: "workflow-events",
+      action: "execute", permission: "platform.workflow-events.receive", audiences: ["service"],
     };
   }
   const primitive = mastraPath ? /^\/(agents|workflows|scorers)\/([^/]+)/u.exec(mastraPath) : null;
