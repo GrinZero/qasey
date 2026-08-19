@@ -3,8 +3,8 @@
 > 历史说明：本文记录旧 n8n 迁移方案。当前运行时、入口和部署约定以 [`ARCHITECTURE.md`](../ARCHITECTURE.md) 与 [`production-runbook.md`](production-runbook.md) 为准；旧 queue/outbox/worker 已删除。
 >
 > 状态：迁移决策参考  
-> 对比日期：2026-08-17  
-> n8n baseline：[Qasey workflow](https://n8n.devops.moego.pet/workflow/Vw8YbsOWTmqlNR3o)（workflow ID `Vw8YbsOWTmqlNR3o`，active version `98062ed9-03b4-450b-a4e9-5978ff60b61b`）
+> 对比日期：2026-08-19
+> n8n baseline：[Qasey workflow](https://n8n.devops.moego.pet/workflow/Vw8YbsOWTmqlNR3o)（workflow ID `Vw8YbsOWTmqlNR3o`，active version `656c0b99-84e9-4b5b-b670-44a686d2cf51`）
 
 ## 1. 结论
 
@@ -26,7 +26,7 @@ n8n 版是一个以 Agent 为中心的可视化单体工作流：入口、上下
 
 n8n baseline 当前包含：
 
-- 63 个节点；
+- 62 个节点；
 - 3 个入口：n8n Chat、Slack Trigger、Jira Webhook；
 - 1 个主 Agent、1 个只读调查 SubAgent；
 - 32 个 Agent tool/tool wrapper；
@@ -118,7 +118,7 @@ flowchart LR
 | 执行生命周期 | 一次 n8n execution 内同步完成 | 持久队列异步执行，支持 lease、heartbeat、超时和 worker 扩容 |
 | 幂等与恢复 | 依赖 trigger 行为、n8n execution 和下游接口 | `TriggerEnvelope.idempotencyKey`、Postgres queue、任务重试和 notification outbox |
 | 工具授权 | 工具大多持续暴露，依赖 prompt 告诉 Agent 何时只读 | 按 channel、intent、effect 动态裁剪；delete 永不暴露；审批工具保留在 Mastra 层 |
-| 意图提示词 | 在主 Agent prompt 中按 intent 描述工作方式和写后回查要求 | Prompt v8 按 12 类 intent 注入“目标、执行协议、完成条件、输出合同”，并叠加 depth、relation 和 channel 模块；不注入日期等易变值，保持缓存稳定 |
+| 意图提示词 | 在主 Agent prompt 中按 intent 描述工作方式和写后回查要求 | Prompt v9 按 12 类 intent 注入“目标、执行协议、完成条件、输出合同”，并叠加 depth、relation、channel、真实进度边界和逐用例证据模块；不注入日期等易变值，保持缓存稳定 |
 | 完成判定 | Agent 输出和 prompt 约定为主 | Controller 校验 finish reason、未完成 tool call、最终答案及 MeterSphere completion receipt |
 | 证据管理 | 工具结果直接进入上下文，重复调用主要靠 Agent 避免 | run 级 single-flight、source 复用、artifact 化、错误缓存和无进展熔断 |
 | Memory | Postgres Chat Memory，加最近 6 条消息用于路由 | Working Memory + Observational Memory + Reflector；Memory 与 Evidence Ledger 分工 |
@@ -186,7 +186,7 @@ Runner 的退出码和断言决定通过与否，模型和 Cua 都不能自行�
 
 ### 5.6 意图不再只是路由标签
 
-Prompt v8 为 12 类意图分别定义了目标、执行协议、完成条件和输出合同，包括 QA 快问/评审、用例新建/维护、经验读写及 E2E generate/rerun/repair/status。`depth` 会实际控制 quick、standard、deep 的取证范围，`relation` 会控制新任务与追问如何继承历史；两者不再只是运行时上下文字段。
+Prompt v9 为 12 类意图分别定义了目标、执行协议、完成条件和输出合同，包括 QA 快问/评审、用例新建/维护、经验读写及 E2E generate/rerun/repair/status。`depth` 会实际控制 quick、standard、deep 的取证范围，`relation` 会控制新任务与追问如何继承历史；两者不再只是运行时上下文字段。
 
 这补齐了旧代码版相对 n8n 的明显不足：过去虽然会把 intent、depth 和 relation 写入系统提示词，但 intent 只有一句宽泛策略，depth/relation 没有对应行为模块。现在 Agent 的软行为约束已经按意图细化；写权限、审批、完成判定仍由代码控制面硬约束，避免把安全性重新寄托在 prompt 上。
 
@@ -218,7 +218,7 @@ MeterSphere update 有稳定 case ID 和 fresh read 证明；create 仍需要下
 
 n8n 可以直接在 UI 查看节点数据、修改表达式、切换 credential 和重新执行。代码版的行为变更通常需要开发、Review、CI、镜像构建和部署；这提高了安全性和可审计性，也降低了非开发人员自主修改流程的速度。
 
-### 6.7 Prompt v8 仍需要真实任务评测
+### 6.7 Prompt v9 仍需要真实任务评测
 
 针对 12 类意图的契约测试只能证明对应模块被正确组装，不能证明模型在所有真实输入上都会选到最优证据、稳定遵循输出合同或优于 n8n。上线前仍应使用同一批代表性请求做 shadow 对比，分别评估路由准确率、无效工具调用、证据质量、任务完成率、token 和耗时，并把失败样本固化为回归集。
 
@@ -327,7 +327,7 @@ workflow 已有 63 个节点但没有 node groups。`Search for messages in Slac
 - Tool policy：[`packages/domain/src/tool-policy.ts`](../packages/domain/src/tool-policy.ts)
 - MCP allowlist 与 route/channel filtering：[`packages/adapters/src/mcp.ts`](../packages/adapters/src/mcp.ts)
 - Evidence Ledger：[`packages/domain/src/evidence-ledger.ts`](../packages/domain/src/evidence-ledger.ts)
-- Prompt v8 与意图合同：[`packages/domain/src/prompt.ts`](../packages/domain/src/prompt.ts)
+- Prompt v9 与意图合同：[`packages/domain/src/prompt.ts`](../packages/domain/src/prompt.ts)
 - Prompt 组装测试：[`tests/domain/prompt.test.ts`](../tests/domain/prompt.test.ts)
 - Agent 完成判定：[`src/mastra/service.ts`](../src/mastra/service.ts)
 - E2E lifecycle：[`src/mastra/e2e-workflow.ts`](../src/mastra/e2e-workflow.ts)

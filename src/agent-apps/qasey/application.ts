@@ -47,22 +47,19 @@ export async function createQaseyApplication(
     scorers: qaseyEvalScorers,
     access: {
       agents: {
-        // Public API and channel callers enter through qasey-task so intent
-        // routing and deterministic completion checks cannot be bypassed.
-        // The OAuth/RBAC-protected Studio remains available for inspection.
-        "qasey-main": { permission: "qasey.agent.execute", audiences: ["admin-ui", "service"] },
-        "qasey-intent-router": { permission: "qasey.intent.route", audiences: ["admin-ui", "service"] },
+        // Authenticated UI, API, and service callers share the same RBAC gate.
+        // Signed channel ingress remains isolated to its dedicated adapter.
+        "qasey-main": { permission: "qasey.agent.execute", audiences: ["admin-ui", "api", "service"] },
+        "qasey-intent-router": { permission: "qasey.intent.route", audiences: ["admin-ui", "api", "service"] },
       },
       workflows: {
-        "qasey-task": { permission: "qasey.task.execute", audiences: ["service"] },
-        // User lifecycle mutations go through owner-scoped domain routes. Keeping
-        // the native workflow service-only prevents resume from bypassing QA RBAC.
-        "qasey-e2e-lifecycle": { permission: "qasey.e2e.execute", audiences: ["service"] },
-        "qasey-metersphere-case-operation": { permission: "qasey.case-workflow.execute", audiences: ["service"] },
+        "qasey-task": { permission: "qasey.task.execute", audiences: ["admin-ui", "api", "service"] },
+        "qasey-e2e-lifecycle": { permission: "qasey.e2e.execute", audiences: ["admin-ui", "api", "service"] },
+        "qasey-metersphere-case-operation": { permission: "qasey.case-workflow.execute", audiences: ["admin-ui", "api", "service"] },
       },
       scorers: Object.fromEntries(Object.keys(qaseyEvalScorers).map(id => [
         id,
-        { permission: "qasey.scorers.read", audiences: ["admin-ui", "service"] },
+        { permission: "qasey.scorers.read", audiences: ["admin-ui", "api", "service"] },
       ])),
       channels: {
         slack: { permission: "qasey.channel.receive", audiences: ["channel"] },

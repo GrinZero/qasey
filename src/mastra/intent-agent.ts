@@ -3,7 +3,8 @@ import type { TracingContext } from "@mastra/core/observability";
 import type { RequestContext } from "@mastra/core/request-context";
 import type { IntentRoute, QaseyRequestContext } from "../../packages/contracts/src/index.ts";
 import { IntentRouteSchema } from "../../packages/contracts/src/index.ts";
-import { classifyIntentDeterministically, sanitizeIntentRoute } from "../../packages/domain/src/index.ts";
+import { fallbackIntentRoute, sanitizeIntentRoute } from "../../packages/domain/src/index.ts";
+import { logInfo } from "../../packages/adapters/src/index.ts";
 import { intentResponsesModel } from "./models.ts";
 import { PlatformRequestContextSchema } from "../platform/context/schema.ts";
 
@@ -13,6 +14,15 @@ export const intentRouterAgent = new Agent({
   model: intentResponsesModel,
   requestContextSchema: PlatformRequestContextSchema,
   instructions: `Classify Qasey requests. Never answer the user.
+Intent definitions:
+- qa_quick_query: a focused QA question that needs an answer but no comprehensive review or persistent write.
+- qa_review: comprehensive requirement, risk, scope, or coverage analysis.
+- case_create_full: create, design, rebuild, or write a complete test-case set to MeterSphere.
+- case_maintain_fast: update, supplement, retry, or repair an existing MeterSphere case set.
+- experience_read / experience_write: read or explicitly persist reusable QA experience.
+- e2e_generate / e2e_rerun / e2e_repair / e2e_status: generate, rerun, repair, or inspect E2E automation.
+- meta_or_out_of_scope: capability/help requests or requests outside Qasey's scope.
+- unknown: genuinely ambiguous requests, especially ambiguous writes.
 Relation and business intent are separate. Explicit persistent action dominates read-only wording.
 For context-dependent follow-ups, inherit only an unresolved substantive goal from recent history.
 If uncertain about a write, use unknown and writeTarget none. Return only structured data.`,
@@ -25,9 +35,7 @@ export async function routeIntent(
   agent: Agent<any, any, any, any, any> = intentRouterAgent,
   observability: { requestContext?: RequestContext<any>; tracingContext?: TracingContext } = {},
 ): Promise<IntentRoute> {
-  if (!process.env.OPENAI_API_KEY) {
-    return classifyIntentDeterministically(context.chatInput, recentHistory);
-  }
+  const startedAt = Date.now();
   try {
     const result = await agent.generate([
       `channel: ${context.channel}`,
@@ -46,11 +54,29 @@ export async function routeIntent(
         providerOptions: { openai: { reasoningEffort: "low" } },
       },
     });
-    return sanitizeIntentRoute(result.object);
+    const route = sanitizeIntentRoute(result.object);
+    logInfo("intent.routing.completed", {
+      requestId: context.requestId,
+      mode: "model",
+      intent: route.intent,
+      confidence: route.confidence,
+      durationMs: Date.now() - startedAt,
+    });
+    return route;
   } catch (error) {
     if (abortSignal?.aborted) {
       throw abortSignal.reason instanceof Error ? abortSignal.reason : error;
     }
-    return classifyIntentDeterministically(context.chatInput, recentHistory);
+    const route = fallbackIntentRoute(error instanceof Error
+      ? `Intent model failed: ${error.message}`
+      : "Intent model failed");
+    logInfo("intent.routing.completed", {
+      requestId: context.requestId,
+      mode: "model_fallback",
+      intent: route.intent,
+      confidence: route.confidence,
+      durationMs: Date.now() - startedAt,
+    });
+    return route;
   }
 }

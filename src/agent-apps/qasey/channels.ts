@@ -5,7 +5,15 @@ import { conversationScope } from "../../platform/context/conversation-scope.ts"
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../../platform/context/schema.ts";
 import { config } from "../../mastra/runtime.ts";
 import { runQaseyTaskWorkflow } from "../../mastra/qasey-task-workflow.ts";
-import { slackPhaseMessage } from "./slack-progress.ts";
+import { logError, logInfo } from "../../../packages/adapters/src/index.ts";
+import { slackCaseCompletionCards } from "./slack-case-delivery.ts";
+import {
+  markSlackRequestFinished,
+  markSlackRequestStarted,
+  showSlackStatus,
+  slackPhaseStatus,
+  slackToolStatus,
+} from "./slack-progress.ts";
 
 type NativeMessage = Parameters<ChannelHandler>[1];
 type NativeThread = Parameters<ChannelHandler>[0];
@@ -64,23 +72,82 @@ function createQaseyChannels(): ChannelConfig | undefined {
         }];
       }),
     };
+    const sourceMessage = thread.createSentMessageFromMessage(message);
+    const receivedAt = Date.now();
+    let firstToolAt: number | undefined;
+    let firstProgressAt: number | undefined;
+    let lastStatus: string | undefined;
+    const updateStatus = async (status: string | undefined) => {
+      if (!status || status === lastStatus) return;
+      lastStatus = status;
+      await showSlackStatus(thread, status);
+    };
+    await markSlackRequestStarted(sourceMessage);
+    let outcome: "success" | "failure" = "failure";
     try {
       const result = await runQaseyTaskWorkflow(mastra, context, {
         requestContext,
         events: {
-          onPhase: async ({ phase }) => {
-            const status = slackPhaseMessage(phase);
-            if (status) await thread.post(status);
+          onPhase: async ({ runId, phase }) => {
+            await updateStatus(slackPhaseStatus(phase));
+            logInfo("slack.request.phase", {
+              requestId: context.requestId,
+              runId,
+              phase,
+              elapsedMs: Date.now() - receivedAt,
+            });
+          },
+          onToolStart: async ({ runId, toolName }) => {
+            const first = firstToolAt === undefined;
+            firstToolAt ??= Date.now();
+            await updateStatus(slackToolStatus(toolName));
+            logInfo("slack.request.tool_started", {
+              requestId: context.requestId,
+              runId,
+              toolName,
+              elapsedMs: Date.now() - receivedAt,
+              first,
+            });
           },
           onAgentProgress: async report => {
+            firstProgressAt ??= Date.now();
             await thread.post({ markdown: `*${report.title}*\n${report.detail}${report.next ? `\n下一步：${report.next}` : ""}` });
+            logInfo("slack.request.progress_delivered", {
+              requestId: context.requestId,
+              milestone: report.milestone,
+              sequence: report.sequence,
+              elapsedMs: Date.now() - receivedAt,
+            });
           },
         },
       });
-      await thread.post({ markdown: result.text });
+      const completionCards = slackCaseCompletionCards(result.completionReceipt, {
+        baseUrl: config.METERSPHERE_BASE_URL,
+        projectId: config.METERSPHERE_PROJECT_ID,
+      });
+      if (completionCards.length > 0) {
+        try {
+          for (const card of completionCards) await thread.post(card);
+        } catch (error) {
+          logError("slack.case_table_delivery_failed", error, { requestId: context.requestId });
+          await thread.post({ markdown: result.text });
+        }
+      } else {
+        await thread.post({ markdown: result.text });
+      }
+      outcome = "success";
     } catch (error) {
       const detail = config.NODE_ENV === "production" ? "请稍后重试，或联系维护者并提供当前消息链接。" : error instanceof Error ? error.message : String(error);
       await thread.post(`Qasey 未能完成这次任务。${detail}`);
+    } finally {
+      await markSlackRequestFinished(sourceMessage, outcome);
+      logInfo("slack.request.finished", {
+        requestId: context.requestId,
+        outcome,
+        durationMs: Date.now() - receivedAt,
+        timeToFirstToolMs: firstToolAt ? firstToolAt - receivedAt : undefined,
+        timeToFirstProgressMs: firstProgressAt ? firstProgressAt - receivedAt : undefined,
+      });
     }
   };
   return {

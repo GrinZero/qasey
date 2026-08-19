@@ -261,6 +261,9 @@ importers:
       '@slack/web-api':
         specifier: ^7.10.0
         version: 7.19.0(debug@4.4.3(supports-color@7.2.0))(supports-color@7.2.0)
+      chat:
+        specifier: 4.37.0
+        version: 4.37.0(supports-color@7.2.0)(zod@4.4.3)
       dd-trace:
         specifier: 5.117.0
         version: 5.117.0(@openfeature/server-sdk@1.23.0(@openfeature/core@1.12.0))

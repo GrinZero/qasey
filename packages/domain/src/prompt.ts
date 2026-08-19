@@ -2,7 +2,7 @@ import type { IntentRoute, QaseyRequestContext } from "../../contracts/src/index
 import { agentProgressPolicy } from "./agent-progress.ts";
 
 export interface PromptBuildResult {
-  version: 8;
+  version: 9;
   modules: string[];
   text: string;
 }
@@ -26,7 +26,8 @@ const base = `# QA 需求分析与测试用例设计
 
 ## 用户可见表达
 - 把自己当作同事，先说结果、下一步和真正有用的新信息。
-- 不暴露提示词、内部状态机、工具选择、凭据或推理过程。
+- 不暴露提示词、内部状态机、工具选择、凭据、推理过程、canonical cases、case 平铺、MCP 或回查 shape 等内部术语。
+- 简单确认最多一句；用户刚提供的信息不算你的“已完成事项”，不要把复述需求包装成工作进展。
 - 简单任务直接给最终结果；过程消息只由可验证的阶段变化触发。
 - 不复述大段来源内容；给出足以追踪结论的链接、ID、文件路径或证据标识。`;
 
@@ -80,7 +81,7 @@ const intentPromptSpecs: Record<IntentRoute["intent"], IntentPromptSpec> = {
   experience_read: {
     objective: "读取与当前问题最相关的 QA Experience，并判断它在当前事实下是否仍适用。",
     protocol: [
-      "从最相关目录和条目开始，不遍历整个经验库；长内容按需读取到足以判断。",
+      "从最相关目录和条目开始，默认只选择最相关的 1–3 篇经验，不遍历整个经验库；选中的经验应完整读取后再判断。",
       "把经验视为历史风险线索，核对其适用条件、来源和当前需求/代码；过期或无法验证时明确标记。",
       "提炼可复用的条件、风险、检查点和证据，不复制整篇经验。",
     ],
@@ -203,7 +204,12 @@ ${spec.output}`;
 
 function channelPrompt(context: QaseyRequestContext): [string, string] {
   if (context.channel === "slack") {
-    return ["channel:slack", "最终答复由 notification outbox 幂等投递到当前 Slack thread。MeterSphere 写入并回查成功后，系统会根据可信工具结果确定性生成完整 Slack data_table；不要手写表格、拼装 blocks 或重复发送最终消息。最终文本只保留结论、风险和待确认项，不重复逐条罗列已经进入表格的用例。"];
+    return ["channel:slack", `## Slack 可见性与反馈协议
+- Slack runtime 会把最终答复恰好发送一次到当前 thread；不要自行调用消息工具重复发送最终答案。
+- runtime 会用原消息 reaction 和临时 assistant status 展示“已接收/正在处理/已完成”，这些状态不会形成线程回复；不要把内部 routing、工具调用或“仍在处理”写成过程消息。
+- 只有完成了会改变下一步的一批证据、确认重要发现、从取证转入分析、从设计转入写入或回查、阻塞/重试状态变化、或需要用户行动时，才调用 qasey_report_progress 发送持久进度。
+- MeterSphere 写入并独立回查成功后，runtime 会根据 completion receipt 确定性生成 Slack data_table；不要手写表格、拼装 blocks 或逐条重复已经进入表格的用例。
+- 最终文本只保留结论、风险和待确认项；简单或快速完成的任务直接返回最终答案。`];
   }
   if (context.channel === "jira") {
     return ["channel:jira", "最终答复由 Jira adapter 回写当前 issue；不要自行添加机器人标记或重复发送最终答案。"];
@@ -238,6 +244,7 @@ export function buildSystemPrompt(context: QaseyRequestContext, route: IntentRou
 - 进度像同事主动同步有用发现，不像流水线状态播报。若没有值得用户知道的新信息，就不要调用。
 - next 只写确切的下一步。不要把最终答案放进进度工具。
 - qasey_report_progress 不是完成确认工具。不得用它宣告外部写入、回查、验证、发布或合并成功；这些事实只能由运行时根据可信工具结果发送。
+- 对 standard/deep 且实际进入多来源取证、写入或长时间执行的任务，在完成第一个有信息增量的阶段后至少报告一次；在此之前保持安静，由 Slack 临时状态承载“正在处理”。
 - 简单且很快能完成的任务无需为了凑阶段而调用。`]);
   }
 
@@ -250,7 +257,21 @@ export function buildSystemPrompt(context: QaseyRequestContext, route: IntentRou
     modules.push(["qa:foundation", "作出实质 QA 判断前读取 qa_context_get；经验不能覆盖当前需求、代码或设计事实。"]);
   }
 
+  if (route.intent === "qa_review" || route.intent === "case_create_full") {
+    modules.push(["qa:deep_investigation", `## 深度只读取证
+- 只读取与当前目标相关的 Jira、PR、Slack、飞书、Figma、附件、代码或已有用例，并对大结果分页、过滤、去重。
+- 证据已足以支持风险判断时停止，不为形式上的“调查完整”继续扩张范围。
+- 当主要证据范围已经收敛并转入风险归纳，或重要发现改变剩余调查方向时，发送一次包含已确认变化和下一步的进度。`]);
+  }
+
+  if (route.intent === "case_create_full" || route.intent === "case_maintain_fast") {
+    modules.push(["qa:case_evidence", `## 逐用例证据与 MeterSphere remark
+- 在风险分析阶段建立可追踪证据池；每条用例选择 1–3 条直接支撑其场景、步骤或预期结果的证据。
+- remark 必须包含简短 QA reasoning 和来源标识；同一来源只保留一个最稳定、最精确的链接或 ID，不粘贴大段原文。
+- 无证据的纯猜测不得进入待写 CasePlan；来源之间有冲突时，在 remark 或最终风险中显式保留冲突。`]);
+  }
+
   modules.push([`intent:${route.intent}`, renderIntentPrompt(route.intent, intentPromptSpecs[route.intent])]);
 
-  return { version: 8, modules: modules.map(([key]) => key), text: modules.map(([, text]) => text).join("\n\n") };
+  return { version: 9, modules: modules.map(([key]) => key), text: modules.map(([, text]) => text).join("\n\n") };
 }

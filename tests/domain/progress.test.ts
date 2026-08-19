@@ -83,7 +83,7 @@ describe("agent-driven progress", () => {
       attachments: [],
     };
     const review = buildSystemPrompt(context, route("qa_review"));
-    expect(review.version).toBe(8);
+    expect(review.version).toBe(9);
     expect(review.modules).toContain("progress:agent_reporter");
     expect(review.text).toContain("最多报告 2 次");
     expect(review.text).toContain("不要按“范围确认→证据核对→风险评审”逐阶段打卡");

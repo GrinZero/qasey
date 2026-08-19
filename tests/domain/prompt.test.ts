@@ -62,7 +62,7 @@ describe("intent-aware system prompt", () => {
     "builds the %s objective, protocol, completion condition, and output contract",
     (intent, expectedText) => {
       const result = buildSystemPrompt(context(), route(intent));
-      expect(result.version).toBe(8);
+      expect(result.version).toBe(9);
       expect(result.modules).toContain(`intent:${intent}`);
       expect(result.text).toContain(`## 当前意图：${intent}`);
       expect(result.text).toContain("### 目标");
@@ -104,9 +104,18 @@ describe("intent-aware system prompt", () => {
     expect(slack.text).not.toContain("当前日期");
     expect(slack.modules).toContain("channel:slack");
     expect(slack.text).toContain("最终用例表由系统依据可信回查结果交付");
+    expect(slack.text).toContain("由 Slack 临时状态承载“正在处理”");
 
     const jira = buildSystemPrompt(context("jira"), route("qa_review"));
     expect(jira.modules).toContain("channel:jira");
     expect(jira.text).toContain("最终答复由 Jira adapter 回写");
+  });
+
+  it("keeps the n8n evidence and progress boundaries in the case prompt", () => {
+    const result = buildSystemPrompt(context("slack"), route("case_create_full", "deep"));
+    expect(result.modules).toContain("qa:deep_investigation");
+    expect(result.modules).toContain("qa:case_evidence");
+    expect(result.text).toContain("每条用例选择 1–3 条直接支撑");
+    expect(result.text).toContain("完成第一个有信息增量的阶段后至少报告一次");
   });
 });
