@@ -9,7 +9,6 @@
     "node": ">=24"
   },
   "scripts": {
-    "predev": "pnpm admin-ui:build",
     "dev": "tsx scripts/dev.ts",
     "mcp:login": "tsx apps/cli/src/mcp-login.ts",
     "start": "node .mastra/output/index.mjs",
