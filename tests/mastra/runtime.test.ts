@@ -4,7 +4,7 @@ import { z } from "zod";
 import { describe, expect, it, vi } from "vitest";
 import type { IntentRoute, QaseyRequestContext } from "../../packages/contracts/src/index.ts";
 import { AgentProgressSession, EvidenceLedger } from "../../packages/domain/src/index.ts";
-import { createAgentProgressTool, getRuntimeContext, guardCaseMutationsForWorkflow, guardToolsWithEvidence, toolsForRequest } from "../../src/mastra/runtime.ts";
+import { createAgentProgressTool, getRuntimeContext, guardCaseMutationsForWorkflow, guardToolsWithEvidence, mcpCatalog, studioMcpPreviewEnabled, toolsForRequest } from "../../src/mastra/runtime.ts";
 
 describe("Qasey runtime context", () => {
   it("keeps missing context strict for production callers", () => {
@@ -24,6 +24,22 @@ describe("Qasey runtime context", () => {
       routerStatus: "fallback",
     });
     await expect(toolsForRequest()).rejects.toThrow("Qasey request context has not been initialized");
+  });
+
+  it("keeps Studio MCP discovery opt-in even when authenticated context is native", async () => {
+    const requestContext = new RequestContext();
+    requestContext.set("identity", { userId: "studio-user", tenantId: "tenant-1", roles: ["user"], service: false });
+    requestContext.set("requestId", "studio-request");
+    requestContext.set("sessionId", "studio-session");
+    requestContext.set("ingressSource", "mastra-studio");
+    const discover = vi.spyOn(mcpCatalog, "toolsFor");
+
+    const tools = await toolsForRequest(requestContext);
+
+    expect(studioMcpPreviewEnabled).toBe(false);
+    expect(discover).not.toHaveBeenCalled();
+    expect(tools).toHaveProperty("getCurrentTime");
+    discover.mockRestore();
   });
 
   it("rejects partial values injected under Qasey keys by a playground", () => {

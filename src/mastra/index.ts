@@ -29,6 +29,7 @@ import { LifecycleContainer } from "../platform/storage/lifecycle.ts";
 import { sanitizeTelemetry } from "../platform/observability/sanitize.ts";
 import { GoogleOidcService, type PlatformGoogleUser } from "../platform/auth/google-oidc.ts";
 import { MASTRA_API_PREFIX, MASTRA_STUDIO_BASE } from "../runtime/mastra-paths.ts";
+import { closeDevelopmentConnections } from "../platform/http/development-connections.ts";
 
 const googleOidc = new GoogleOidcService({
   ...(config.GOOGLE_CLIENT_ID ? { clientId: config.GOOGLE_CLIENT_ID } : {}),
@@ -184,62 +185,67 @@ const sharedRuntime = createSharedMastraConfig({
     workspace,
   },
   server,
-  middlewareFactory: catalog => createAuthorizationMiddleware({
-    catalog,
-    permissions: permissionService,
-    audit: auditLog,
-    // Studio is available in every environment; OAuth, RBAC, and audit remain
-    // the security boundary. High-risk Editor/MCP features stay separately gated.
-    studioUiEnabled: true,
-    resolvePrincipal: async (requestContext, request) => {
-      const user = await resolveRequestUser(requestContext, request, isGoogleUser, googleOidc);
-      if (user) {
-        const tenantId = user.hostedDomain ?? user.email?.split("@")[1];
-        if (!tenantId) return undefined;
-        const roles = ["user"];
-        if (user.email && bootstrapAdmins.has(user.email.toLowerCase())) roles.push("platform-admin");
-        if (permissionStore instanceof InMemoryPermissionStore) {
-          permissionStore.grant(
-            tenantId,
-            "user",
-            "platform.admin-ui.access",
-            "qasey.agent.execute",
-            "qasey.e2e.execute",
-            "qasey.runs.read",
-            "qasey.runs.write",
-            "qasey.runs.approve",
-          );
+  middlewareFactory: catalog => {
+    const authorization = createAuthorizationMiddleware({
+      catalog,
+      permissions: permissionService,
+      audit: auditLog,
+      // Studio is available in every environment; OAuth, RBAC, and audit remain
+      // the security boundary. High-risk Editor/MCP features stay separately gated.
+      studioUiEnabled: true,
+      resolvePrincipal: async (requestContext, request) => {
+        const user = await resolveRequestUser(requestContext, request, isGoogleUser, googleOidc);
+        if (user) {
+          const tenantId = user.hostedDomain ?? user.email?.split("@")[1];
+          if (!tenantId) return undefined;
+          const roles = ["user"];
+          if (user.email && bootstrapAdmins.has(user.email.toLowerCase())) roles.push("platform-admin");
+          if (permissionStore instanceof InMemoryPermissionStore) {
+            permissionStore.grant(
+              tenantId,
+              "user",
+              "platform.admin-ui.access",
+              "qasey.agent.execute",
+              "qasey.e2e.execute",
+              "qasey.runs.read",
+              "qasey.runs.write",
+              "qasey.runs.approve",
+            );
+          }
+          return mapOAuthPrincipal(user, {
+            subjectId: value => value.id,
+            tenantId: () => tenantId,
+            roles: () => roles,
+            email: value => value.email,
+            audience: request.path.startsWith("/admin") || isMastraStudioRequest(request) ? "admin-ui" : "api",
+          });
         }
-        return mapOAuthPrincipal(user, {
-          subjectId: value => value.id,
-          tenantId: () => tenantId,
-          roles: () => roles,
-          email: value => value.email,
-          audience: request.path.startsWith("/admin") || isMastraStudioRequest(request) ? "admin-ui" : "api",
-        });
-      }
-      const ingressToken = request.header("authorization")?.replace(/^Bearer\s+/iu, "")
-        ?? request.header("x-qasey-webhook-token");
-      const jiraIngress = request.path.includes("jira");
-      const workerIngress = !jiraIngress && verifyWebhookToken(ingressToken, config.WORKER_TOKEN);
-      const platformIngress = !jiraIngress && verifyWebhookToken(ingressToken, config.PLATFORM_SERVICE_TOKEN);
-      if (jiraIngress ? !verifyWebhookToken(ingressToken, config.JIRA_WEBHOOK_TOKEN) : !workerIngress && !platformIngress) {
-        return undefined;
-      }
-      const tenantId = jiraIngress && config.JIRA_BASE_URL
-        ? new URL(config.JIRA_BASE_URL).hostname
-        : "trusted-ingress";
-      const role = jiraIngress ? "qasey-ingress" : workerIngress ? "orchestration-worker" : "platform-service";
-      const servicePermissions = jiraIngress
-        ? ["qasey.channel.receive"]
-        : workerIngress
-          ? ["qasey.e2e.execute", "qasey.case-workflow.execute"]
-          : ["platform.catalog.read", "platform.runtime.inspect", "qasey.agent.execute", "qasey.e2e.execute", "qasey.runs.read", "qasey.runs.write"];
-      await Promise.all(servicePermissions.map(permission => permissionService.grantRolePermission(tenantId, role, permission)));
-      const service = createServicePrincipal({ subjectId: role, tenantId, roles: [role] });
-      return jiraIngress ? OAuthPrincipalSchema.parse({ ...service, audience: "channel" }) : service;
-    },
-  }),
+        const ingressToken = request.header("authorization")?.replace(/^Bearer\s+/iu, "")
+          ?? request.header("x-qasey-webhook-token");
+        const jiraIngress = request.path.includes("jira");
+        const workerIngress = !jiraIngress && verifyWebhookToken(ingressToken, config.WORKER_TOKEN);
+        const platformIngress = !jiraIngress && verifyWebhookToken(ingressToken, config.PLATFORM_SERVICE_TOKEN);
+        if (jiraIngress ? !verifyWebhookToken(ingressToken, config.JIRA_WEBHOOK_TOKEN) : !workerIngress && !platformIngress) {
+          return undefined;
+        }
+        const tenantId = jiraIngress && config.JIRA_BASE_URL
+          ? new URL(config.JIRA_BASE_URL).hostname
+          : "trusted-ingress";
+        const role = jiraIngress ? "qasey-ingress" : workerIngress ? "orchestration-worker" : "platform-service";
+        const servicePermissions = jiraIngress
+          ? ["qasey.channel.receive"]
+          : workerIngress
+            ? ["qasey.e2e.execute", "qasey.case-workflow.execute"]
+            : ["platform.catalog.read", "platform.runtime.inspect", "qasey.agent.execute", "qasey.e2e.execute", "qasey.runs.read", "qasey.runs.write"];
+        await Promise.all(servicePermissions.map(permission => permissionService.grantRolePermission(tenantId, role, permission)));
+        const service = createServicePrincipal({ subjectId: role, tenantId, roles: [role] });
+        return jiraIngress ? OAuthPrincipalSchema.parse({ ...service, audience: "channel" }) : service;
+      },
+    });
+    return config.NODE_ENV === "development"
+      ? [closeDevelopmentConnections, authorization]
+      : authorization;
+  },
 });
 // The shared runtime adds registered routes and authorization middleware.
 Object.assign(server, sharedRuntime.config.server!);

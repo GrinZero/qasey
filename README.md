@@ -43,6 +43,8 @@ pnpm dev
 - `QASEY_ENABLE_STUDIO_EDITOR`、`QASEY_ENABLE_STUDIO_MCP_PREVIEW`：生产默认关闭
 - `QASEY_ENABLE_DATADOG`、`DD_LLMOBS_ML_APP`
 
+本地开发默认把 Observability 写入 `QASEY_OBSERVABILITY_DB_PATH` 指向的 DuckDB；即使本机通过拆分 PG 配置连接共享应用数据库，也不会隐式初始化远端 Observability schema。确需联调时可显式设置 `OBSERVABILITY_DATABASE_URL`。生产仍使用独立的 PostgreSQL Observability 数据库。
+
 MCP 示例见 [config/mcp.example.json](./config/mcp.example.json)。OAuth MCP 登录：
 
 ```bash

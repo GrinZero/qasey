@@ -44,6 +44,16 @@ describe("split PostgreSQL configuration", () => {
     expect(config.OBSERVABILITY_DATABASE_URL).toContain("/moego_qasey_observability");
   });
 
+  it("keeps local observability on DuckDB unless a remote URL is explicit", () => {
+    const config = loadConfig({
+      NODE_ENV: "development",
+      ...splitPostgresEnv,
+    });
+
+    expect(config.DATABASE_URL).toContain("/moego_qasey");
+    expect(config.OBSERVABILITY_DATABASE_URL).toBeUndefined();
+  });
+
   it("rejects incomplete split configuration", () => {
     expect(() => databaseUrlsFromPgParts({ PG_URL: "postgres.testing.internal" })).toThrow(
       /PG_URL, PG_PORT, PG_QASEY_USER_NAME and PG_QASEY_PASSWORD/,

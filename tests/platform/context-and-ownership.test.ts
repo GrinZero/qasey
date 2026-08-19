@@ -20,6 +20,19 @@ describe("trusted context and ownership", () => {
     expect(context.get(MASTRA_RESOURCE_ID_KEY)).toBe("alpha:tenant-1:user-1");
   });
 
+  it("removes an untrusted thread when trusted ingress intentionally leaves it unset", () => {
+    const context = new RequestContext();
+    context.set(MASTRA_THREAD_ID_KEY, "spoofed-thread");
+
+    applyTrustedContext(context, {
+      requestId: "request-2", applicationId: "alpha", channel: "api", ingressSource: "oauth",
+      identity: { userId: "user-1", tenantId: "tenant-1", roles: ["user"], service: false }, sessionId: "session-2",
+      [MASTRA_RESOURCE_ID_KEY]: "alpha:tenant-1:user-1",
+    });
+
+    expect(context.has(MASTRA_THREAD_ID_KEY)).toBe(false);
+  });
+
   it("separates private and shared memory ownership", () => {
     const base = { applicationId: "alpha", tenantId: "tenant", userId: "user", conversationId: "channel", externalThreadId: "thread" };
     expect(conversationScope({ ...base, kind: "private" })).toEqual({

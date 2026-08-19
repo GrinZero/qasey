@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { RequestContext, MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "@mastra/core/request-context";
+import { describe, expect, it, vi } from "vitest";
 import manifest from "../fixtures/mastra-route-permissions.json";
 import type { CatalogEntry } from "../../src/runtime/application.ts";
-import { classifyMastraStudioRoute, classifyRuntimeRoute, isMastraStudioRequest, isPublicRuntimePath, resolveRequestUser } from "../../src/platform/auth/authorization-middleware.ts";
+import { classifyMastraStudioRoute, classifyRuntimeRoute, createAuthorizationMiddleware, isMastraStudioRequest, isPublicRuntimePath, resolveRequestUser } from "../../src/platform/auth/authorization-middleware.ts";
 import { InMemoryPermissionStore, PermissionService } from "../../src/platform/auth/permission-store.ts";
-import { createServicePrincipal } from "../../src/platform/auth/oauth-principal.ts";
+import { createServicePrincipal, OAuthPrincipalSchema } from "../../src/platform/auth/oauth-principal.ts";
 
 const entries: CatalogEntry[] = [
   { applicationId: "alpha", resourceType: "agent", resourceId: "alpha-main", permission: "alpha.agent.execute", audiences: ["api", "channel"] },
@@ -55,6 +56,83 @@ describe("permission route coverage", () => {
 
     await expect(resolveRequestUser(requestContext, { raw }, isGoogleUser, provider)).resolves.toBe(verifiedUser);
     expect(requestContext.get("user")).toBe(verifiedUser);
+  });
+
+  it.each([
+    { audience: "admin-ui" as const, studio: true, expectedIngress: "mastra-studio" },
+    { audience: "api" as const, studio: false, expectedIngress: "api" },
+  ])("keeps $audience resource ownership without choosing a business thread", async ({ audience, studio, expectedIngress }) => {
+    const requestContext = new RequestContext();
+    const next = vi.fn(async () => undefined);
+    const middleware = createAuthorizationMiddleware({
+      catalog: [{ ...entries[0]!, audiences: [audience] }],
+      permissions: { authorize: vi.fn(async () => true) } as unknown as PermissionService,
+      audit: { write: vi.fn(async () => undefined) },
+      studioUiEnabled: true,
+      resolvePrincipal: () => OAuthPrincipalSchema.parse({
+        subjectId: "user-1", tenantId: "tenant-1", roles: ["user"], audience,
+      }),
+    });
+    const handler = middleware as Exclude<typeof middleware, { path: string }>;
+    await handler({
+      req: {
+        path: "/studio/api/agents/alpha-main/stream",
+        method: "POST",
+        raw: new Request("http://localhost:4111/studio/api/agents/alpha-main/stream", { method: "POST" }),
+        header: (name: string) => studio && name.toLowerCase() === "x-mastra-client-type" ? "studio" : undefined,
+      },
+      get: (key: string) => key === "requestContext" ? requestContext : undefined,
+      json: vi.fn(),
+    } as never, next);
+
+    expect(next).toHaveBeenCalledOnce();
+    expect(requestContext.get(MASTRA_RESOURCE_ID_KEY)).toBe("alpha:tenant-1:user-1");
+    expect(requestContext.get(MASTRA_THREAD_ID_KEY)).toBeUndefined();
+    expect(requestContext.get("sessionId")).toBe("alpha:tenant-1:private:user-1");
+    expect(requestContext.get("ingressSource")).toBe(expectedIngress);
+  });
+
+  it("uses the owning agent application across the Studio memory route surface", async () => {
+    const middleware = createAuthorizationMiddleware({
+      catalog: [{ ...entries[0]!, audiences: ["admin-ui"] }],
+      permissions: { authorize: vi.fn(async () => true) } as unknown as PermissionService,
+      audit: { write: vi.fn(async () => undefined) },
+      studioUiEnabled: true,
+      resolvePrincipal: () => OAuthPrincipalSchema.parse({
+        subjectId: "user-1", tenantId: "tenant-1", roles: ["user"], audience: "admin-ui",
+      }),
+    });
+    const handler = middleware as Exclude<typeof middleware, { path: string }>;
+    const requests = [
+      new Request("http://localhost:4111/studio/api/memory/threads?resourceId=alpha-main&agentId=alpha-main"),
+      new Request("http://localhost:4111/studio/api/memory/threads/thread-1/messages?agentId=alpha-main&resourceId=alpha-main"),
+      new Request("http://localhost:4111/studio/api/memory/observational-memory/buffer-status", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agentId: "alpha-main", resourceId: "alpha-main", threadId: "thread-1" }),
+      }),
+    ];
+
+    for (const raw of requests) {
+      const requestContext = new RequestContext();
+      const next = vi.fn(async () => undefined);
+      await handler({
+        req: {
+          path: new URL(raw.url).pathname,
+          method: raw.method,
+          raw,
+          header: (name: string) => name.toLowerCase() === "x-mastra-client-type"
+            ? "studio" : raw.headers.get(name) ?? undefined,
+        },
+        get: (key: string) => key === "requestContext" ? requestContext : undefined,
+        json: vi.fn(),
+      } as never, next);
+
+      expect(next).toHaveBeenCalledOnce();
+      expect(requestContext.get("applicationId")).toBe("alpha");
+      expect(requestContext.get(MASTRA_RESOURCE_ID_KEY)).toBe("alpha:tenant-1:user-1");
+      expect(requestContext.get(MASTRA_THREAD_ID_KEY)).toBeUndefined();
+    }
   });
 
   it("classifies the pinned Mastra 1.59 route surface and denies unknown routes", () => {

@@ -38,7 +38,7 @@ export const config = {
 export const studioEditorEnabled = config.QASEY_ENABLE_STUDIO_EDITOR
   ?? config.NODE_ENV === "development";
 export const studioMcpPreviewEnabled = config.QASEY_ENABLE_STUDIO_MCP_PREVIEW
-  ?? config.NODE_ENV === "development";
+  ?? false;
 
 /**
  * Compose Mastra domains explicitly: application state, editor definitions,
@@ -258,9 +258,13 @@ export async function toolsForRequest(requestContext?: RequestContext<any>) {
   // is deliberately read-only so write-capable MCP tools remain filtered out.
   if (!contextProvided) {
     const subject = mcpSubject(requestContext);
-    const external = config.NODE_ENV === "development" && studioMcpPreviewEnabled
+    const studioRequest = requestContext?.get("ingressSource") === "mastra-studio";
+    const discoverExternal = studioRequest
+      ? config.NODE_ENV === "development" && studioMcpPreviewEnabled
+      : runtimeContext.native;
+    const external = discoverExternal
       ? await mcpCatalog.toolsFor(route, context.channel, subject)
-      : runtimeContext.native ? await mcpCatalog.toolsFor(route, context.channel, subject) : {};
+      : {};
     return { getCurrentTime, ...readConnectorCatalog.tools(), ...external };
   }
   const effectiveRoute = config.QASEY_SHADOW_MODE && route.writeTarget !== "none"

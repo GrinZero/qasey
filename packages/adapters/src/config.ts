@@ -160,7 +160,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): QaseyConfig {
   return ConfigSchema.parse({
     ...env,
     ...(env.DATABASE_URL ? {} : { DATABASE_URL: databaseUrls?.application }),
-    ...(env.OBSERVABILITY_DATABASE_URL ? {} : { OBSERVABILITY_DATABASE_URL: databaseUrls?.observability }),
+    // Split deployment credentials are also used by local development to
+    // reach the shared application database. Do not silently opt a local
+    // `pnpm dev` process into the remote observability database: its schema
+    // initialization can take tens of seconds and blocks every first Studio
+    // API request through Mastra's composite-store init barrier. Production
+    // keeps the derived durable database; developers can still opt in with an
+    // explicit OBSERVABILITY_DATABASE_URL.
+    ...(env.OBSERVABILITY_DATABASE_URL || env.NODE_ENV !== "production"
+      ? {}
+      : { OBSERVABILITY_DATABASE_URL: databaseUrls?.observability }),
   });
 }
 

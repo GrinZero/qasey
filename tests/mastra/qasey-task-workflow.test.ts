@@ -1,7 +1,9 @@
 import type { Mastra } from "@mastra/core/mastra";
+import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY, RequestContext } from "@mastra/core/request-context";
 import { describe, expect, it, vi } from "vitest";
 import type { QaseyRequestContext } from "../../packages/contracts/src/index.ts";
 import { qaseyTaskWorkflow, runQaseyTaskWorkflow } from "../../src/mastra/qasey-task-workflow.ts";
+import { prepareQaseyRequestContext } from "../../src/mastra/service.ts";
 
 const context: QaseyRequestContext = {
   requestId: "request-1",
@@ -70,5 +72,17 @@ describe("qasey-task workflow", () => {
     const requestContext = start.mock.calls[0]![0].requestContext;
     expect(requestContext.get("applicationId")).toBe("qasey");
     expect(requestContext.get("qasey-context")).toEqual(context);
+  });
+
+  it("lets task ingress choose an isolated thread while preserving server-owned resource scope", () => {
+    const requestContext = new RequestContext();
+    requestContext.set("identity", { userId: "user-1", tenantId: "tenant-1", roles: ["user"], service: false });
+    requestContext.set(MASTRA_RESOURCE_ID_KEY, "qasey:tenant-1:user-1");
+
+    const prepared = prepareQaseyRequestContext({ ...context, requestId: "request-2", sessionId: "request-2" }, requestContext);
+
+    expect(prepared.get(MASTRA_RESOURCE_ID_KEY)).toBe("qasey:tenant-1:user-1");
+    expect(prepared.get(MASTRA_THREAD_ID_KEY)).toBe("qasey:tenant-1:private:request-2");
+    expect(prepared.get("sessionId")).toBe("request-2");
   });
 });

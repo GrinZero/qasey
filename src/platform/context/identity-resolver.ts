@@ -7,14 +7,18 @@ export function createTrustedRequestContext(values: PlatformRequestContextValues
   const context = new RequestContext();
   for (const [key, value] of Object.entries(parsed)) context.set(key, value);
   context.set(MASTRA_RESOURCE_ID_KEY, parsed[MASTRA_RESOURCE_ID_KEY]);
-  context.set(MASTRA_THREAD_ID_KEY, parsed[MASTRA_THREAD_ID_KEY]);
+  const threadId = parsed[MASTRA_THREAD_ID_KEY];
+  if (threadId) context.set(MASTRA_THREAD_ID_KEY, threadId);
   return context;
 }
 
 /** Trusted values always win; request-controlled values are never copied. */
 export function applyTrustedContext(target: RequestContext, values: PlatformRequestContextValues): RequestContext {
   const trusted = createTrustedRequestContext(values);
-  for (const key of Object.keys(PlatformRequestContextSchema.shape)) target.set(key, trusted.get(key));
+  for (const key of Object.keys(PlatformRequestContextSchema.shape)) {
+    const value = trusted.get(key);
+    if (value === undefined) target.delete(key);
+    else target.set(key, value);
+  }
   return target;
 }
-

@@ -26,7 +26,9 @@ export const PlatformRequestContextSchema = z.object({
   taskId: z.string().min(1).optional(),
   executionId: z.string().min(1).optional(),
   [MASTRA_RESOURCE_ID_KEY]: z.string().min(1),
-  [MASTRA_THREAD_ID_KEY]: z.string().min(1),
+  // Studio supplies its generated thread through the Agent memory options.
+  // Trusted channel/API ingress still initializes this reserved key directly.
+  [MASTRA_THREAD_ID_KEY]: z.string().min(1).optional(),
 }).catchall(z.unknown());
 
 export type PlatformRequestContextValues = z.infer<typeof PlatformRequestContextSchema>;

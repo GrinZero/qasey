@@ -4,7 +4,7 @@ import type { AuditLog } from "./audit-log.ts";
 import type { OAuthPrincipal } from "./oauth-principal.ts";
 import type { PermissionService } from "./permission-store.ts";
 import { conversationScope } from "../context/conversation-scope.ts";
-import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../context/schema.ts";
+import { MASTRA_RESOURCE_ID_KEY } from "../context/schema.ts";
 import { MASTRA_API_PREFIX, MASTRA_STUDIO_BASE, stripMastraApiPrefix } from "../../runtime/mastra-paths.ts";
 
 export interface AuthorizationMiddlewareOptions {
@@ -80,6 +80,28 @@ export function isMastraStudioRequest(request: {
   }
 }
 
+async function applicationIdForConversationScope(
+  request: { raw: Request; path: string },
+  fallback: string,
+  catalog: ReadonlyMap<string, CatalogEntry>,
+): Promise<string> {
+  const mastraPath = stripMastraApiPrefix(request.path);
+  if (!mastraPath || !/^\/memory(?:\/|$)/u.test(mastraPath)) return fallback;
+
+  const url = new URL(request.raw.url);
+  let agentId = url.searchParams.get("agentId");
+  if (!agentId && request.raw.headers.get("content-type")?.includes("application/json")) {
+    try {
+      const body = await request.raw.clone().json() as { agentId?: unknown };
+      if (typeof body.agentId === "string") agentId = body.agentId;
+    } catch {
+      // Route validation owns malformed-body errors; scope resolution simply
+      // falls back to the classified route until a valid agent id exists.
+    }
+  }
+  return (agentId ? catalog.get(`agent:${agentId}`)?.applicationId : undefined) ?? fallback;
+}
+
 export function createAuthorizationMiddleware(options: AuthorizationMiddlewareOptions): Middleware {
   const catalog = new Map(options.catalog.map(entry => [`${entry.resourceType}:${entry.resourceId}`, entry]));
   const routes = options.catalog.filter(entry => entry.resourceType === "route" && entry.routePath);
@@ -119,16 +141,17 @@ export function createAuthorizationMiddleware(options: AuthorizationMiddlewareOp
     const allowed = await options.permissions.authorize({ principal, ...resource });
     await options.audit.write(auditRecord(requestId, resource, principal, allowed ? "allow" : "deny", allowed ? "permission_granted" : "permission_denied"));
     if (!allowed) return c.json({ error: "not_found", requestId }, 404);
+    const scopeApplicationId = await applicationIdForConversationScope(c.req, resource.applicationId, catalog);
     requestContext.set("platform-principal", principal);
     requestContext.set("requestId", requestId);
-    requestContext.set("applicationId", resource.applicationId);
+    requestContext.set("applicationId", scopeApplicationId);
     requestContext.set("tenantId", principal.tenantId);
     requestContext.set("userId", principal.subjectId);
     const channel = principal.audience === "admin-ui" ? "web"
       : principal.audience === "channel" ? (path.includes("jira") ? "jira" : "slack")
         : principal.audience === "service" ? "worker" : "api";
     const scope = conversationScope({
-      applicationId: resource.applicationId,
+      applicationId: scopeApplicationId,
       tenantId: principal.tenantId,
       userId: principal.subjectId,
       conversationId: principal.subjectId,
@@ -136,10 +159,15 @@ export function createAuthorizationMiddleware(options: AuthorizationMiddlewareOp
       kind: "private",
     });
     requestContext.set("channel", channel);
-    requestContext.set("ingressSource", principal.audience);
+    const studioRequest = isMastraStudioRequest(c.req);
+    requestContext.set("ingressSource", studioRequest ? "mastra-studio" : principal.audience);
     requestContext.set("sessionId", scope.threadId);
     requestContext.set(MASTRA_RESOURCE_ID_KEY, scope.resourceId);
-    requestContext.set(MASTRA_THREAD_ID_KEY, scope.threadId);
+    // Authentication owns the resource boundary, not the conversation
+    // lifecycle. Ingress adapters that need a stable conversation (Slack,
+    // Jira, etc.) set MASTRA_THREAD_ID_KEY themselves. Agent APIs and Studio
+    // may then create or select a thread without authentication silently
+    // collapsing every request for the user into one history.
     requestContext.set("identity", {
       userId: principal.subjectId,
       tenantId: principal.tenantId,

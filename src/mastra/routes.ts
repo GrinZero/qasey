@@ -92,7 +92,10 @@ export const apiRoutes = [
         const context = {
           requestId,
           channel: "api" as const,
-          sessionId: identity.userId,
+          // This endpoint represents one task, not a long-lived chat. Use the
+          // request id as its conversation id so repeated API calls cannot
+          // inherit messages from a previous task by the same user.
+          sessionId: requestId,
           chatInput: parsed.data.prompt,
           actor: { id: identity.userId, tenantId: identity.tenantId },
           source: {},
