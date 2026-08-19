@@ -35,10 +35,109 @@ const defaultTimeouts: Record<McpServerName, number> = {
   lark: 60_000,
 };
 
-const TOOL_DISCOVERY_TTL_MS = 60_000;
-const FAILED_TOOL_DISCOVERY_TTL_MS = 5_000;
+const TOOL_DISCOVERY_TTL_MS = 15 * 60_000;
+const FAILED_TOOL_DISCOVERY_TTL_MS = 30_000;
+const INITIAL_TOOL_DISCOVERY_BUDGET_MS = 5_000;
 
 type ToolDiscoveryResult = Awaited<ReturnType<MCPClient["listToolsWithErrors"]>>;
+type ToolDiscoveryClient = Pick<MCPClient, "listToolsWithErrors">;
+
+interface ToolDiscoveryCacheEntry {
+  expiresAt: number;
+  value?: ToolDiscoveryResult;
+  refresh?: Promise<ToolDiscoveryResult>;
+}
+
+export interface McpToolDiscoveryCacheOptions {
+  successTtlMs?: number;
+  failureTtlMs?: number;
+  initialWaitMs?: number;
+  now?: () => number;
+}
+
+/** Bounded first load plus stale-while-revalidate for remote MCP metadata. */
+export class McpToolDiscoveryCache {
+  private readonly entries = new WeakMap<object, ToolDiscoveryCacheEntry>();
+  private readonly successTtlMs: number;
+  private readonly failureTtlMs: number;
+  private readonly initialWaitMs: number;
+  private readonly now: () => number;
+
+  constructor(options: McpToolDiscoveryCacheOptions = {}) {
+    this.successTtlMs = options.successTtlMs ?? TOOL_DISCOVERY_TTL_MS;
+    this.failureTtlMs = options.failureTtlMs ?? FAILED_TOOL_DISCOVERY_TTL_MS;
+    this.initialWaitMs = options.initialWaitMs ?? INITIAL_TOOL_DISCOVERY_BUDGET_MS;
+    this.now = options.now ?? Date.now;
+  }
+
+  delete(client: ToolDiscoveryClient): void {
+    this.entries.delete(client);
+  }
+
+  async get(client: ToolDiscoveryClient): Promise<ToolDiscoveryResult> {
+    const now = this.now();
+    const entry = this.entries.get(client) ?? { expiresAt: 0 };
+    this.entries.set(client, entry);
+    if (entry.value && entry.expiresAt > now) {
+      logInfo("mcp.tools.discovery", { cacheHit: true, stale: false });
+      return entry.value;
+    }
+
+    const refresh = entry.refresh ?? this.refresh(client, entry);
+    if (entry.value) {
+      logInfo("mcp.tools.discovery", { cacheHit: true, stale: true });
+      return entry.value;
+    }
+    return this.waitForInitialDiscovery(refresh, entry);
+  }
+
+  private refresh(client: ToolDiscoveryClient, entry: ToolDiscoveryCacheEntry): Promise<ToolDiscoveryResult> {
+    const startedAt = this.now();
+    const refresh = Promise.resolve()
+      .then(() => client.listToolsWithErrors())
+      .catch((error: unknown): ToolDiscoveryResult => ({
+        tools: {},
+        errors: { discovery: error instanceof Error ? error.message : String(error) },
+      }))
+      .then(result => {
+        entry.value = result;
+        entry.expiresAt = this.now() + (Object.keys(result.errors).length > 0 ? this.failureTtlMs : this.successTtlMs);
+        logInfo("mcp.tools.discovery", {
+          cacheHit: false,
+          durationMs: this.now() - startedAt,
+          toolCount: Object.keys(result.tools).length,
+          errorCount: Object.keys(result.errors).length,
+        });
+        return result;
+      })
+      .finally(() => { delete entry.refresh; });
+    entry.refresh = refresh;
+    return refresh;
+  }
+
+  private async waitForInitialDiscovery(
+    refresh: Promise<ToolDiscoveryResult>,
+    entry: ToolDiscoveryCacheEntry,
+  ): Promise<ToolDiscoveryResult> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const fallback = new Promise<ToolDiscoveryResult>(resolve => {
+      timeout = setTimeout(() => {
+        const result: ToolDiscoveryResult = {
+          tools: {},
+          errors: { discovery: "Tool discovery is still warming in the background" },
+        };
+        entry.value = result;
+        entry.expiresAt = this.now() + this.failureTtlMs;
+        resolve(result);
+      }, this.initialWaitMs);
+    });
+    try {
+      return await Promise.race([refresh, fallback]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+}
 
 function storageFor(config: QaseyConfig, serverName: McpServerName, subjectKey: string): OAuthStorage {
   const namespace = `qasey:${subjectKey}:${serverName}`;
@@ -153,10 +252,7 @@ export function validateFigmaToolInput(toolName: string, input: unknown): void {
 export class QaseyMcpCatalog {
   private sharedClient?: MCPClient;
   private readonly subjectClients: SubjectMcpClientPool;
-  private readonly toolDiscoveryCache = new WeakMap<MCPClient, {
-    expiresAt: number;
-    result: Promise<ToolDiscoveryResult>;
-  }>();
+  private readonly toolDiscovery = new McpToolDiscoveryCache();
   private readonly oauthStorages = new Set<OAuthStorage & { close?: () => Promise<void> }>();
   private readonly servers: McpServerConfigs;
 
@@ -198,7 +294,7 @@ export class QaseyMcpCatalog {
     if (spec.auth.type !== "oauth") throw new Error(`MCP server ${serverName} does not use OAuth`);
     const client = await this.subjectClients.get(subjectKey(subject));
     await client.authenticate(serverName);
-    this.toolDiscoveryCache.delete(client);
+    this.toolDiscovery.delete(client);
   }
 
   async toolsFor(route: IntentRoute, channel: QaseyChannel, subject?: McpCredentialSubject): Promise<ToolsInput> {
@@ -256,39 +352,7 @@ export class QaseyMcpCatalog {
   }
 
   private async discoverTools(client: MCPClient): Promise<ToolDiscoveryResult> {
-    const now = Date.now();
-    const cached = this.toolDiscoveryCache.get(client);
-    if (cached && cached.expiresAt > now) {
-      logInfo("mcp.tools.discovery", { cacheHit: true });
-      return cached.result;
-    }
-
-    const startedAt = Date.now();
-    const entry = {
-      // Keep concurrent callers on the same in-flight discovery even when a
-      // slow MCP server takes longer than the eventual cache TTL.
-      expiresAt: Number.POSITIVE_INFINITY,
-      result: client.listToolsWithErrors(),
-    };
-    this.toolDiscoveryCache.set(client, entry);
-    try {
-      const result = await entry.result;
-      if (Object.keys(result.errors).length > 0) {
-        entry.expiresAt = Date.now() + FAILED_TOOL_DISCOVERY_TTL_MS;
-      } else {
-        entry.expiresAt = Date.now() + TOOL_DISCOVERY_TTL_MS;
-      }
-      logInfo("mcp.tools.discovery", {
-        cacheHit: false,
-        durationMs: Date.now() - startedAt,
-        toolCount: Object.keys(result.tools).length,
-        errorCount: Object.keys(result.errors).length,
-      });
-      return result;
-    } catch (error) {
-      this.toolDiscoveryCache.delete(client);
-      throw error;
-    }
+    return this.toolDiscovery.get(client);
   }
 }
 
