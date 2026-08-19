@@ -31,6 +31,7 @@ import { sanitizeTelemetry } from "../platform/observability/sanitize.ts";
 import { GoogleOidcService, type PlatformGoogleUser } from "../platform/auth/google-oidc.ts";
 import { MASTRA_API_PREFIX, MASTRA_STUDIO_BASE } from "../runtime/mastra-paths.ts";
 import { closeDevelopmentConnections } from "../platform/http/development-connections.ts";
+import { applyStudioNetworkPolicy } from "../platform/http/studio-network-policy.ts";
 import { seedServiceRolePermissions } from "../platform/auth/service-role-permissions.ts";
 import { runtimeReadiness } from "../platform/storage/readiness.ts";
 
@@ -249,8 +250,8 @@ const sharedRuntime = createSharedMastraConfig({
       },
     });
     return config.NODE_ENV === "development"
-      ? [closeDevelopmentConnections, authorization]
-      : authorization;
+      ? [closeDevelopmentConnections, authorization, applyStudioNetworkPolicy]
+      : [authorization, applyStudioNetworkPolicy];
   },
 });
 // The shared runtime adds registered routes and authorization middleware.
