@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { createAdminUiApplication, assertSameOrigin, listVisibleApplicationManifests } from "../../src/platform/admin-ui/application.ts";
 import { loadAdminUiHtml, resolveAdminUiHtmlPath } from "../../src/platform/admin-ui/shell.ts";
 import { InMemoryAuditLog } from "../../src/platform/auth/audit-log.ts";
@@ -35,11 +36,18 @@ describe("same-origin Admin UI", () => {
     expect(() => assertSameOrigin(new Request("https://runtime.test/admin/api/permissions/grants"))).toThrow(/CSRF/u);
   });
 
-  it("finds the built Admin UI after Mastra changes its working directory", () => {
-    const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
-    expect(resolveAdminUiHtmlPath(resolve(repositoryRoot, "src/mastra/public"))).toBe(
-      resolve(repositoryRoot, "apps/admin-ui/dist/index.html"),
-    );
+  it.each(["src/mastra/public", ".mastra/output"])("finds the Admin UI target from %s", async workingDirectory => {
+    const repositoryRoot = await mkdtemp(join(tmpdir(), "qasey-admin-ui-"));
+    const mastraWorkingDirectory = resolve(repositoryRoot, workingDirectory);
+    try {
+      await mkdir(mastraWorkingDirectory, { recursive: true });
+      await mkdir(resolve(repositoryRoot, "apps/admin-ui"), { recursive: true });
+      expect(resolveAdminUiHtmlPath(mastraWorkingDirectory)).toBe(
+        resolve(repositoryRoot, "apps/admin-ui/dist/index.html"),
+      );
+    } finally {
+      await rm(repositoryRoot, { recursive: true, force: true });
+    }
   });
 
   it("only lists Agent Applications the current user can access", async () => {

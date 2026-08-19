@@ -50,6 +50,26 @@ describe("split PostgreSQL configuration", () => {
     );
   });
 
+  it("ignores deployment-only split values before secrets are injected in tests", () => {
+    const config = loadConfig({
+      NODE_ENV: "test",
+      PG_URL: "postgres.testing.internal",
+      PG_PORT: "5432",
+      PG_QASEY_USER_NAME: "qasey-user",
+    });
+    expect(config.DATABASE_URL).toBeUndefined();
+    expect(config.OBSERVABILITY_DATABASE_URL).toBeUndefined();
+  });
+
+  it.each(["development", "production"])("still rejects incomplete split configuration in %s", NODE_ENV => {
+    expect(() => loadConfig({
+      NODE_ENV,
+      PG_URL: "postgres.testing.internal",
+      PG_PORT: "5432",
+      PG_QASEY_USER_NAME: "qasey-user",
+    })).toThrow(/PG_URL, PG_PORT, PG_QASEY_USER_NAME and PG_QASEY_PASSWORD/);
+  });
+
   it("keeps only the environment-specific database passwords in AWS secrets", () => {
     const envJson = JSON.parse(
       readFileSync(new URL("../../ci/env.json", import.meta.url), "utf8"),

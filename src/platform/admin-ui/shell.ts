@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, parse, resolve } from "node:path";
 
 const ADMIN_UI_HTML_RELATIVE_PATH = "apps/admin-ui/dist/index.html";
+const ADMIN_UI_WORKSPACE_RELATIVE_PATH = "apps/admin-ui";
 let cachedHtml: string | undefined;
 
 export function resolveAdminUiHtmlPath(startingDirectory = process.cwd()): string {
@@ -12,6 +13,10 @@ export function resolveAdminUiHtmlPath(startingDirectory = process.cwd()): strin
   while (true) {
     const candidate = resolve(directory, ADMIN_UI_HTML_RELATIVE_PATH);
     if (existsSync(candidate)) return candidate;
+    // The build artifact is intentionally ignored by Git. During a clean CI
+    // checkout, still resolve it relative to the repository root so callers
+    // do not accidentally append the path below Mastra's changed cwd.
+    if (existsSync(resolve(directory, ADMIN_UI_WORKSPACE_RELATIVE_PATH))) return candidate;
     if (directory === filesystemRoot) return resolve(startingDirectory, ADMIN_UI_HTML_RELATIVE_PATH);
     directory = dirname(directory);
   }

@@ -138,9 +138,14 @@ export const ConfigSchema = z.object({
 export type QaseyConfig = z.infer<typeof ConfigSchema>;
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): QaseyConfig {
+  const splitPostgresValues = [env.PG_URL, env.PG_PORT, env.PG_QASEY_USER_NAME, env.PG_QASEY_PASSWORD];
+  const hasCompleteSplitPostgresConfig = splitPostgresValues.every(Boolean);
+  const mustValidateSplitPostgresConfig = env.NODE_ENV !== "test" && splitPostgresValues.some(Boolean);
   const databaseUrls = env.DATABASE_URL && env.OBSERVABILITY_DATABASE_URL
     ? undefined
-    : databaseUrlsFromPgParts(env);
+    : hasCompleteSplitPostgresConfig || mustValidateSplitPostgresConfig
+      ? databaseUrlsFromPgParts(env)
+      : undefined;
   return ConfigSchema.parse({
     ...env,
     ...(env.DATABASE_URL ? {} : { DATABASE_URL: databaseUrls?.application }),
