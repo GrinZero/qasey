@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import manifest from "../fixtures/mastra-route-permissions.json";
 import type { CatalogEntry } from "../../src/runtime/application.ts";
-import { classifyMastraStudioRoute, classifyRuntimeRoute, isMastraStudioRequest, resolveRequestUser } from "../../src/platform/auth/authorization-middleware.ts";
+import { classifyMastraStudioRoute, classifyRuntimeRoute, isMastraStudioRequest, isPublicRuntimePath, resolveRequestUser } from "../../src/platform/auth/authorization-middleware.ts";
 import { InMemoryPermissionStore, PermissionService } from "../../src/platform/auth/permission-store.ts";
 import { createServicePrincipal } from "../../src/platform/auth/oauth-principal.ts";
 
@@ -14,6 +14,10 @@ const entries: CatalogEntry[] = [
 
 describe("permission route coverage", () => {
   it("protects Mastra Studio pages and recognizes its API client header", () => {
+    expect(isPublicRuntimePath("/", "GET", true)).toBe(true);
+    expect(isPublicRuntimePath("/", "GET", false)).toBe(false);
+    expect(isPublicRuntimePath("/", "POST", true)).toBe(false);
+    expect(isPublicRuntimePath("/healthz", "GET", false)).toBe(true);
     expect(classifyMastraStudioRoute("/studio", "GET")).toMatchObject({
       resourceId: "mastra-studio",
       permission: "platform.runtime.inspect",
@@ -62,6 +66,9 @@ describe("permission route coverage", () => {
       });
     }
     expect(classifyRuntimeRoute("/studio/api/new-mastra-surface", "GET", catalog, [])).toMatchObject({
+      resourceType: "platform", resourceId: "runtime", action: "read",
+    });
+    expect(classifyRuntimeRoute("/studio/api/agents/providers", "GET", catalog, [])).toMatchObject({
       resourceType: "platform", resourceId: "runtime", action: "read",
     });
     expect(classifyRuntimeRoute("/api/unclassified/danger", "POST", catalog, [])).toBeUndefined();

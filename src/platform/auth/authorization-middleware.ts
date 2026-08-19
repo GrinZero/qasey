@@ -30,6 +30,11 @@ interface ClassifiedResource {
 }
 
 const PUBLIC_PATHS = [/\/healthz$/u, /\/readyz$/u];
+export function isPublicRuntimePath(path: string, method: string, studioUiEnabled = false): boolean {
+  return PUBLIC_PATHS.some(pattern => pattern.test(path))
+    || (studioUiEnabled && method === "GET" && path === "/");
+}
+
 export async function resolveRequestUser<T>(
   requestContext: { get(key: string): unknown; set(key: string, value: unknown): void },
   request: { raw: Request },
@@ -80,7 +85,9 @@ export function createAuthorizationMiddleware(options: AuthorizationMiddlewareOp
   const routes = options.catalog.filter(entry => entry.resourceType === "route" && entry.routePath);
   return async (c, next) => {
     const path = c.req.path;
-    if (PUBLIC_PATHS.some(pattern => pattern.test(path))) return next();
+    // Studio probes the instance root before it applies the injected API
+    // prefix. Expose that welcome route only while the development UI is on.
+    if (isPublicRuntimePath(path, c.req.method, options.studioUiEnabled)) return next();
     const requestId = c.req.header("x-request-id") || crypto.randomUUID();
     const requestContext = c.get("requestContext");
     const resource = classifyRuntimeRoute(path, c.req.method, catalog, routes)
@@ -158,6 +165,15 @@ export function classifyRuntimeRoute(
     const channel = catalog.get(`channel:${decodeURIComponent(channelWebhook[2]!)}`);
     if (!agent || !channel || agent.applicationId !== channel.applicationId) return undefined;
     return { ...channel, action: "receive", downstreamAuthenticated: true };
+  }
+  // Mastra exposes collection-level routes below a primitive namespace. Match
+  // those before `/:resourceId`, otherwise `/agents/providers` is interpreted
+  // as an Agent whose id is `providers` and is hidden behind a misleading 404.
+  if (mastraPath && /^\/agents\/providers\/?$/u.test(mastraPath)) {
+    return {
+      applicationId: "platform", resourceType: "platform", resourceId: "runtime",
+      action: actionFor(method, path), permission: "platform.runtime.inspect", audiences: ["admin-ui", "service"],
+    };
   }
   const primitive = mastraPath ? /^\/(agents|workflows|scorers)\/([^/]+)/u.exec(mastraPath) : null;
   if (primitive) {

@@ -10,6 +10,8 @@ import { QASEY_TRACE_REQUEST_CONTEXT_KEYS } from "./observability.ts";
 import { closeQaseyInfrastructure, config, createMastraRuntimeStorage, studioEditorEnabled } from "./runtime.ts";
 import { createQaseyApplication } from "../agent-apps/qasey/application.ts";
 import * as qaseyAgentModule from "./qasey-agent.ts";
+import * as intentModule from "./intent-agent.ts";
+import * as taskWorkflowModule from "./qasey-task-workflow.ts";
 import * as e2eModule from "./e2e-workflow.ts";
 import * as scorerModule from "./eval-scorers.ts";
 import * as caseWorkflowModule from "./metersphere-case-workflow.ts";
@@ -84,6 +86,8 @@ const bootstrapAdmins = new Set((process.env.PLATFORM_BOOTSTRAP_ADMIN_EMAILS ?? 
   .split(",").map(value => value.trim().toLowerCase()).filter(Boolean));
 const qaseyApplication = await createQaseyApplication({
   agentModule: qaseyAgentModule,
+  intentModule,
+  taskWorkflowModule,
   e2eModule,
   scorerModule,
   caseWorkflowModule,
@@ -147,6 +151,14 @@ const cache = cacheClient
   ? new RedisServerCache({ client: cacheClient }, { keyPrefix: `${redisKeyPrefix}:cache` })
   : undefined;
 
+// Mastra CLI statically extracts a top-level `server` binding before starting
+// the dev server. Keep this base config side-effect free so that extraction
+// does not initialize the rest of the runtime merely to discover its paths.
+const server = {
+  studioBase: MASTRA_STUDIO_BASE,
+  apiPrefix: MASTRA_API_PREFIX,
+  cors: { origin: [], allowMethods: ["GET", "POST"], allowHeaders: ["content-type", "authorization", "x-qasey-webhook-token"] },
+};
 const sharedRuntime = createSharedMastraConfig({
   applications: [qaseyApplication, adminUiApplication],
   platform: {
@@ -171,16 +183,14 @@ const sharedRuntime = createSharedMastraConfig({
     environment: config.NODE_ENV,
     workspace,
   },
-  server: {
-    studioBase: MASTRA_STUDIO_BASE,
-    apiPrefix: MASTRA_API_PREFIX,
-    cors: { origin: [], allowMethods: ["GET", "POST"], allowHeaders: ["content-type", "authorization", "x-qasey-webhook-token"] },
-  },
+  server,
   middlewareFactory: catalog => createAuthorizationMiddleware({
     catalog,
     permissions: permissionService,
     audit: auditLog,
-    studioUiEnabled: config.NODE_ENV === "development",
+    // Studio is available in every environment; OAuth, RBAC, and audit remain
+    // the security boundary. High-risk Editor/MCP features stay separately gated.
+    studioUiEnabled: true,
     resolvePrincipal: async (requestContext, request) => {
       const user = await resolveRequestUser(requestContext, request, isGoogleUser, googleOidc);
       if (user) {
@@ -231,9 +241,12 @@ const sharedRuntime = createSharedMastraConfig({
     },
   }),
 });
+// The shared runtime adds registered routes and authorization middleware.
+Object.assign(server, sharedRuntime.config.server!);
 
 export const mastra = new Mastra({
   ...sharedRuntime.config,
+  server,
   recovery: { durableAgents: "auto" },
   bundler: {
     externals: [

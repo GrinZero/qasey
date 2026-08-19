@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loadConfig } from "../../packages/adapters/src/index.ts";
+import { loadConfig, resolveSlackChannelMode } from "../../packages/adapters/src/index.ts";
 
 const productionAuth = {
   DATABASE_URL: "postgresql://qasey.example/moego_qasey",
@@ -30,6 +30,18 @@ describe("shared runtime configuration", () => {
     expect(config.DD_SERVICE).toBe("qasey");
     expect(config.METERSPHERE_BASE_URL).toBe("https://metersphere.devops.moego.pet");
     expect(config.METERSPHERE_PROJECT_ID).toBe("20a78db9-19aa-11ee-a261-5a66b98c4036");
+    expect(config.SLACK_CHANNEL_MODE).toBe("auto");
+  });
+
+  it("uses Socket Mode locally and webhook mode in production when both are configured", () => {
+    const credentials = {
+      SLACK_CHANNEL_MODE: "auto" as const,
+      SLACK_SIGNING_SECRET: "signing-secret",
+      SLACK_SOCKET_MODE_APP_TOKEN: "xapp-token",
+    };
+    expect(resolveSlackChannelMode({ NODE_ENV: "development", ...credentials })).toBe("socket");
+    expect(resolveSlackChannelMode({ NODE_ENV: "production", ...credentials })).toBe("webhook");
+    expect(resolveSlackChannelMode({ NODE_ENV: "development", ...credentials, SLACK_CHANNEL_MODE: "webhook" })).toBe("webhook");
   });
 
   it("requires an LLM application name when Datadog is enabled", () => {

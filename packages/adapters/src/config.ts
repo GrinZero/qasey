@@ -48,6 +48,7 @@ export const ConfigSchema = z.object({
   SLACK_USER_TOKEN: optionalString,
   SLACK_SIGNING_SECRET: optionalString,
   SLACK_SOCKET_MODE_APP_TOKEN: optionalString,
+  SLACK_CHANNEL_MODE: z.enum(["auto", "webhook", "socket"]).default("auto"),
   SLACK_BOT_USER_ID: z.string().default("U0BMP1SGB40"),
   JIRA_BASE_URL: optionalUrl,
   JIRA_EMAIL: optionalString,
@@ -136,6 +137,16 @@ export const ConfigSchema = z.object({
 });
 
 export type QaseyConfig = z.infer<typeof ConfigSchema>;
+
+export function resolveSlackChannelMode(
+  config: Pick<QaseyConfig, "NODE_ENV" | "SLACK_CHANNEL_MODE" | "SLACK_SIGNING_SECRET" | "SLACK_SOCKET_MODE_APP_TOKEN">,
+): "webhook" | "socket" | undefined {
+  if (config.SLACK_CHANNEL_MODE === "webhook") return config.SLACK_SIGNING_SECRET ? "webhook" : undefined;
+  if (config.SLACK_CHANNEL_MODE === "socket") return config.SLACK_SOCKET_MODE_APP_TOKEN ? "socket" : undefined;
+  if (config.NODE_ENV !== "production" && config.SLACK_SOCKET_MODE_APP_TOKEN) return "socket";
+  if (config.SLACK_SIGNING_SECRET) return "webhook";
+  return config.SLACK_SOCKET_MODE_APP_TOKEN ? "socket" : undefined;
+}
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): QaseyConfig {
   const splitPostgresValues = [env.PG_URL, env.PG_PORT, env.PG_QASEY_USER_NAME, env.PG_QASEY_PASSWORD];

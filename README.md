@@ -9,14 +9,14 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-默认监听 Mastra 的本地端口。开发环境可在 `/studio` 使用 Studio，其原生 API 统一位于 `/studio/api`；生产构建不包含 Studio。`/admin` 是面向多 Agent 产品用户的管理界面，不是 Studio 的替代实现；它只通过已注册 Application 的受控 API 使用 Mastra 能力。
+默认监听 Mastra 的本地端口。所有环境都在 `/studio` 提供受 Google OAuth、RBAC 与审计保护的 Studio，其原生 API 统一位于 `/studio/api`；Editor 与 MCP Preview 等高风险能力仍由独立开关控制。`/admin` 是面向多 Agent 产品用户的管理界面，不是 Studio 的替代实现；它只通过已注册 Application 的受控 API 使用 Mastra 能力。
 
 - Agent：`POST /studio/api/agents/qasey-main/generate`、`/stream`
 - Workflow：`POST /studio/api/workflows/qasey-e2e-lifecycle/start`、`/resume`
 - Qasey Run：`GET|POST /v1/runs` 与 owner-scoped 子资源
 - Slack：`POST /studio/api/agents/qasey-main/channels/slack/webhook`
 - Jira：`POST /webhooks/jira`（签名后直接进入原生 Agent）
-- Probes：`GET /healthz`、`GET /readyz`
+- Probes：`GET /`（Studio 实例发现）、`GET /healthz`、`GET /readyz`
 
 `/v1/qasey`、`/v1/triggers`、`/webhooks/n8n`、独立 Bolt receiver、自建 queue worker 和 outbox 已删除。生产异步执行使用 Mastra 官方 Split Workers。
 
@@ -40,7 +40,7 @@ pnpm dev
 - `QASEY_MCP_CONFIG_FILE`、`QASEY_MCP_OAUTH_DIR`
 - `MASTRA_ENCRYPTION_KEY`：仅在生产启用 OAuth MCP token 持久化时需要
 - `QASEY_ENABLE_LOCAL_CODE_MODE`：仅开发 LocalSandbox；生产未配置 remote sandbox 时 fail closed
-- `QASEY_ENABLE_STUDIO_EDITOR`：生产默认关闭
+- `QASEY_ENABLE_STUDIO_EDITOR`、`QASEY_ENABLE_STUDIO_MCP_PREVIEW`：生产默认关闭
 - `QASEY_ENABLE_DATADOG`、`DD_LLMOBS_ML_APP`
 
 MCP 示例见 [config/mcp.example.json](./config/mcp.example.json)。OAuth MCP 登录：

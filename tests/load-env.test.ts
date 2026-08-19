@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { runtimeEnvironment, runtimeEnvFiles } from "../src/load-env.ts";
+import { createRuntimeEnvLoadReport, runtimeEnvironment, runtimeEnvFiles } from "../src/load-env.ts";
 
 describe("runtime env files", () => {
   it("selects the checked-in environment file from the Kubernetes namespace", () => {
@@ -25,6 +25,35 @@ describe("runtime env files", () => {
       ".env.testing.local",
       ".env.secret.local",
     ]);
+  });
+
+  it("reports env load order and precedence without logging values", () => {
+    const report = createRuntimeEnvLoadReport({
+      environment: "testing",
+      loadedFiles: ["/workspace/.env", "/workspace/.env.testing", "/workspace/.env.local"],
+      parsed: { EXISTING_KEY: "do-not-log", NEW_KEY: "also-do-not-log" },
+    }, new Set(["EXISTING_KEY"]), "/workspace");
+
+    expect(report).toMatchObject({
+      environment: "testing",
+      candidateFiles: [
+        ".env",
+        ".env.testing",
+        ".env.secret",
+        ".env.local",
+        ".env.testing.local",
+        ".env.secret.local",
+      ],
+      loadedFiles: [".env", ".env.testing", ".env.local"],
+      skippedFiles: [".env.secret", ".env.testing.local", ".env.secret.local"],
+      existingProcessEnvPrecedence: "highest",
+      filePrecedence: "later-file-wins",
+      parsedKeyCount: 2,
+      appliedKeyCount: 1,
+      preservedProcessKeyCount: 1,
+      valuesLogged: false,
+    });
+    expect(JSON.stringify(report)).not.toContain("do-not-log");
   });
 
   it("keeps non-secret runtime configuration out of generated secrets", () => {

@@ -310,7 +310,7 @@ function Overview({ catalog, runs, loading, onRefresh, onOpenRuns }: { catalog: 
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState("");
   const [error, setError] = useState("");
-  const agent = catalog.find(item => item.resourceType === "agent");
+  const taskEntry = catalog.find(item => item.resourceType === "route" && item.resourceId === "qasey-task");
   const current = runs.find(run => activeStatuses.includes(run.status)) ?? runs[0];
 
   useEffect(() => { localStorage.setItem("qasey:draft", prompt); }, [prompt]);
@@ -318,10 +318,10 @@ function Overview({ catalog, runs, loading, onRefresh, onOpenRuns }: { catalog: 
   const submit = async () => {
     const value = prompt.trim();
     if (!value) { setError("先描述需要分析的需求或问题。"); return; }
-    if (!agent) { setError("当前账户没有可用的 QA 助手，请联系平台管理员。"); return; }
+    if (!taskEntry) { setError("当前账户没有可用的 QA 助手，请联系平台管理员。"); return; }
     setSubmitting(true); setError(""); setResult("");
     try {
-      const response = await api.runAgent(agent.resourceId, value);
+      const response = await api.runQaseyTask(value);
       setResult(extractAgentText(response));
       setPrompt("");
       localStorage.removeItem("qasey:draft");

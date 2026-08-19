@@ -1,8 +1,10 @@
 import { createSlackAdapter } from "@chat-adapter/slack";
 import type { ChannelConfig, ChannelHandler } from "@mastra/core/channels";
+import { resolveSlackChannelMode } from "../../../packages/adapters/src/config.ts";
 import { conversationScope } from "../../platform/context/conversation-scope.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../../platform/context/schema.ts";
 import { config } from "../../mastra/runtime.ts";
+import { runQaseyTaskWorkflow } from "../../mastra/qasey-task-workflow.ts";
 
 type NativeMessage = Parameters<ChannelHandler>[1];
 type NativeThread = Parameters<ChannelHandler>[0];
@@ -11,16 +13,18 @@ export const qaseyChannels: ChannelConfig | undefined = createQaseyChannels();
 
 function createQaseyChannels(): ChannelConfig | undefined {
   if (!config.SLACK_BOT_TOKEN) return undefined;
-  if (!config.SLACK_SIGNING_SECRET && !config.SLACK_SOCKET_MODE_APP_TOKEN) return undefined;
+  const mode = resolveSlackChannelMode(config);
+  if (!mode) return undefined;
   const adapter = createSlackAdapter({
-    mode: config.SLACK_SIGNING_SECRET ? "webhook" : "socket",
+    mode,
     botToken: config.SLACK_BOT_TOKEN,
-    ...(config.SLACK_SIGNING_SECRET ? { signingSecret: config.SLACK_SIGNING_SECRET } : {}),
-    ...(config.SLACK_SOCKET_MODE_APP_TOKEN ? { appToken: config.SLACK_SOCKET_MODE_APP_TOKEN } : {}),
+    ...(mode === "webhook" ? { signingSecret: config.SLACK_SIGNING_SECRET! } : {}),
+    ...(mode === "socket" ? { appToken: config.SLACK_SOCKET_MODE_APP_TOKEN! } : {}),
     ...(config.SLACK_BOT_USER_ID ? { botUserId: config.SLACK_BOT_USER_ID } : {}),
     nativeStreaming: true,
   });
-  const handler: ChannelHandler = async (thread, message, defaultHandler, { requestContext }) => {
+  const handler: ChannelHandler = async (thread, message, _defaultHandler, { requestContext, mastra }) => {
+    if (!mastra) throw new Error("Mastra runtime is required for the Qasey Slack workflow");
     const tenantId = slackTenantId(message);
     const scope = scopeFor(thread, message, tenantId);
     requestContext.set("requestId", `slack:${message.id}`);
@@ -37,7 +41,46 @@ function createQaseyChannels(): ChannelConfig | undefined {
     requestContext.set("sessionId", scope.threadId);
     requestContext.set(MASTRA_RESOURCE_ID_KEY, scope.resourceId);
     requestContext.set(MASTRA_THREAD_ID_KEY, scope.threadId);
-    await defaultHandler(thread, message);
+    const context = {
+      requestId: `slack:${message.id}`,
+      channel: "slack" as const,
+      sessionId: scope.threadId,
+      chatInput: message.text,
+      actor: {
+        id: message.author.userId,
+        ...(message.author.fullName ? { displayName: message.author.fullName } : {}),
+        tenantId,
+      },
+      source: { channelId: thread.channelId, threadTs: message.threadId || thread.channelId },
+      attachments: message.attachments.flatMap((attachment, index) => {
+        if (!attachment.url || !attachment.mimeType) return [];
+        return [{
+          id: `${message.id}:${index}`,
+          name: attachment.name || `attachment-${index + 1}`,
+          mimeType: attachment.mimeType,
+          url: attachment.url,
+          source: "slack" as const,
+        }];
+      }),
+    };
+    try {
+      const result = await runQaseyTaskWorkflow(mastra, context, {
+        requestContext,
+        events: {
+          onPhase: async ({ phase }) => {
+            if (phase === "routing") await thread.post("正在识别任务类型并准备所需能力…");
+            if (phase === "workflow") await thread.post("分析计划已冻结，正在执行并回查外部变更…");
+          },
+          onAgentProgress: async report => {
+            await thread.post({ markdown: `*${report.title}*\n${report.detail}${report.next ? `\n下一步：${report.next}` : ""}` });
+          },
+        },
+      });
+      await thread.post({ markdown: result.text });
+    } catch (error) {
+      const detail = config.NODE_ENV === "production" ? "请稍后重试，或联系维护者并提供当前消息链接。" : error instanceof Error ? error.message : String(error);
+      await thread.post(`Qasey 未能完成这次任务。${detail}`);
+    }
   };
   return {
     adapters: {

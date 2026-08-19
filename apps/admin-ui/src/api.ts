@@ -38,9 +38,9 @@ export const api = {
   catalog: () => requestJson<CatalogEntry[]>("/admin/api/catalog"),
   applications: () => requestJson<AgentApplication[]>("/admin/api/applications"),
   listRuns: () => requestJson<{ runs: QaseyRun[] }>("/v1/runs?limit=100"),
-  runAgent: (agentId: string, prompt: string) => requestJson<Record<string, unknown>>(
-    `/studio/api/agents/${encodeURIComponent(agentId)}/generate`,
-    { method: "POST", body: JSON.stringify({ messages: [{ role: "user", content: prompt }] }) },
+  runQaseyTask: (prompt: string) => requestJson<Record<string, unknown>>(
+    "/v1/qasey/tasks",
+    { method: "POST", body: JSON.stringify({ prompt }) },
   ),
   cancelRun: (runId: string) => requestJson<QaseyRun>(`/v1/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
   rerun: (runId: string) => requestJson<QaseyRun>(`/v1/runs/${encodeURIComponent(runId)}/rerun`, { method: "POST" }),

@@ -11,6 +11,6 @@ Important platform permissions:
 - `platform.catalog.read`: native global/list endpoints.
 - `platform.runtime.inspect`: observability, storage, channel-management, stored-primitive surfaces, and the development-only Mastra Studio UI.
 
-Qasey permissions include `qasey.agent.execute`, `qasey.e2e.execute`, `qasey.runs.read`, `qasey.runs.write`, `qasey.runs.approve`, and `qasey.channel.receive`.
+Qasey permissions include `qasey.agent.execute` for the public workflow-backed task ingress, internal `qasey.task.execute`, `qasey.e2e.execute`, `qasey.runs.read`, `qasey.runs.write`, `qasey.runs.approve`, and `qasey.channel.receive`.
 
 Permission changes require a same-origin browser request and are audited. For break-glass recovery, temporarily configure one trusted OAuth email as a bootstrap admin, restore the intended binding, verify the audit record, and remove the bootstrap entry.

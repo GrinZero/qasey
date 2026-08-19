@@ -2,6 +2,7 @@ import { registerApiRoute } from "@mastra/core/server";
 import { readFile, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { z } from "zod";
 import { CreateE2ERunSchema, QaVerdictInputSchema } from "../../packages/contracts/src/index.ts";
 import { normalizeJiraWebhook } from "../../packages/domain/src/index.ts";
 import { config, channelDeliveryInbox, jiraClient, runRepository } from "./runtime.ts";
@@ -12,6 +13,11 @@ import { conversationScope } from "../platform/context/conversation-scope.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../platform/context/schema.ts";
 import { OAuthPrincipalSchema } from "../platform/auth/oauth-principal.ts";
 import type { PlatformGoogleUser } from "../platform/auth/google-oidc.ts";
+import { runQaseyTaskWorkflow } from "./qasey-task-workflow.ts";
+
+const QaseyTaskRequestSchema = z.object({
+  prompt: z.string().trim().min(1).max(100_000),
+}).strict();
 
 function authenticatedUser(c: { get(key: "requestContext"): { get(key: string): unknown } }): PlatformGoogleUser | undefined {
   return c.get("requestContext").get("user") as PlatformGoogleUser | undefined;
@@ -59,15 +65,42 @@ export const apiRoutes = [
         requestContext.set("sessionId", scope.threadId);
         requestContext.set(MASTRA_RESOURCE_ID_KEY, scope.resourceId);
         requestContext.set(MASTRA_THREAD_ID_KEY, scope.threadId);
-        const result = await c.get("mastra").getAgent("qasey-main").generate(context.chatInput, {
-          requestContext,
-          memory: { resource: scope.resourceId, thread: scope.threadId },
-          maxSteps: 24,
-        });
+        const result = await runQaseyTaskWorkflow(c.get("mastra"), {
+          ...context,
+          actor: {
+            id: identity.userId,
+            ...(context.actor.displayName ? { displayName: context.actor.displayName } : {}),
+            tenantId: ownerScope.tenantId,
+          },
+        }, { requestContext });
         await jiraClient.addComment(issueKey, result.text);
         return c.json({ accepted: true, duplicate: false }, 200);
       } catch (error) {
         return c.json({ error: "upstream_error", ...errorBody(error, requestId) }, 502);
+      }
+    },
+  }),
+  registerApiRoute("/v1/qasey/tasks", {
+    method: "POST",
+    handler: async c => {
+      const parsed = QaseyTaskRequestSchema.safeParse(await c.req.json());
+      if (!parsed.success) return c.json({ error: "validation_error", details: parsed.error.issues }, 400);
+      const requestId = crypto.randomUUID();
+      try {
+        const requestContext = c.get("requestContext");
+        const identity = requestContext.get("identity") as { userId: string; tenantId: string };
+        const context = {
+          requestId,
+          channel: "api" as const,
+          sessionId: identity.userId,
+          chatInput: parsed.data.prompt,
+          actor: { id: identity.userId, tenantId: identity.tenantId },
+          source: {},
+          attachments: [],
+        };
+        return c.json(await runQaseyTaskWorkflow(c.get("mastra"), context, { requestContext }));
+      } catch (error) {
+        return c.json({ error: "qasey_task_failed", ...errorBody(error, requestId) }, 502);
       }
     },
   }),
@@ -159,6 +192,7 @@ const routePolicies: Record<string, { id: string; access: PrimitiveAccessPolicy;
   "GET /healthz": { id: "healthz", access: { permission: "platform.health.read", audiences: ["admin-ui", "api", "service", "channel"] }, public: true },
   "GET /readyz": { id: "readyz", access: { permission: "platform.health.read", audiences: ["admin-ui", "api", "service", "channel"] }, public: true },
   "POST /webhooks/jira": { id: "jira-webhook", access: { permission: "qasey.channel.receive", audiences: ["channel"] } },
+  "POST /v1/qasey/tasks": { id: "qasey-task", access: { permission: "qasey.agent.execute", audiences: ["admin-ui", "api"] } },
   "GET /v1/runs": { id: "run-list", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
   "POST /v1/runs": { id: "run-create", access: { permission: "qasey.runs.write", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/runs/:runId": { id: "run-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },

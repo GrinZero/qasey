@@ -59,6 +59,7 @@ export interface QaseyExecutionEvents {
 }
 
 export interface ExecuteQaseyOptions {
+  runId?: string;
   intentAgent?: Agent<any, any, any, any, any>;
   abortSignal?: AbortSignal;
   events?: QaseyExecutionEvents;
@@ -72,43 +73,28 @@ export interface ExecuteQaseyOptions {
     plan: MeterSphereCasePlan;
     workflowRunId: string;
   }) => Promise<EvidenceCompletionReceipt>;
+  /** Trusted context prepared by a native Workflow or channel ingress. */
+  requestContext?: RequestContext<any>;
+  /** Pre-classified route produced by the qasey-task Workflow. */
+  route?: IntentRoute;
 }
 
 export async function executeQasey(mastra: Mastra, context: QaseyRequestContext, options: ExecuteQaseyOptions = {}): Promise<QaseyResponse> {
-  const runId = crypto.randomUUID();
+  const runId = options.runId ?? crypto.randomUUID();
   const evidenceLedger = new EvidenceLedger(runId, {
     ...(options.resumeCasePlan ? { casePlan: options.resumeCasePlan } : {}),
   });
   const resumeReceipt = validCaseCompletionReceipt(options.resumeCasePlan, options.resumeReceipt);
   const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? config.QASEY_AGENT_TIMEOUT_MS);
   const abortSignal = options.abortSignal ? AbortSignal.any([options.abortSignal, timeoutSignal]) : timeoutSignal;
-  const requestContext = new RequestContext();
-  const tenantId = context.actor.tenantId
-    ?? (config.NODE_ENV === "production" ? undefined : "local");
-  if (!tenantId) throw new Error("A trusted tenant id is required");
-  requestContext.set("applicationId", "qasey");
-  requestContext.set("tenantId", tenantId);
-  requestContext.set("userId", context.actor.id);
-  requestContext.set("identity", { userId: context.actor.id, tenantId, roles: ["user"], service: context.channel !== "api" });
-  const scope = conversationScope({
-    applicationId: "qasey", tenantId, userId: context.actor.id,
-    conversationId: context.sessionId, externalThreadId: context.sessionId,
-    kind: context.channel === "api" ? "private" : "shared",
-  });
-  requestContext.set("requestId", context.requestId);
-  requestContext.set("channel", context.channel);
-  requestContext.set("ingressSource", context.channel);
-  requestContext.set("sessionId", context.sessionId);
-  requestContext.set(MASTRA_RESOURCE_ID_KEY, scope.resourceId);
-  requestContext.set(MASTRA_THREAD_ID_KEY, scope.threadId);
-  requestContext.set("qasey-context", context);
+  const requestContext = prepareQaseyRequestContext(context, options.requestContext);
   if (options.resumeCasePlan) requestContext.set("case-plan", options.resumeCasePlan);
   initializeQaseyTraceRequestContext(requestContext, context, options.trace);
   const requestTrace = startQaseyRequestSpan(mastra, requestContext, context, runId, options.trace);
   let route: IntentRoute | undefined;
   try {
-    await options.events?.onPhase?.({ runId, phase: "routing" });
-    route = await routeIntent(context, [], abortSignal, options.intentAgent ?? intentRouterAgent, {
+    if (!options.route) await options.events?.onPhase?.({ runId, phase: "routing" });
+    route = options.route ?? await routeIntent(context, [], abortSignal, options.intentAgent ?? intentRouterAgent, {
       requestContext,
       ...(requestTrace.tracingContext ? { tracingContext: requestTrace.tracingContext } : {}),
     });
@@ -140,7 +126,10 @@ export async function executeQasey(mastra: Mastra, context: QaseyRequestContext,
       runId,
       maxSteps: 80,
       abortSignal,
-      memory: { thread: context.sessionId, resource: context.actor.id },
+      memory: {
+        thread: requestContext.get(MASTRA_THREAD_ID_KEY),
+        resource: requestContext.get(MASTRA_RESOURCE_ID_KEY),
+      },
       toolCallConcurrency: 6,
       prepareStep: () => {
         if (resumeReceipt) return { activeTools: [], toolChoice: "none" as const };
@@ -307,6 +296,39 @@ export async function executeQasey(mastra: Mastra, context: QaseyRequestContext,
     });
     throw error;
   }
+}
+
+export function prepareQaseyRequestContext(
+  context: QaseyRequestContext,
+  existing?: RequestContext<any>,
+): RequestContext<any> {
+  const requestContext = existing ?? new RequestContext();
+  const tenantId = context.actor.tenantId
+    ?? (config.NODE_ENV === "production" ? undefined : "local");
+  if (!tenantId) throw new Error("A trusted tenant id is required");
+  const trustedIdentity = requestContext.get("identity") as { userId?: unknown; tenantId?: unknown } | undefined;
+  if (trustedIdentity && (trustedIdentity.userId !== context.actor.id || trustedIdentity.tenantId !== tenantId)) {
+    throw new Error("Qasey request actor does not match the trusted ingress identity");
+  }
+  requestContext.set("applicationId", "qasey");
+  requestContext.set("tenantId", tenantId);
+  requestContext.set("userId", context.actor.id);
+  if (!trustedIdentity) {
+    requestContext.set("identity", { userId: context.actor.id, tenantId, roles: ["user"], service: context.channel !== "api" });
+  }
+  const scope = conversationScope({
+    applicationId: "qasey", tenantId, userId: context.actor.id,
+    conversationId: context.sessionId, externalThreadId: context.sessionId,
+    kind: context.channel === "api" ? "private" : "shared",
+  });
+  requestContext.set("requestId", context.requestId);
+  requestContext.set("channel", context.channel);
+  requestContext.set("ingressSource", context.channel);
+  requestContext.set("sessionId", context.sessionId);
+  if (!requestContext.has(MASTRA_RESOURCE_ID_KEY)) requestContext.set(MASTRA_RESOURCE_ID_KEY, scope.resourceId);
+  if (!requestContext.has(MASTRA_THREAD_ID_KEY)) requestContext.set(MASTRA_THREAD_ID_KEY, scope.threadId);
+  requestContext.set("qasey-context", context);
+  return requestContext;
 }
 
 function validCaseCompletionReceipt(

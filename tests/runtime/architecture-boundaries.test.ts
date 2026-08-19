@@ -42,11 +42,29 @@ describe("shared runtime architecture boundaries", () => {
     }
   });
 
-  it("builds and starts only the official Mastra worker artifact", async () => {
+  it("routes public Qasey tasks through the native workflow before the main agent", async () => {
+    const [workflowSource, routeSource, adminApiSource] = await Promise.all([
+      readFile(join(projectRoot, "src/mastra/qasey-task-workflow.ts"), "utf8"),
+      readFile(join(projectRoot, "src/mastra/routes.ts"), "utf8"),
+      readFile(join(projectRoot, "apps/admin-ui/src/api.ts"), "utf8"),
+    ]);
+    expect(workflowSource.indexOf('id: "classify-intent"')).toBeLessThan(workflowSource.indexOf('id: "execute-routed-qasey"'));
+    expect(routeSource).not.toContain('getAgent("qasey-main").generate');
+    expect(routeSource).toContain("runQaseyTaskWorkflow");
+    expect(adminApiSource).toContain('"/v1/qasey/tasks"');
+    expect(adminApiSource).not.toContain("/studio/api/agents/");
+  });
+
+  it("bundles protected Studio and builds only the official Mastra worker artifact", async () => {
     const packageJson = JSON.parse(await readFile(join(projectRoot, "package.json"), "utf8")) as {
       scripts: Record<string, string>;
     };
-    const runtimeScript = await readFile(join(projectRoot, "ci/runtime.sh"), "utf8");
+    const [runtimeScript, mastraSource] = await Promise.all([
+      readFile(join(projectRoot, "ci/runtime.sh"), "utf8"),
+      readFile(join(projectRoot, "src/mastra/index.ts"), "utf8"),
+    ]);
+    expect(packageJson.scripts.build).toContain("mastra build --dir src/mastra --studio");
+    expect(mastraSource).toContain("studioUiEnabled: true");
     expect(packageJson.scripts.build).toContain("mastra worker build --dir src/mastra --output-dir .mastra/worker");
     expect(runtimeScript).toContain("exec node .mastra/worker/index.mjs");
     await expect(access(join(projectRoot, "src/mastra/worker-entry.ts"))).rejects.toMatchObject({ code: "ENOENT" });

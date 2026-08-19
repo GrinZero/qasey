@@ -2,6 +2,8 @@ import type { AgentApplicationBundle } from "../../runtime/application.ts";
 
 export interface QaseyApplicationModules {
   agentModule: Pick<typeof import("../../mastra/qasey-agent.ts"), "qaseyAgent">;
+  intentModule: Pick<typeof import("../../mastra/intent-agent.ts"), "intentRouterAgent">;
+  taskWorkflowModule: Pick<typeof import("../../mastra/qasey-task-workflow.ts"), "qaseyTaskWorkflow">;
   e2eModule: Pick<typeof import("../../mastra/e2e-workflow.ts"), "e2eLifecycleWorkflow">;
   scorerModule: Pick<typeof import("../../mastra/eval-scorers.ts"), "qaseyEvalScorers">;
   caseWorkflowModule: Pick<typeof import("../../mastra/metersphere-case-workflow.ts"), "meterSphereCaseOperationWorkflow">;
@@ -21,7 +23,7 @@ export async function createQaseyApplication(
   provided?: QaseyApplicationModules,
 ): Promise<AgentApplicationBundle> {
   const modules = provided ?? await loadQaseyApplicationModules();
-  const { agentModule, e2eModule, scorerModule, caseWorkflowModule, routeModule } = modules;
+  const { agentModule, intentModule, taskWorkflowModule, e2eModule, scorerModule, caseWorkflowModule, routeModule } = modules;
   const qaseyEvalScorers = scorerModule.qaseyEvalScorers;
   return {
     id: "qasey",
@@ -35,17 +37,24 @@ export async function createQaseyApplication(
     },
     agents: {
       "qasey-main": agentModule.qaseyAgent,
+      "qasey-intent-router": intentModule.intentRouterAgent,
     },
     workflows: {
+      "qasey-task": taskWorkflowModule.qaseyTaskWorkflow,
       "qasey-e2e-lifecycle": e2eModule.e2eLifecycleWorkflow,
       "qasey-metersphere-case-operation": caseWorkflowModule.meterSphereCaseOperationWorkflow,
     },
     scorers: qaseyEvalScorers,
     access: {
       agents: {
-        "qasey-main": { permission: "qasey.agent.execute", audiences: ["admin-ui", "api", "service", "channel"] },
+        // Public API and channel callers enter through qasey-task so intent
+        // routing and deterministic completion checks cannot be bypassed.
+        // The OAuth/RBAC-protected Studio remains available for inspection.
+        "qasey-main": { permission: "qasey.agent.execute", audiences: ["admin-ui", "service"] },
+        "qasey-intent-router": { permission: "qasey.intent.route", audiences: ["service"] },
       },
       workflows: {
+        "qasey-task": { permission: "qasey.task.execute", audiences: ["service"] },
         // User lifecycle mutations go through owner-scoped domain routes. Keeping
         // the native workflow service-only prevents resume from bypassing QA RBAC.
         "qasey-e2e-lifecycle": { permission: "qasey.e2e.execute", audiences: ["service"] },
@@ -64,12 +73,14 @@ export async function createQaseyApplication(
 }
 
 async function loadQaseyApplicationModules(): Promise<QaseyApplicationModules> {
-  const [agentModule, e2eModule, scorerModule, caseWorkflowModule, routeModule] = await Promise.all([
+  const [agentModule, intentModule, taskWorkflowModule, e2eModule, scorerModule, caseWorkflowModule, routeModule] = await Promise.all([
     import("../../mastra/qasey-agent.ts"),
+    import("../../mastra/intent-agent.ts"),
+    import("../../mastra/qasey-task-workflow.ts"),
     import("../../mastra/e2e-workflow.ts"),
     import("../../mastra/eval-scorers.ts"),
     import("../../mastra/metersphere-case-workflow.ts"),
     import("../../mastra/routes.ts"),
   ]);
-  return { agentModule, e2eModule, scorerModule, caseWorkflowModule, routeModule };
+  return { agentModule, intentModule, taskWorkflowModule, e2eModule, scorerModule, caseWorkflowModule, routeModule };
 }
