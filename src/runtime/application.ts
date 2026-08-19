@@ -43,13 +43,15 @@ export interface AgentApplicationBundle {
     workflows: Record<string, PrimitiveAccessPolicy>;
     scorers?: Record<string, PrimitiveAccessPolicy>;
     channels?: Record<string, PrimitiveAccessPolicy>;
+    /** Application policy for OpenAI-compatible protocol surfaces. */
+    protocols?: Partial<Record<"conversations" | "responses", PrimitiveAccessPolicy>>;
   };
   routes?: readonly OwnedApiRoute[];
 }
 
 export interface CatalogEntry extends PrimitiveAccessPolicy {
   applicationId: string;
-  resourceType: "agent" | "workflow" | "scorer" | "channel" | "route";
+  resourceType: "agent" | "workflow" | "scorer" | "channel" | "protocol" | "route";
   resourceId: string;
   routePath?: string;
   routeMethod?: string;

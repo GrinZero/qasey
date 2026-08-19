@@ -34,6 +34,7 @@ export function flattenApplicationRegistry(
     mergePrimitives(application, "workflow", application.workflows, application.access.workflows, workflows, canonicalIds, catalog);
     mergePrimitives(application, "scorer", application.scorers ?? {}, application.access.scorers ?? {}, scorers, canonicalIds, catalog);
     validateMetadataCoverage(application.id, "channel", application.access.channels ?? {}, catalog);
+    validateMetadataCoverage(application.id, "protocol", application.access.protocols ?? {}, catalog);
 
     for (const ownedRoute of application.routes ?? []) {
       validatePolicy(`${application.id} route ${ownedRoute.id}`, ownedRoute.access);
@@ -90,13 +91,18 @@ function mergePrimitives<T extends { id: string }>(
 
 function validateMetadataCoverage(
   applicationId: string,
-  resourceType: "channel",
+  resourceType: "channel" | "protocol",
   access: Record<string, PrimitiveAccessPolicy>,
   catalog: CatalogEntry[],
 ): void {
   for (const [resourceId, policy] of Object.entries(access)) {
     validatePolicy(`${applicationId} ${resourceType} ${resourceId}`, policy);
-    catalog.push({ applicationId, resourceType, resourceId, ...policy });
+    catalog.push({
+      applicationId,
+      resourceType,
+      resourceId: resourceType === "protocol" ? `${applicationId}:${resourceId}` : resourceId,
+      ...policy,
+    });
   }
 }
 

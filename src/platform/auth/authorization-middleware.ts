@@ -111,6 +111,27 @@ async function applicationIdForRequestScope(
   return (agentId ? catalog.get(`agent:${agentId}`)?.applicationId : undefined) ?? fallback;
 }
 
+async function agentResourceForProtocolRequest(
+  request: { raw: Request },
+  protocol: ClassifiedResource,
+  catalog: ReadonlyMap<string, CatalogEntry>,
+): Promise<ClassifiedResource | undefined> {
+  if (request.raw.method !== "POST" || !request.raw.headers.get("content-type")?.includes("application/json")) {
+    return protocol;
+  }
+  try {
+    const body = await request.raw.clone().json() as { agent_id?: unknown };
+    if (body.agent_id === undefined) return protocol;
+    if (typeof body.agent_id !== "string") return undefined;
+    const agent = catalog.get(`agent:${body.agent_id}`);
+    if (!agent || agent.applicationId !== protocol.applicationId) return undefined;
+    return { ...agent, action: "execute" };
+  } catch {
+    // The route schema will return the detailed malformed-body response.
+    return protocol;
+  }
+}
+
 export function createAuthorizationMiddleware(options: AuthorizationMiddlewareOptions): Middleware {
   const catalog = new Map(options.catalog.map(entry => [`${entry.resourceType}:${entry.resourceId}`, entry]));
   const routes = options.catalog.filter(entry => entry.resourceType === "route" && entry.routePath);
@@ -121,8 +142,11 @@ export function createAuthorizationMiddleware(options: AuthorizationMiddlewareOp
     if (isPublicRuntimePath(path, c.req.method, options.studioUiEnabled)) return next();
     const requestId = c.req.header("x-request-id") || crypto.randomUUID();
     const requestContext = c.get("requestContext");
-    const resource = classifyRuntimeRoute(path, c.req.method, catalog, routes)
+    const classified = classifyRuntimeRoute(path, c.req.method, catalog, routes)
       ?? (options.studioUiEnabled ? classifyMastraStudioRoute(path, c.req.method) : undefined);
+    const resource = classified?.resourceType === "protocol"
+      ? await agentResourceForProtocolRequest(c.req, classified, catalog)
+      : classified;
     if (resource?.public) return next();
     const principal = await options.resolvePrincipal(requestContext, c.req);
     if (!principal && resource?.downstreamAuthenticated) {
@@ -223,6 +247,15 @@ export function classifyRuntimeRoute(
       applicationId: "platform", resourceType: "platform", resourceId: "workflow-events",
       action: "execute", permission: "platform.workflow-events.receive", audiences: ["service"],
     };
+  }
+  const protocol = mastraPath ? /^\/v1\/(conversations|responses)(?:\/|$)/u.exec(mastraPath) : null;
+  if (protocol) {
+    const resourceIdSuffix = `:${protocol[1]}`;
+    const entries = [...catalog.values()].filter(entry =>
+      entry.resourceType === "protocol" && entry.resourceId.endsWith(resourceIdSuffix),
+    );
+    if (entries.length !== 1) return undefined;
+    return { ...entries[0]!, action: actionFor(method, path) };
   }
   const primitive = mastraPath ? /^\/(agents|workflows|scorers)\/([^/]+)/u.exec(mastraPath) : null;
   if (primitive) {

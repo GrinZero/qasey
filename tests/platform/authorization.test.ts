@@ -11,6 +11,8 @@ const entries: CatalogEntry[] = [
   { applicationId: "alpha", resourceType: "workflow", resourceId: "alpha-job", permission: "alpha.workflow.execute", audiences: ["api"] },
   { applicationId: "alpha", resourceType: "scorer", resourceId: "alpha-quality", permission: "alpha.scorer.read", audiences: ["admin-ui"] },
   { applicationId: "alpha", resourceType: "channel", resourceId: "slack", permission: "alpha.channel.receive", audiences: ["channel"] },
+  { applicationId: "alpha", resourceType: "protocol", resourceId: "alpha:conversations", permission: "alpha.agent.execute", audiences: ["admin-ui", "api", "service"] },
+  { applicationId: "alpha", resourceType: "protocol", resourceId: "alpha:responses", permission: "alpha.agent.execute", audiences: ["admin-ui", "api", "service"] },
 ];
 
 describe("permission route coverage", () => {
@@ -165,6 +167,50 @@ describe("permission route coverage", () => {
     expect(requestContext.get(MASTRA_RESOURCE_ID_KEY)).toBe("alpha:tenant-1:user-1");
   });
 
+  it("scopes OpenAI-compatible protocol requests to their application", async () => {
+    const authorize = vi.fn(async () => true);
+    const middleware = createAuthorizationMiddleware({
+      catalog: [entries[0]!, entries[4]!, entries[5]!],
+      permissions: { authorize } as unknown as PermissionService,
+      audit: { write: vi.fn(async () => undefined) },
+      studioUiEnabled: true,
+      resolvePrincipal: () => OAuthPrincipalSchema.parse({
+        subjectId: "user-1", tenantId: "tenant-1", roles: ["user"], audience: "api",
+      }),
+    });
+    const handler = middleware as Exclude<typeof middleware, { path: string }>;
+    const requests = [
+      new Request("http://localhost:4111/studio/api/v1/conversations/conversation-1"),
+      new Request("http://localhost:4111/studio/api/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agent_id: "alpha-main", input: "hello" }),
+      }),
+    ];
+
+    for (const raw of requests) {
+      const requestContext = new RequestContext();
+      const next = vi.fn(async () => undefined);
+      await handler({
+        req: {
+          path: new URL(raw.url).pathname,
+          method: raw.method,
+          raw,
+          header: (name: string) => raw.headers.get(name) ?? undefined,
+        },
+        get: (key: string) => key === "requestContext" ? requestContext : undefined,
+        json: vi.fn(),
+      } as never, next);
+
+      expect(next).toHaveBeenCalledOnce();
+      expect(requestContext.get("applicationId")).toBe("alpha");
+      expect(requestContext.get(MASTRA_RESOURCE_ID_KEY)).toBe("alpha:tenant-1:user-1");
+    }
+    expect(authorize).toHaveBeenLastCalledWith(expect.objectContaining({
+      resourceType: "agent", resourceId: "alpha-main", permission: "alpha.agent.execute",
+    }));
+  });
+
   it("classifies the pinned Mastra 1.59 route surface and denies unknown routes", () => {
     const catalog = new Map(entries.map(entry => [`${entry.resourceType}:${entry.resourceId}`, entry]));
     for (const expected of manifest) {
@@ -179,6 +225,12 @@ describe("permission route coverage", () => {
     expect(classifyRuntimeRoute("/studio/api/agents/providers", "GET", catalog, [])).toMatchObject({
       resourceType: "platform", resourceId: "runtime", action: "read",
     });
+    const ambiguousProtocols = new Map(catalog);
+    ambiguousProtocols.set("protocol:beta:responses", {
+      applicationId: "beta", resourceType: "protocol", resourceId: "beta:responses",
+      permission: "beta.agent.execute", audiences: ["api"],
+    });
+    expect(classifyRuntimeRoute("/studio/api/v1/responses", "POST", ambiguousProtocols, [])).toBeUndefined();
     expect(classifyRuntimeRoute("/api/unclassified/danger", "POST", catalog, [])).toBeUndefined();
     expect(classifyRuntimeRoute("/studio/api/agents/not-registered/generate", "POST", catalog, [])).toBeUndefined();
   });

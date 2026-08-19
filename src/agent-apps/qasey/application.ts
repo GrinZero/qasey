@@ -64,6 +64,10 @@ export async function createQaseyApplication(
       channels: {
         slack: { permission: "qasey.channel.receive", audiences: ["channel"] },
       },
+      protocols: {
+        conversations: { permission: "qasey.agent.execute", audiences: ["admin-ui", "api", "service"] },
+        responses: { permission: "qasey.agent.execute", audiences: ["admin-ui", "api", "service"] },
+      },
     },
     routes: routeModule.qaseyOwnedApiRoutes,
   };
