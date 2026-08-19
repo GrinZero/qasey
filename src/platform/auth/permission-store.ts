@@ -13,6 +13,7 @@ export interface PermissionCheck {
 export interface PermissionStore {
   permissionsForRoles(tenantId: string, roles: readonly string[]): Promise<ReadonlySet<string>>;
   rolesForSubject(tenantId: string, subjectId: string): Promise<ReadonlySet<string>>;
+  grantRolePermissions?(tenantId: string, role: string, permissions: readonly string[]): Promise<void>;
   grantRolePermission?(tenantId: string, role: string, permission: string): Promise<void>;
   bindSubjectRole?(tenantId: string, subjectId: string, role: string): Promise<void>;
   close?(): Promise<void>;
@@ -30,8 +31,17 @@ export class PermissionService {
   }
 
   async grantRolePermission(tenantId: string, role: string, permission: string): Promise<void> {
+    await this.grantRolePermissions(tenantId, role, [permission]);
+  }
+
+  async grantRolePermissions(tenantId: string, role: string, permissions: readonly string[]): Promise<void> {
+    if (permissions.length === 0) return;
+    if (this.store.grantRolePermissions) {
+      await this.store.grantRolePermissions(tenantId, role, permissions);
+      return;
+    }
     if (!this.store.grantRolePermission) throw new Error("Permission store does not support mutations");
-    await this.store.grantRolePermission(tenantId, role, permission);
+    await Promise.all(permissions.map(permission => this.store.grantRolePermission!(tenantId, role, permission)));
   }
 
   async bindSubjectRole(tenantId: string, subjectId: string, role: string): Promise<void> {
@@ -53,6 +63,10 @@ export class InMemoryPermissionStore implements PermissionStore {
 
   async grantRolePermission(tenantId: string, role: string, permission: string): Promise<void> {
     this.grant(tenantId, role, permission);
+  }
+
+  async grantRolePermissions(tenantId: string, role: string, permissions: readonly string[]): Promise<void> {
+    this.grant(tenantId, role, ...permissions);
   }
 
   async permissionsForRoles(tenantId: string, roles: readonly string[]): Promise<ReadonlySet<string>> {
@@ -131,6 +145,11 @@ export class PostgresPermissionStore implements PermissionStore {
   }
 
   async grantRolePermission(tenantId: string, role: string, permission: string): Promise<void> {
+    await this.grantRolePermissions(tenantId, role, [permission]);
+  }
+
+  async grantRolePermissions(tenantId: string, role: string, permissions: readonly string[]): Promise<void> {
+    if (permissions.length === 0) return;
     await this.ensureInitialized();
     const client = await this.pool.connect();
     try {
@@ -140,8 +159,10 @@ export class PostgresPermissionStore implements PermissionStore {
         [tenantId, role],
       );
       await client.query(
-        "INSERT INTO platform_role_permissions(tenant_id, role_id, permission) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-        [tenantId, role, permission],
+        `INSERT INTO platform_role_permissions(tenant_id, role_id, permission)
+         SELECT $1, $2, permission FROM unnest($3::text[]) AS permission
+         ON CONFLICT DO NOTHING`,
+        [tenantId, role, [...new Set(permissions)]],
       );
       await client.query("COMMIT");
     } catch (error) {

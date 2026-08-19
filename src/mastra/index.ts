@@ -1,6 +1,7 @@
 import "./instrumentation.ts";
 import { Mastra } from "@mastra/core/mastra";
 import type { CustomSpanFormatter } from "@mastra/core/observability";
+import { DatadogBridge } from "@mastra/datadog";
 import { MastraEditor } from "@mastra/editor";
 import { MastraStorageExporter, Observability } from "@mastra/observability";
 import { RedisServerCache } from "@mastra/redis";
@@ -30,6 +31,7 @@ import { sanitizeTelemetry } from "../platform/observability/sanitize.ts";
 import { GoogleOidcService, type PlatformGoogleUser } from "../platform/auth/google-oidc.ts";
 import { MASTRA_API_PREFIX, MASTRA_STUDIO_BASE } from "../runtime/mastra-paths.ts";
 import { closeDevelopmentConnections } from "../platform/http/development-connections.ts";
+import { seedServiceRolePermissions } from "../platform/auth/service-role-permissions.ts";
 
 const googleOidc = new GoogleOidcService({
   ...(config.GOOGLE_CLIENT_ID ? { clientId: config.GOOGLE_CLIENT_ID } : {}),
@@ -66,7 +68,7 @@ const formatDatadogSpan: CustomSpanFormatter = span => {
 };
 
 const datadogBridge = config.QASEY_ENABLE_DATADOG
-  ? new (await import("@mastra/datadog")).DatadogBridge({
+  ? new DatadogBridge({
       mlApp: config.DD_LLMOBS_ML_APP!,
       service: config.DD_SERVICE,
       env: config.DD_ENV ?? config.NODE_ENV,
@@ -80,6 +82,7 @@ const permissionStore = config.NODE_ENV === "production" && config.DATABASE_URL
   ? new PostgresPermissionStore(config.DATABASE_URL)
   : new InMemoryPermissionStore();
 const permissionService = new PermissionService(permissionStore);
+await seedServiceRolePermissions(permissionService, config.JIRA_BASE_URL);
 const auditLog = config.NODE_ENV === "production" && config.DATABASE_URL
   ? new PostgresAuditLog(config.DATABASE_URL)
   : new InMemoryAuditLog();
@@ -232,12 +235,6 @@ const sharedRuntime = createSharedMastraConfig({
           ? new URL(config.JIRA_BASE_URL).hostname
           : "trusted-ingress";
         const role = jiraIngress ? "qasey-ingress" : workerIngress ? "orchestration-worker" : "platform-service";
-        const servicePermissions = jiraIngress
-          ? ["qasey.channel.receive"]
-          : workerIngress
-            ? ["qasey.e2e.execute", "qasey.case-workflow.execute"]
-            : ["platform.catalog.read", "platform.runtime.inspect", "qasey.agent.execute", "qasey.e2e.execute", "qasey.runs.read", "qasey.runs.write"];
-        await Promise.all(servicePermissions.map(permission => permissionService.grantRolePermission(tenantId, role, permission)));
         const service = createServicePrincipal({ subjectId: role, tenantId, roles: [role] });
         return jiraIngress ? OAuthPrincipalSchema.parse({ ...service, audience: "channel" }) : service;
       },
