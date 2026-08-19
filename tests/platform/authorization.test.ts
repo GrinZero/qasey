@@ -231,6 +231,14 @@ describe("permission route coverage", () => {
       permission: "beta.agent.execute", audiences: ["api"],
     });
     expect(classifyRuntimeRoute("/studio/api/v1/responses", "POST", ambiguousProtocols, [])).toBeUndefined();
+    for (const [method, path] of [
+      ["GET", "/studio/api/background-tasks"],
+      ["GET", "/studio/api/background-tasks/task-1"],
+      ["GET", "/studio/api/schedules"],
+      ["POST", "/studio/api/schedules/schedule-1/run"],
+    ] as const) {
+      expect(classifyRuntimeRoute(path, method, catalog, []), `${method} ${path}`).toBeUndefined();
+    }
     expect(classifyRuntimeRoute("/api/unclassified/danger", "POST", catalog, [])).toBeUndefined();
     expect(classifyRuntimeRoute("/studio/api/agents/not-registered/generate", "POST", catalog, [])).toBeUndefined();
   });

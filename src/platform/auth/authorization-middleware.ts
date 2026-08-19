@@ -218,6 +218,11 @@ export function classifyRuntimeRoute(
   routes: readonly CatalogEntry[],
 ): ClassifiedResource | undefined {
   const mastraPath = stripMastraApiPrefix(path);
+  // These Mastra management handlers read global rows by caller-provided
+  // filters or raw ids; the reserved resource context is not enforced. Keep
+  // their HTTP surface closed until a tenant-aware facade owns every action.
+  // Internal background task and scheduler execution does not use these routes.
+  if (mastraPath && /^\/(?:background-tasks|schedules)(?:\/|$)/u.test(mastraPath)) return undefined;
   const channelWebhook = mastraPath
     ? /^\/agents\/([^/]+)\/channels\/([^/]+)\/webhook\/?$/u.exec(mastraPath)
     : null;
