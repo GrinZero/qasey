@@ -37,4 +37,29 @@ describe("runtime readiness", () => {
     readiness.register("database", async () => undefined);
     await expect(readiness.inspect()).resolves.toEqual({ ready: false, dependencies: {} });
   });
+
+  it("coalesces concurrent probes and caches their result briefly", async () => {
+    let now = 1_000;
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const check = vi.fn(() => blocked);
+    const readiness = new ReadinessRegistry({ cacheTtlMs: 2_000, now: () => now });
+    readiness.register("database", check);
+    readiness.markInitializationComplete();
+
+    const first = readiness.inspect();
+    const concurrent = readiness.inspect();
+    expect(check).toHaveBeenCalledTimes(1);
+    release();
+    await expect(Promise.all([first, concurrent])).resolves.toEqual([
+      { ready: true, dependencies: { database: "ready" } },
+      { ready: true, dependencies: { database: "ready" } },
+    ]);
+
+    await readiness.inspect();
+    expect(check).toHaveBeenCalledTimes(1);
+    now += 2_001;
+    await readiness.inspect();
+    expect(check).toHaveBeenCalledTimes(2);
+  });
 });
