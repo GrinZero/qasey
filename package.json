@@ -10,7 +10,7 @@
   },
   "scripts": {
     "predev": "pnpm admin-ui:build",
-    "dev": "moego-aws-secret-env run --default-environment testing -- mastra dev --dir src/mastra",
+    "dev": "tsx scripts/dev.ts",
     "mcp:login": "tsx apps/cli/src/mcp-login.ts",
     "start": "node .mastra/output/index.mjs",
     "admin-ui:build": "pnpm --dir apps/admin-ui build",
