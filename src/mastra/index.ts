@@ -3,38 +3,63 @@ import { Mastra } from "@mastra/core/mastra";
 import type { CustomSpanFormatter } from "@mastra/core/observability";
 import { MastraEditor } from "@mastra/editor";
 import { MastraStorageExporter, Observability } from "@mastra/observability";
-import { MastraAuthGoogle } from "@mastra/auth-google";
-import { qaseyAgent } from "./qasey-agent.ts";
-import { intentRouterAgent } from "./intent-agent.ts";
-import { apiRoutes } from "./routes.ts";
-import { config, createMastraRuntimeStorage, studioEditorEnabled } from "./runtime.ts";
-import { e2eLifecycleWorkflow } from "./e2e-workflow.ts";
+import { RedisServerCache } from "@mastra/redis";
+import { RedisStreamsPubSub } from "@mastra/redis-streams";
+import Redis from "ioredis";
+import { QASEY_TRACE_REQUEST_CONTEXT_KEYS } from "./observability.ts";
+import { closeQaseyInfrastructure, config, createMastraRuntimeStorage, studioEditorEnabled } from "./runtime.ts";
+import { createQaseyApplication } from "../agent-apps/qasey/application.ts";
+import * as qaseyAgentModule from "./qasey-agent.ts";
+import * as e2eModule from "./e2e-workflow.ts";
+import * as scorerModule from "./eval-scorers.ts";
+import * as caseWorkflowModule from "./metersphere-case-workflow.ts";
+import * as routeModule from "./routes.ts";
+import { createSharedMastraConfig } from "../runtime/create-runtime.ts";
+import { createAuthorizationMiddleware, isMastraStudioRequest, resolveRequestUser } from "../platform/auth/authorization-middleware.ts";
+import { InMemoryAuditLog, PostgresAuditLog } from "../platform/auth/audit-log.ts";
+import { InMemoryPermissionStore, PermissionService, PostgresPermissionStore } from "../platform/auth/permission-store.ts";
+import { OAuthPrincipalSchema, createServicePrincipal, mapOAuthPrincipal } from "../platform/auth/oauth-principal.ts";
+import { verifyWebhookToken } from "../../packages/adapters/src/index.ts";
+import { createScopedWorkspace } from "../platform/workspace/create-workspace.ts";
+import { createAdminUiApplication } from "../platform/admin-ui/application.ts";
+import { flattenApplicationRegistry } from "../runtime/registry-validator.ts";
+import { LifecycleContainer } from "../platform/storage/lifecycle.ts";
+import { sanitizeTelemetry } from "../platform/observability/sanitize.ts";
+import { GoogleOidcService, type PlatformGoogleUser } from "../platform/auth/google-oidc.ts";
+import { MASTRA_API_PREFIX, MASTRA_STUDIO_BASE } from "../runtime/mastra-paths.ts";
 
-const googleAuth = config.GOOGLE_CLIENT_ID ? new MastraAuthGoogle({
-  clientId: config.GOOGLE_CLIENT_ID,
+const googleOidc = new GoogleOidcService({
+  ...(config.GOOGLE_CLIENT_ID ? { clientId: config.GOOGLE_CLIENT_ID } : {}),
   ...(config.GOOGLE_CLIENT_SECRET ? { clientSecret: config.GOOGLE_CLIENT_SECRET } : {}),
-  redirectUri: config.GOOGLE_REDIRECT_URI ?? `${config.QASEY_PUBLIC_BASE_URL.replace(/\/$/, "")}/api/auth/sso/callback`,
+  callbackUrl: config.GOOGLE_REDIRECT_URI ?? `${config.QASEY_PUBLIC_BASE_URL.replace(/\/$/, "")}/auth/google/callback`,
+  ...(config.GOOGLE_COOKIE_PASSWORD ? { cookiePassword: config.GOOGLE_COOKIE_PASSWORD } : {}),
   ...(config.GOOGLE_ALLOWED_DOMAINS ? { allowedDomains: config.GOOGLE_ALLOWED_DOMAINS } : {}),
   ...(config.GOOGLE_HOSTED_DOMAIN ? { hostedDomain: config.GOOGLE_HOSTED_DOMAIN } : {}),
-  session: {
-    ...(config.GOOGLE_COOKIE_PASSWORD ? { cookiePassword: config.GOOGLE_COOKIE_PASSWORD } : {}),
-    secureCookies: config.NODE_ENV === "production",
-  },
-  mapUserToResourceId: user => user.id,
-}) : undefined;
+  secureCookies: config.NODE_ENV === "production",
+});
+
+function isGoogleUser(user: unknown): user is PlatformGoogleUser {
+  return typeof user === "object" && user !== null
+    && "googleId" in user && typeof user.googleId === "string";
+}
 
 const formatDatadogSpan: CustomSpanFormatter = span => {
   const requestContext = span.requestContext ? {
+    applicationId: span.requestContext.applicationId,
     requestId: span.requestContext.requestId,
+    tenantId: span.requestContext.tenantId,
+    userId: span.requestContext.userId,
     channel: span.requestContext.channel,
+    threadId: span.requestContext.mastra__threadId,
+    taskId: span.requestContext.taskId,
     intent: span.requestContext.intent,
     writeTarget: span.requestContext.writeTarget,
   } : undefined;
-  return {
+  return sanitizeTelemetry({
     ...span,
     ...(requestContext ? { requestContext } : {}),
     ...(config.QASEY_DATADOG_CAPTURE_CONTENT ? {} : { input: undefined, output: undefined }),
-  };
+  }) as typeof span;
 };
 
 const datadogBridge = config.QASEY_ENABLE_DATADOG
@@ -43,32 +68,173 @@ const datadogBridge = config.QASEY_ENABLE_DATADOG
       service: config.DD_SERVICE,
       env: config.DD_ENV ?? config.NODE_ENV,
       agentless: false,
-      requestContextKeys: ["channel", "intent", "writeTarget"],
+      requestContextKeys: ["applicationId", "requestId", "tenantId", "userId", "mastra__threadId", "taskId", "channel", "intent", "writeTarget"],
       customSpanFormatter: formatDatadogSpan,
     })
   : undefined;
 
-export const mastra = new Mastra({
-  agents: { qaseyAgent, intentRouterAgent },
-  workflows: { e2eLifecycleWorkflow },
-  storage: createMastraRuntimeStorage(),
-  observability: new Observability({
+const permissionStore = config.NODE_ENV === "production" && config.DATABASE_URL
+  ? new PostgresPermissionStore(config.DATABASE_URL)
+  : new InMemoryPermissionStore();
+const permissionService = new PermissionService(permissionStore);
+const auditLog = config.NODE_ENV === "production" && config.DATABASE_URL
+  ? new PostgresAuditLog(config.DATABASE_URL)
+  : new InMemoryAuditLog();
+const bootstrapAdmins = new Set((process.env.PLATFORM_BOOTSTRAP_ADMIN_EMAILS ?? "")
+  .split(",").map(value => value.trim().toLowerCase()).filter(Boolean));
+const qaseyApplication = await createQaseyApplication({
+  agentModule: qaseyAgentModule,
+  e2eModule,
+  scorerModule,
+  caseWorkflowModule,
+  routeModule,
+});
+const qaseyCatalog = flattenApplicationRegistry([qaseyApplication]).catalog;
+const adminUiApplication = createAdminUiApplication({
+  applicationCatalog: qaseyCatalog,
+  applications: [qaseyApplication],
+  permissions: permissionService,
+  audit: auditLog,
+  googleOidc,
+});
+const lifecycle = new LifecycleContainer();
+lifecycle.own({ close: closeQaseyInfrastructure });
+if (permissionStore.close) lifecycle.own({ close: () => permissionStore.close!() });
+if (auditLog.close) lifecycle.own({ close: () => auditLog.close!() });
+const workspace = lifecycle.own(createScopedWorkspace({
+  root: config.QASEY_WORKSPACE_DIR,
+  production: config.NODE_ENV === "production",
+  enableCodeExecution: config.QASEY_ENABLE_LOCAL_CODE_MODE,
+}));
+const redisKeyPrefix = `qasey:${process.env.NAMESPACE?.trim() || config.NODE_ENV}`;
+const redisUrl = config.REDIS_HOST
+  ? `${config.REDIS_TLS ? "rediss" : "redis"}://${config.REDIS_HOST}:${config.REDIS_PORT ?? 6379}`
+  : undefined;
+const pubsub = config.REDIS_HOST
+  ? new RedisStreamsPubSub({
+      url: redisUrl!,
+      keyPrefix: redisKeyPrefix,
+      redisOptions: {
+        ...(config.REDIS_USERNAME ? { username: config.REDIS_USERNAME } : {}),
+        ...(config.REDIS_PASSWORD ? { password: config.REDIS_PASSWORD } : {}),
+        socket: {
+          host: config.REDIS_HOST,
+          port: config.REDIS_PORT ?? 6379,
+          ...(config.REDIS_TLS ? {
+            tls: true as const,
+            ...(config.REDIS_TLS_SERVERNAME ? { servername: config.REDIS_TLS_SERVERNAME } : {}),
+          } : {}),
+        },
+      },
+    })
+  : undefined;
+const cacheClient = config.REDIS_HOST
+  ? new Redis({
+      host: config.REDIS_HOST,
+      port: config.REDIS_PORT ?? 6379,
+      ...(config.REDIS_USERNAME ? { username: config.REDIS_USERNAME } : {}),
+      ...(config.REDIS_PASSWORD ? { password: config.REDIS_PASSWORD } : {}),
+      ...(config.REDIS_TLS ? {
+        tls: {
+          ...(config.REDIS_TLS_SERVERNAME ? { servername: config.REDIS_TLS_SERVERNAME } : {}),
+        },
+      } : {}),
+      maxRetriesPerRequest: 3,
+    })
+  : undefined;
+if (cacheClient) lifecycle.own({ close: async () => { await cacheClient.quit(); } });
+const cache = cacheClient
+  ? new RedisServerCache({ client: cacheClient }, { keyPrefix: `${redisKeyPrefix}:cache` })
+  : undefined;
+
+const sharedRuntime = createSharedMastraConfig({
+  applications: [qaseyApplication, adminUiApplication],
+  platform: {
+    storage: createMastraRuntimeStorage(),
+    ...(pubsub ? { pubsub } : {}),
+    ...(cache ? { cache } : {}),
+    observability: new Observability({
     configs: {
       default: {
-        serviceName: "qasey",
+        serviceName: "shared-mastra-runtime",
         logging: { enabled: true, level: "info" },
+        requestContextKeys: [
+          "applicationId", "requestId", "tenantId", "userId", "channel", "ingressSource", "sessionId",
+          "mastra__resourceId", "mastra__threadId", "externalWriteIdempotencyKey", ...QASEY_TRACE_REQUEST_CONTEXT_KEYS,
+        ],
         ...(datadogBridge ? { bridge: datadogBridge } : {}),
         exporters: [new MastraStorageExporter()],
       },
     },
-  }),
-  ...(studioEditorEnabled ? { editor: new MastraEditor({ source: "db" }) } : {}),
-  environment: config.NODE_ENV,
+    }),
+    ...(studioEditorEnabled ? { editor: new MastraEditor({ source: "db" }) } : {}),
+    environment: config.NODE_ENV,
+    workspace,
+  },
   server: {
-    ...(googleAuth ? { auth: googleAuth } : {}),
-    apiRoutes,
+    studioBase: MASTRA_STUDIO_BASE,
+    apiPrefix: MASTRA_API_PREFIX,
     cors: { origin: [], allowMethods: ["GET", "POST"], allowHeaders: ["content-type", "authorization", "x-qasey-webhook-token"] },
   },
+  middlewareFactory: catalog => createAuthorizationMiddleware({
+    catalog,
+    permissions: permissionService,
+    audit: auditLog,
+    studioUiEnabled: config.NODE_ENV === "development",
+    resolvePrincipal: async (requestContext, request) => {
+      const user = await resolveRequestUser(requestContext, request, isGoogleUser, googleOidc);
+      if (user) {
+        const tenantId = user.hostedDomain ?? user.email?.split("@")[1];
+        if (!tenantId) return undefined;
+        const roles = ["user"];
+        if (user.email && bootstrapAdmins.has(user.email.toLowerCase())) roles.push("platform-admin");
+        if (permissionStore instanceof InMemoryPermissionStore) {
+          permissionStore.grant(
+            tenantId,
+            "user",
+            "platform.admin-ui.access",
+            "qasey.agent.execute",
+            "qasey.e2e.execute",
+            "qasey.runs.read",
+            "qasey.runs.write",
+            "qasey.runs.approve",
+          );
+        }
+        return mapOAuthPrincipal(user, {
+          subjectId: value => value.id,
+          tenantId: () => tenantId,
+          roles: () => roles,
+          email: value => value.email,
+          audience: request.path.startsWith("/admin") || isMastraStudioRequest(request) ? "admin-ui" : "api",
+        });
+      }
+      const ingressToken = request.header("authorization")?.replace(/^Bearer\s+/iu, "")
+        ?? request.header("x-qasey-webhook-token");
+      const jiraIngress = request.path.includes("jira");
+      const workerIngress = !jiraIngress && verifyWebhookToken(ingressToken, config.WORKER_TOKEN);
+      const platformIngress = !jiraIngress && verifyWebhookToken(ingressToken, config.PLATFORM_SERVICE_TOKEN);
+      if (jiraIngress ? !verifyWebhookToken(ingressToken, config.JIRA_WEBHOOK_TOKEN) : !workerIngress && !platformIngress) {
+        return undefined;
+      }
+      const tenantId = jiraIngress && config.JIRA_BASE_URL
+        ? new URL(config.JIRA_BASE_URL).hostname
+        : "trusted-ingress";
+      const role = jiraIngress ? "qasey-ingress" : workerIngress ? "orchestration-worker" : "platform-service";
+      const servicePermissions = jiraIngress
+        ? ["qasey.channel.receive"]
+        : workerIngress
+          ? ["qasey.e2e.execute", "qasey.case-workflow.execute"]
+          : ["platform.catalog.read", "platform.runtime.inspect", "qasey.agent.execute", "qasey.e2e.execute", "qasey.runs.read", "qasey.runs.write"];
+      await Promise.all(servicePermissions.map(permission => permissionService.grantRolePermission(tenantId, role, permission)));
+      const service = createServicePrincipal({ subjectId: role, tenantId, roles: [role] });
+      return jiraIngress ? OAuthPrincipalSchema.parse({ ...service, audience: "channel" }) : service;
+    },
+  }),
+});
+
+export const mastra = new Mastra({
+  ...sharedRuntime.config,
+  recovery: { durableAgents: "auto" },
   bundler: {
     externals: [
       "@duckdb/node-bindings",
@@ -80,3 +246,5 @@ export const mastra = new Mastra({
     ],
   },
 });
+export const applicationCatalog = sharedRuntime.catalog;
+export const closeRuntime = (): Promise<void> => lifecycle.close();

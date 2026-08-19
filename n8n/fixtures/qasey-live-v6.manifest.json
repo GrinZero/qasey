@@ -8,7 +8,7 @@
   "slackEvents": ["app_mention", "message.im"],
   "intents": ["qa_quick_query", "qa_review", "case_create_full", "case_maintain_fast", "experience_read", "experience_write", "meta_or_out_of_scope", "unknown"],
   "memory": { "backend": "postgres", "recentHistoryMessages": 6 },
-  "models": { "orchestrator": "gpt-5.6-sol", "fallback": "gpt-5.5", "router": "gpt-5.4-mini", "researcher": "gpt-5.6-luna" },
+  "models": { "orchestrator": "gpt-5.6-sol", "fallback": "gpt-5.5", "router": "gpt-5.6-luna", "researcher": "gpt-5.6-luna" },
   "mcpServers": ["metersphere", "figma", "qa_experience", "moego_rag", "lark"],
   "subworkflows": ["NGToJD8vw6Fyt57x", "umXhKwCR0IBtU0jj", "uVCYlqy2EtqMhKmR", "KJCHhS3A6Gvwyf1Y"],
   "invariants": [

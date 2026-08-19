@@ -1,15 +1,33 @@
+import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
 import { execFile } from "node:child_process";
 import { lstat, readFile, readlink } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { RepositoryProfile } from "../../contracts/src/index.ts";
+import type { QaseyConfig } from "./config.ts";
 
 const execFileAsync = promisify(execFile);
 
+type GitHubAppConfig = Pick<
+  QaseyConfig,
+  "GITHUB_APP_ID" | "GITHUB_APP_INSTALLATION_ID" | "GITHUB_APP_PRIVATE_KEY"
+>;
+
+export function createGitHubClient(config: GitHubAppConfig): Octokit | undefined {
+  if (!config.GITHUB_APP_ID || !config.GITHUB_APP_INSTALLATION_ID || !config.GITHUB_APP_PRIVATE_KEY) return undefined;
+  return new Octokit({
+    authStrategy: createAppAuth,
+    auth: {
+      appId: config.GITHUB_APP_ID,
+      installationId: config.GITHUB_APP_INSTALLATION_ID,
+      privateKey: config.GITHUB_APP_PRIVATE_KEY,
+    },
+  });
+}
+
 export class GitHubPublisher {
-  private readonly octokit: Octokit | undefined;
-  constructor(token?: string) { this.octokit = token ? new Octokit({ auth: token }) : undefined; }
+  constructor(private readonly octokit?: Octokit) {}
   get configured(): boolean { return Boolean(this.octokit); }
 
   async publishWorkspace(input: {
@@ -80,7 +98,7 @@ export class GitHubPublisher {
   }
 
   private requireClient(): Octokit {
-    if (!this.octokit) throw new Error("GITHUB_TOKEN is not configured");
+    if (!this.octokit) throw new Error("GitHub App authentication is not configured");
     return this.octokit;
   }
 }

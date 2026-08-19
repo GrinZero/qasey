@@ -1,3 +1,5 @@
+import "../load-env.ts";
+
 export const datadogEnabled = process.env.QASEY_ENABLE_DATADOG === "true";
 
 export type DatadogTracer = typeof import("dd-trace")["default"];

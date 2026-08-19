@@ -1,7 +1,7 @@
 node_modules/
 dist/
 .mastra/
-.env
+.env.secret
 .env.local
 .qasey/*
 artifacts/
@@ -10,3 +10,16 @@ test-results/
 *.log
 .DS_Store
 !.qasey/mcp.json
+.playwright-cli
+
+# @moego/aws-secret-env
+!.env
+!.env.*
+.env.local
+.env.*.local
+.env.secret
+.env.secret.tmp
+.env.secret.*.tmp
+!.env.local.example
+!.env.secret.example
+# end @moego/aws-secret-env

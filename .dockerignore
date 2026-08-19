@@ -1,4 +1,7 @@
 .git
+.env.secret
+.env.local
+.env.*.local
 .qasey/*
 !.qasey/mcp.json
 .mastra
@@ -7,3 +10,13 @@ node_modules
 test-results
 playwright-report
 **/artifacts
+
+# @moego/aws-secret-env
+!.env
+!.env.*
+.env.local
+.env.*.local
+.env.secret
+.env.secret.tmp
+.env.secret.*.tmp
+# end @moego/aws-secret-env

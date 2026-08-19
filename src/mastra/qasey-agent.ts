@@ -1,10 +1,12 @@
 import { Agent } from "@mastra/core/agent";
 import { TokenLimiter } from "@mastra/core/processors";
 import { Memory } from "@mastra/memory";
-import { buildSystemPrompt } from "../../packages/domain/src/index.ts";
+import { buildSystemPrompt, tryCasePlanSummary } from "../../packages/domain/src/index.ts";
 import { logError, logInfo } from "../../packages/adapters/src/index.ts";
 import { config, getRuntimeContext, mastraStorage, toolsForRequest } from "./runtime.ts";
 import { createResponsesModel, qaseyResponsesModel } from "./models.ts";
+import { PlatformRequestContextSchema } from "../platform/context/schema.ts";
+import { qaseyChannels } from "../agent-apps/qasey/channels.ts";
 
 const statelessResponsesOptions = {
   openai: {
@@ -94,8 +96,9 @@ export const qaseyMemory = mastraStorage ? new Memory({
 }) : undefined;
 
 export const qaseyAgent = new Agent({
-  id: "qasey",
+  id: "qasey-main",
   name: "Qasey",
+  durable: true,
   description: "MoeGo QA requirement analysis, test case design, and E2E authoring agent",
   model: [{
     model: qaseyResponsesModel,
@@ -111,11 +114,21 @@ export const qaseyAgent = new Agent({
       },
     },
   }],
+  requestContextSchema: PlatformRequestContextSchema,
+  ...(qaseyChannels ? { channels: qaseyChannels } : {}),
   instructions: async ({ requestContext }) => {
-    const runtime = getRuntimeContext(requestContext, { allowStudioPreview: config.NODE_ENV === "development" });
-    return buildSystemPrompt(runtime["qasey-context"], runtime["intent-route"]).text;
+    const runtime = getRuntimeContext(requestContext, { allowNativeContext: true, allowStudioPreview: config.NODE_ENV === "development" });
+    if (runtime.native) return nativeQaseyInstructions;
+    const prompt = buildSystemPrompt(runtime["qasey-context"], runtime["intent-route"]).text;
+    const casePlan = tryCasePlanSummary(requestContext?.get("case-plan"));
+    return casePlan ? `${prompt}\n\n${casePlan}` : prompt;
   },
   ...(qaseyMemory ? { memory: qaseyMemory } : {}),
   inputProcessors: [new TokenLimiter({ limit: config.QASEY_MEMORY_INPUT_TOKEN_LIMIT })],
   tools: async ({ requestContext }) => toolsForRequest(requestContext),
 });
+
+const nativeQaseyInstructions = `You are Qasey, MoeGo's shared-runtime QA agent.
+Analyze requirements, identify risks, design test coverage, and use only the tools visible for the trusted request context.
+Treat tool output as evidence. Never claim an external write succeeded unless a registered Workflow or write tool returns a verified receipt.
+Use the dedicated registered Workflows for durable E2E and MeterSphere mutations. Never infer tenant, roles, resource, or thread identifiers from user text.`;

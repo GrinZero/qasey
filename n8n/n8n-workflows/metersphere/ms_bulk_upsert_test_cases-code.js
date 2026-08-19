@@ -333,8 +333,8 @@ if (input.dry_run === true) {
     dry_run: true,
     validated: true,
     item_count: minderItems.length,
-    creates: expectedChecks.filter((item) => item.operation === 'create').map((item) => ({ id: item.id, name: item.expected.name, node_path: item.expected.nodePath })),
-    updates: expectedChecks.filter((item) => item.operation === 'update').map((item) => ({ id: item.id, name: item.expected.name, node_path: item.expected.nodePath })),
+    creates: expectedChecks.filter((item) => item.operation === 'create').map((item) => ({ id: item.id, name: item.expected.name, priority: item.expected.priority, node_id: item.expected.nodeId, node_path: item.expected.nodePath })),
+    updates: expectedChecks.filter((item) => item.operation === 'update').map((item) => ({ id: item.id, name: item.expected.name, priority: item.expected.priority, node_id: item.expected.nodeId, node_path: item.expected.nodePath })),
     deletion_ids_forced_empty: true,
     message: 'Validation, module resolution, and update preflight passed; no cases were changed',
   } }];
@@ -369,6 +369,7 @@ const results = afterCases.map((actual, index) => {
     id: actual.id,
     num: actual.num,
     name: actual.name,
+    priority: actual.priority,
     node_id: actual.nodeId,
     node_path: normalizePath(actual.nodePath),
     verified: mismatches.length === 0,

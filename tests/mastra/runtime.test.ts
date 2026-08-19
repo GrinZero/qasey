@@ -3,8 +3,8 @@ import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import { describe, expect, it, vi } from "vitest";
 import type { IntentRoute, QaseyRequestContext } from "../../packages/contracts/src/index.ts";
-import { EvidenceLedger } from "../../packages/domain/src/index.ts";
-import { getRuntimeContext, guardToolsWithEvidence, toolsForRequest } from "../../src/mastra/runtime.ts";
+import { AgentProgressSession, EvidenceLedger } from "../../packages/domain/src/index.ts";
+import { createAgentProgressTool, getRuntimeContext, guardCaseMutationsForWorkflow, guardToolsWithEvidence, toolsForRequest } from "../../src/mastra/runtime.ts";
 
 describe("Qasey runtime context", () => {
   it("keeps missing context strict for production callers", () => {
@@ -84,5 +84,58 @@ describe("Qasey runtime context", () => {
     await expect(guardedExecute({ value: "one" }, {})).resolves.toEqual({ value: "one" });
     await expect(guardedExecute({ value: "one" }, {})).resolves.toMatchObject({ status: "already_acquired" });
     expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets the agent dry-run a CasePlan but reserves real case mutations for the workflow", async () => {
+    const bulkExecute = vi.fn(async () => ({ ok: true }));
+    const createExecute = vi.fn(async () => ({ ok: true }));
+    const guarded = guardCaseMutationsForWorkflow({
+      metersphere_ms_bulk_upsert_test_cases: createTool({
+        id: "metersphere_ms_bulk_upsert_test_cases",
+        description: "test bulk upsert",
+        inputSchema: z.object({ items: z.string(), dry_run: z.boolean() }),
+        execute: bulkExecute,
+      }),
+      metersphere_ms_create_test_case: createTool({
+        id: "metersphere_ms_create_test_case",
+        description: "test single create",
+        inputSchema: z.object({ name: z.string() }),
+        execute: createExecute,
+      }),
+    });
+    const bulk = (guarded.metersphere_ms_bulk_upsert_test_cases as { execute: (input: unknown, context: unknown) => Promise<unknown> }).execute;
+    const create = (guarded.metersphere_ms_create_test_case as { execute: (input: unknown, context: unknown) => Promise<unknown> }).execute;
+
+    await expect(bulk({ items: "[]", dry_run: true }, {})).resolves.toEqual({ ok: true });
+    await expect(bulk({ items: "[]", dry_run: false }, {})).rejects.toThrow(/owned by the MeterSphere case operation workflow/i);
+    await expect(create({ name: "case" }, {})).rejects.toThrow(/owned by the MeterSphere case operation workflow/i);
+    expect(bulkExecute).toHaveBeenCalledTimes(1);
+    expect(createExecute).not.toHaveBeenCalled();
+  });
+
+  it("exposes qasey_report_progress as an agent-callable structured tool", async () => {
+    const delivered: string[] = [];
+    const route: IntentRoute = {
+      version: 2,
+      intent: "qa_review",
+      relation: "new",
+      writeTarget: "none",
+      depth: "standard",
+      confidence: 1,
+      reason: "test",
+      routerStatus: "ok",
+    };
+    const tool = createAgentProgressTool(new AgentProgressSession(route, report => {
+      delivered.push(report.milestone);
+    }));
+    const execute = (tool as { execute: (input: unknown, context: unknown) => Promise<unknown> }).execute;
+
+    await expect(execute({
+      milestone: "evidence",
+      title: "正在核对退款规则",
+      detail: "Jira 和代码对超时退款的描述不一致。",
+      next: "确认线上实际行为",
+    }, {})).resolves.toMatchObject({ accepted: true, milestone: "evidence", sequence: 1 });
+    expect(delivered).toEqual(["evidence"]);
   });
 });

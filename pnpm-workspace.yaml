@@ -9,6 +9,7 @@ allowBuilds:
   esbuild: true
   utf-8-validate: true
 minimumReleaseAgeExclude:
+  - '@moego/aws-secret-env@0.1.0'
   - '@mastra/core@1.58.0'
   - '@mastra/mcp@1.16.0'
   - '@mastra/memory@1.26.1'

@@ -23,6 +23,15 @@ describe("MCP configuration and OAuth storage", () => {
     }
   });
 
+  it("does not fall back to legacy MCP URL and token environment variables", () => {
+    const config = loadConfig({
+      QASEY_MCP_CONFIG_FILE: "/path/that/does/not/exist.json",
+      METERSPHERE_MCP_URL: "https://legacy.example.test/mcp",
+      METERSPHERE_MCP_TOKEN: "legacy-token",
+    } as NodeJS.ProcessEnv);
+    expect(loadMcpServerConfigs(config)).toEqual({});
+  });
+
   it("persists local OAuth state outside environment variables", async () => {
     const root = await mkdtemp(join(tmpdir(), "qasey-oauth-store-"));
     try {

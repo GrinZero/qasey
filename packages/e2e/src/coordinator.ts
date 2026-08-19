@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { CreateE2ERun, E2ERun, QaVerdict } from "../../contracts/src/index.ts";
+import type { CreateE2ERun, E2ERun, OwnerScope, QaVerdict } from "../../contracts/src/index.ts";
 import { assertRunTransition, type RunRepository } from "../../domain/src/index.ts";
 import type { ArtifactStore } from "./artifacts.ts";
 import type { CuaFallback } from "./cua.ts";
@@ -30,39 +30,40 @@ export class E2ECoordinator {
     private readonly options: { maxRepairs: number; reviewBaseUrl: string; cua?: CuaFallback },
   ) {}
 
-  async create(input: CreateE2ERun): Promise<E2ERun> {
+  async create(owner: OwnerScope, input: CreateE2ERun): Promise<E2ERun> {
     if ((input.platform === "web") !== (input.framework === "playwright")) throw new Error("Web requires Playwright; app requires Maestro");
     const now = new Date().toISOString();
     const run: E2ERun = {
+      ...owner,
       id: randomUUID(), requestId: input.requestId ?? randomUUID(), sourceSessionId: input.sourceSessionId,
       sourceCaseIds: input.sourceCaseIds, repository: input.repository, platform: input.platform,
       framework: input.framework, status: "queued", createdAt: now, updatedAt: now, artifacts: [],
     };
-    await this.repository.create(run);
-    await this.repository.addEvent(run.id, "run.created", "E2E run queued");
+    await this.repository.create(owner, run);
+    await this.repository.addEvent(owner, run.id, "run.created", "E2E run queued");
     return run;
   }
 
-  async execute(runId: string, qaFeedback?: string): Promise<void> {
+  async execute(owner: OwnerScope, runId: string, qaFeedback?: string): Promise<void> {
     try {
-      await this.authorAndPersistPatch(runId, qaFeedback);
-      await this.cleanVerifyAndPublish(runId);
+      await this.authorAndPersistPatch(owner, runId, qaFeedback);
+      await this.cleanVerifyAndPublish(owner, runId);
     } catch (error) {
-      await this.fail(runId, error);
+      await this.fail(owner, runId, error);
     }
   }
 
-  async authorAndPersistPatch(runId: string, qaFeedback?: string): Promise<void> {
-    let run = await this.requireRun(runId);
+  async authorAndPersistPatch(owner: OwnerScope, runId: string, qaFeedback?: string): Promise<void> {
+    let run = await this.requireRun(owner, runId);
     let author: WorkspaceRef | undefined;
     try {
       const isQaRepair = run.status === "repairing";
-      run = await this.transition(run, "preparing_workspace", "Preparing isolated author workspace");
+      run = await this.transition(owner, run, "preparing_workspace", "Preparing isolated author workspace");
       author = await this.workspaces.create(run.repository, `${run.id}-author`);
-      if (isQaRepair) await this.workspaces.applyPatch(author, await this.artifacts.loadPatch(run.id));
+      if (isQaRepair) await this.workspaces.applyPatch(author, await this.artifacts.loadPatch(owner, run.id));
       await this.installDependencies(author);
-      run = await this.repository.update(run.id, { branch: author.branch });
-      run = await this.transition(run, "authoring", isQaRepair ? "Applying QA feedback in ACP coding harness" : "Delegating E2E authoring to ACP coding harness");
+      run = await this.repository.update(owner, run.id, { branch: author.branch });
+      run = await this.transition(owner, run, "authoring", isQaRepair ? "Applying QA feedback in ACP coding harness" : "Delegating E2E authoring to ACP coding harness");
       await this.harness.author({
         runId: run.id, framework: run.framework, sourceCaseIds: run.sourceCaseIds,
         instruction: qaFeedback
@@ -73,18 +74,18 @@ export class E2ECoordinator {
       let authorResult: E2ERunResult | undefined;
       for (let repair = 0; repair <= this.options.maxRepairs; repair += 1) {
         await this.workspaces.assertAllowedChanges(author);
-        run = await this.transition(run, "author_running", `Running ${run.framework} in author workspace (attempt ${repair + 1})`);
+        run = await this.transition(owner, run, "author_running", `Running ${run.framework} in author workspace (attempt ${repair + 1})`);
         authorResult = await this.runners[run.framework].run(author, `${run.id}:author:${repair}`);
-        run = await this.appendArtifacts(run, await this.artifacts.persist(run.id, "author", authorResult.artifacts));
+        run = await this.appendArtifacts(owner, run, await this.artifacts.persist(owner, run.id, "author", authorResult.artifacts));
         if (authorResult.passed) break;
         if (isAssertionFailure(authorResult) || repair === this.options.maxRepairs) {
           throw new Error(`Author run failed without an eligible repair: ${authorResult.summary.slice(-1500)}`);
         }
-        run = await this.transition(run, "repairing", `Author run failed; starting bounded repair ${repair + 1}`);
+        run = await this.transition(owner, run, "repairing", `Author run failed; starting bounded repair ${repair + 1}`);
         let exploration = "";
         if (isLocatorFailure(authorResult) && repair === this.options.maxRepairs - 1 && this.options.cua) {
           const observed = await this.options.cua.observe(author, run.id, "Observe the failing UI flow and suggest deterministic Playwright/Maestro steps. Do not judge pass/fail.");
-          run = await this.appendArtifacts(run, await this.artifacts.persist(run.id, "author", observed.artifacts));
+          run = await this.appendArtifacts(owner, run, await this.artifacts.persist(owner, run.id, "author", observed.artifacts));
           exploration = `\nCua observation (advisory only):\n${observed.summary}`;
         }
         await this.harness.author({
@@ -95,58 +96,58 @@ export class E2ECoordinator {
       if (!authorResult?.passed) throw new Error("Author run did not pass");
       await this.workspaces.assertAllowedChanges(author);
       const patch = await this.workspaces.collectPatch(author);
-      run = await this.appendArtifacts(run, [await this.artifacts.savePatch(run.id, patch)]);
+      run = await this.appendArtifacts(owner, run, [await this.artifacts.savePatch(owner, run.id, patch)]);
     } finally {
       if (author) await this.workspaces.destroy(author).catch(() => undefined);
     }
   }
 
-  async cleanVerifyAndPublish(runId: string): Promise<void> {
-    let run = await this.requireRun(runId);
+  async cleanVerifyAndPublish(owner: OwnerScope, runId: string): Promise<void> {
+    let run = await this.requireRun(owner, runId);
     let verifier: WorkspaceRef | undefined;
     try {
-      const patch = await this.artifacts.loadPatch(run.id);
+      const patch = await this.artifacts.loadPatch(owner, run.id);
       verifier = await this.workspaces.create(run.repository, `${run.id}-verifier`);
       await this.workspaces.applyPatch(verifier, patch);
       await this.installDependencies(verifier);
-      run = await this.transition(run, "clean_verifying", "Running immutable patch in a fresh verifier workspace");
+      run = await this.transition(owner, run, "clean_verifying", "Running immutable patch in a fresh verifier workspace");
       const verifierResult = await this.runners[run.framework].run(verifier, `${run.id}:verifier`);
-      run = await this.appendArtifacts(run, await this.artifacts.persist(run.id, "verifier", verifierResult.artifacts));
+      run = await this.appendArtifacts(owner, run, await this.artifacts.persist(owner, run.id, "verifier", verifierResult.artifacts));
       if (!verifierResult.passed) throw new Error(`Clean verifier failed: ${verifierResult.summary.slice(-1500)}`);
       const reviewUrl = `${this.options.reviewBaseUrl.replace(/\/$/, "")}/runs/${run.id}`;
       const pullRequestUrl = await this.prBroker.publish(run, verifier, reviewUrl);
-      if (pullRequestUrl) run = await this.repository.update(run.id, { pullRequestUrl });
-      else await this.repository.addEvent(run.id, "pr.skipped", "Verifier passed; Draft PR broker is disabled");
-      await this.transition(run, "awaiting_qa", "Clean verifier passed; awaiting QA review");
+      if (pullRequestUrl) run = await this.repository.update(owner, run.id, { pullRequestUrl });
+      else await this.repository.addEvent(owner, run.id, "pr.skipped", "Verifier passed; Draft PR broker is disabled");
+      await this.transition(owner, run, "awaiting_qa", "Clean verifier passed; awaiting QA review");
     } finally {
       if (verifier) await this.workspaces.destroy(verifier).catch(() => undefined);
     }
   }
 
-  async fail(runId: string, error: unknown): Promise<void> {
+  async fail(owner: OwnerScope, runId: string, error: unknown): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
-    const current = await this.requireRun(runId);
+    const current = await this.requireRun(owner, runId);
     if (!["failed", "cancelled", "succeeded"].includes(current.status)) {
-      await this.repository.update(runId, { status: "failed", error: message });
-      await this.repository.addEvent(runId, "run.failed", message);
+      await this.repository.update(owner, runId, { status: "failed", error: message });
+      await this.repository.addEvent(owner, runId, "run.failed", message);
     }
   }
 
-  async verdict(runId: string, verdict: QaVerdict): Promise<E2ERun> {
-    const run = await this.requireRun(runId);
+  async verdict(owner: OwnerScope, runId: string, verdict: QaVerdict): Promise<E2ERun> {
+    const run = await this.requireRun(owner, runId);
     if (run.status !== "awaiting_qa") throw new Error("QA verdict requires awaiting_qa status");
     if (verdict.verdict === "approve") {
       if (run.pullRequestUrl) await this.prBroker.markReady(run);
-      return this.transition(run, "succeeded", `Approved by ${verdict.reviewerId}; Draft PR marked ready`);
+      return this.transition(owner, run, "succeeded", `Approved by ${verdict.reviewerId}; Draft PR marked ready`);
     }
-    const repaired = await this.transition(run, "repairing", `Changes requested by ${verdict.reviewerId}`);
-    await this.repository.addEvent(runId, "qa.feedback", verdict.feedback ?? "Changes requested");
+    const repaired = await this.transition(owner, run, "repairing", `Changes requested by ${verdict.reviewerId}`);
+    await this.repository.addEvent(owner, runId, "qa.feedback", verdict.feedback ?? "Changes requested");
     return repaired;
   }
 
-  async rerun(runId: string): Promise<E2ERun> {
-    const previous = await this.requireRun(runId);
-    return this.create({
+  async rerun(owner: OwnerScope, runId: string): Promise<E2ERun> {
+    const previous = await this.requireRun(owner, runId);
+    return this.create(owner, {
       sourceSessionId: previous.sourceSessionId,
       sourceCaseIds: previous.sourceCaseIds,
       repository: previous.repository,
@@ -155,9 +156,9 @@ export class E2ECoordinator {
     });
   }
 
-  async cancel(runId: string): Promise<E2ERun> {
-    const run = await this.requireRun(runId);
-    return this.transition(run, "cancelled", "Run cancelled");
+  async cancel(owner: OwnerScope, runId: string): Promise<E2ERun> {
+    const run = await this.requireRun(owner, runId);
+    return this.transition(owner, run, "cancelled", "Run cancelled");
   }
 
   private async installDependencies(workspace: WorkspaceRef): Promise<void> {
@@ -167,19 +168,19 @@ export class E2ECoordinator {
     if (result.exitCode !== 0) throw new Error(`Dependency hydration failed: ${result.stderr.slice(-1500)}`);
   }
 
-  private async appendArtifacts(run: E2ERun, artifacts: E2ERun["artifacts"]): Promise<E2ERun> {
-    return this.repository.update(run.id, { artifacts: [...run.artifacts, ...artifacts] });
+  private async appendArtifacts(owner: OwnerScope, run: E2ERun, artifacts: E2ERun["artifacts"]): Promise<E2ERun> {
+    return this.repository.update(owner, run.id, { artifacts: [...run.artifacts, ...artifacts] });
   }
 
-  private async transition(run: E2ERun, status: E2ERun["status"], message: string): Promise<E2ERun> {
+  private async transition(owner: OwnerScope, run: E2ERun, status: E2ERun["status"], message: string): Promise<E2ERun> {
     assertRunTransition(run.status, status);
-    const updated = await this.repository.update(run.id, { status, ...(status === "failed" ? { error: message } : {}) });
-    await this.repository.addEvent(run.id, `run.${status}`, message);
+    const updated = await this.repository.update(owner, run.id, { status, ...(status === "failed" ? { error: message } : {}) });
+    await this.repository.addEvent(owner, run.id, `run.${status}`, message);
     return updated;
   }
 
-  private async requireRun(id: string): Promise<E2ERun> {
-    const run = await this.repository.get(id);
+  private async requireRun(owner: OwnerScope, id: string): Promise<E2ERun> {
+    const run = await this.repository.get(owner, id);
     if (!run) throw new Error(`Run ${id} not found`);
     return run;
   }

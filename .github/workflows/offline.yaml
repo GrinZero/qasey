@@ -1,0 +1,26 @@
+name: Build and publish to T2 testing
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Dry run the build and deployment update
+        type: boolean
+        required: false
+        default: false
+      experimental_mat_tag:
+        description: Experimental version of moego-actions-tool CLI
+        type: string
+        required: false
+
+jobs:
+  build:
+    uses: MoeGolibrary/moego-actions-tool/.github/workflows/preset-offline.yml@production
+    with:
+      environment: testing
+      dry_run: ${{ inputs.dry_run }}
+      experimental_mat_tag: ${{ inputs.experimental_mat_tag }}
+      enable_cd: 'true'
+    secrets: inherit

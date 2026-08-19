@@ -1,0 +1,32 @@
+{
+  "$schema": "https://moego.s3.us-west-2.amazonaws.com/ops/github-actions/ci-json-schema.json",
+  "service_name": "moego-qasey",
+  "grey_url": "https://[grey]-qasey.[env].moego.dev",
+  "slack": ["#platform-fe-alert", "#fe-infra"],
+  "language": {
+    "type": "node",
+    "version": "24"
+  },
+  "install": {
+    "commands": ["sh ci/install.sh"],
+    "cache_dir": "node_modules"
+  },
+  "lint": {
+    "commands": ["pnpm typecheck"]
+  },
+  "test": {
+    "commands": ["pnpm test"]
+  },
+  "build": {
+    "commands": ["pnpm build"],
+    "build_image": [
+      {
+        "dockerfile": "Dockerfile",
+        "context": "."
+      }
+    ]
+  },
+  "deploy": {
+    "type": "service"
+  }
+}

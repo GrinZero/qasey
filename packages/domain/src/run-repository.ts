@@ -1,50 +1,67 @@
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
-import type { ArtifactRef, E2ERun, RunEvent, RunStatus } from "../../contracts/src/index.ts";
+import type { E2ERun, OwnerScope, RunEvent, RunStatus } from "../../contracts/src/index.ts";
 
 export interface RunRepository {
-  create(run: E2ERun): Promise<E2ERun>;
-  get(id: string): Promise<E2ERun | undefined>;
-  update(id: string, patch: Partial<Pick<E2ERun, "status" | "branch" | "pullRequestUrl" | "error" | "artifacts">>): Promise<E2ERun>;
-  addEvent(runId: string, type: string, message: string, metadata?: Record<string, unknown>): Promise<RunEvent>;
-  events(runId: string): Promise<RunEvent[]>;
+  create(owner: OwnerScope, run: E2ERun): Promise<E2ERun>;
+  get(owner: OwnerScope, id: string): Promise<E2ERun | undefined>;
+  list(owner: OwnerScope, limit?: number): Promise<E2ERun[]>;
+  update(owner: OwnerScope, id: string, patch: Partial<Pick<E2ERun, "status" | "branch" | "pullRequestUrl" | "error" | "artifacts">>): Promise<E2ERun>;
+  addEvent(owner: OwnerScope, runId: string, type: string, message: string, metadata?: Record<string, unknown>): Promise<RunEvent>;
+  events(owner: OwnerScope, runId: string): Promise<RunEvent[]>;
+  close?(): Promise<void>;
 }
 
 export class InMemoryRunRepository implements RunRepository {
   readonly runs = new Map<string, E2ERun>();
   readonly runEvents = new Map<string, RunEvent[]>();
 
-  async create(run: E2ERun): Promise<E2ERun> {
-    if (this.runs.has(run.id)) throw new Error(`Run ${run.id} already exists`);
-    this.runs.set(run.id, structuredClone(run));
+  async create(owner: OwnerScope, run: E2ERun): Promise<E2ERun> {
+    assertOwner(owner, run);
+    const key = ownerKey(owner, run.id);
+    if (this.runs.has(key)) throw new Error(`Run ${run.id} already exists`);
+    this.runs.set(key, structuredClone(run));
     return structuredClone(run);
   }
 
-  async get(id: string): Promise<E2ERun | undefined> {
-    const run = this.runs.get(id);
+  async get(owner: OwnerScope, id: string): Promise<E2ERun | undefined> {
+    const run = this.runs.get(ownerKey(owner, id));
     return run ? structuredClone(run) : undefined;
   }
 
-  async update(id: string, patch: Partial<Pick<E2ERun, "status" | "branch" | "pullRequestUrl" | "error" | "artifacts">>): Promise<E2ERun> {
-    const current = this.runs.get(id);
+  async list(owner: OwnerScope, limit = 100): Promise<E2ERun[]> {
+    const prefix = `${owner.applicationId}\u0000${owner.tenantId}\u0000`;
+    return [...this.runs.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([, run]) => structuredClone(run))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, Math.min(Math.max(limit, 1), 500));
+  }
+
+  async update(owner: OwnerScope, id: string, patch: Partial<Pick<E2ERun, "status" | "branch" | "pullRequestUrl" | "error" | "artifacts">>): Promise<E2ERun> {
+    const key = ownerKey(owner, id);
+    const current = this.runs.get(key);
     if (!current) throw new Error(`Run ${id} not found`);
     const updated = { ...current, ...patch, updatedAt: new Date().toISOString() };
-    this.runs.set(id, updated);
+    this.runs.set(key, updated);
     return structuredClone(updated);
   }
 
-  async addEvent(runId: string, type: string, message: string, metadata: Record<string, unknown> = {}): Promise<RunEvent> {
-    if (!this.runs.has(runId)) throw new Error(`Run ${runId} not found`);
+  async addEvent(owner: OwnerScope, runId: string, type: string, message: string, metadata: Record<string, unknown> = {}): Promise<RunEvent> {
+    const key = ownerKey(owner, runId);
+    if (!this.runs.has(key)) throw new Error(`Run ${runId} not found`);
     const event = { id: randomUUID(), runId, at: new Date().toISOString(), type, message, metadata };
-    const events = this.runEvents.get(runId) ?? [];
+    const events = this.runEvents.get(key) ?? [];
     events.push(event);
-    this.runEvents.set(runId, events);
+    this.runEvents.set(key, events);
     return structuredClone(event);
   }
 
-  async events(runId: string): Promise<RunEvent[]> {
-    return structuredClone(this.runEvents.get(runId) ?? []);
+  async events(owner: OwnerScope, runId: string): Promise<RunEvent[]> {
+    return structuredClone(this.runEvents.get(ownerKey(owner, runId)) ?? []);
   }
+
+  async close(): Promise<void> {}
 }
 
 export class PostgresRunRepository implements RunRepository {
@@ -57,83 +74,102 @@ export class PostgresRunRepository implements RunRepository {
 
   private ensureInitialized(): Promise<void> {
     this.initialized ??= this.pool.query(`
-      CREATE TABLE IF NOT EXISTS qasey_runs (
-        id text PRIMARY KEY,
+      CREATE TABLE IF NOT EXISTS agent_application_runs (
+        application_id text NOT NULL,
+        tenant_id text NOT NULL,
+        id text NOT NULL,
         payload jsonb NOT NULL,
         created_at timestamptz NOT NULL DEFAULT now(),
-        updated_at timestamptz NOT NULL DEFAULT now()
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (application_id, tenant_id, id)
       );
-      CREATE TABLE IF NOT EXISTS qasey_run_events (
-        id text PRIMARY KEY,
-        run_id text NOT NULL REFERENCES qasey_runs(id) ON DELETE CASCADE,
+      CREATE TABLE IF NOT EXISTS agent_application_run_events (
+        application_id text NOT NULL,
+        tenant_id text NOT NULL,
+        id text NOT NULL,
+        run_id text NOT NULL,
         payload jsonb NOT NULL,
-        created_at timestamptz NOT NULL DEFAULT now()
+        created_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (application_id, tenant_id, id),
+        FOREIGN KEY (application_id, tenant_id, run_id)
+          REFERENCES agent_application_runs(application_id, tenant_id, id) ON DELETE CASCADE
       );
-      CREATE INDEX IF NOT EXISTS qasey_run_events_run_id_idx ON qasey_run_events(run_id, created_at);
+      CREATE INDEX IF NOT EXISTS agent_application_run_events_owner_idx
+        ON agent_application_run_events(application_id, tenant_id, run_id, created_at);
     `).then(() => undefined);
     return this.initialized;
   }
 
-  async create(run: E2ERun): Promise<E2ERun> {
+  async create(owner: OwnerScope, run: E2ERun): Promise<E2ERun> {
+    assertOwner(owner, run);
     await this.ensureInitialized();
-    await this.pool.query("INSERT INTO qasey_runs(id, payload) VALUES ($1, $2::jsonb)", [run.id, JSON.stringify(run)]);
+    await this.pool.query(
+      "INSERT INTO agent_application_runs(application_id, tenant_id, id, payload) VALUES ($1, $2, $3, $4::jsonb)",
+      [owner.applicationId, owner.tenantId, run.id, JSON.stringify(run)],
+    );
     return structuredClone(run);
   }
 
-  async get(id: string): Promise<E2ERun | undefined> {
+  async get(owner: OwnerScope, id: string): Promise<E2ERun | undefined> {
     await this.ensureInitialized();
-    const result = await this.pool.query<{ payload: E2ERun }>("SELECT payload FROM qasey_runs WHERE id = $1", [id]);
+    const result = await this.pool.query<{ payload: E2ERun }>(
+      "SELECT payload FROM agent_application_runs WHERE application_id = $1 AND tenant_id = $2 AND id = $3",
+      [owner.applicationId, owner.tenantId, id],
+    );
     return result.rows[0]?.payload;
   }
 
-  async update(id: string, patch: Partial<Pick<E2ERun, "status" | "branch" | "pullRequestUrl" | "error" | "artifacts">>): Promise<E2ERun> {
-    const current = await this.get(id);
+  async list(owner: OwnerScope, limit = 100): Promise<E2ERun[]> {
+    await this.ensureInitialized();
+    const result = await this.pool.query<{ payload: E2ERun }>(
+      `SELECT payload FROM agent_application_runs
+       WHERE application_id = $1 AND tenant_id = $2
+       ORDER BY created_at DESC, id LIMIT $3`,
+      [owner.applicationId, owner.tenantId, Math.min(Math.max(limit, 1), 500)],
+    );
+    return result.rows.map(row => row.payload);
+  }
+
+  async update(owner: OwnerScope, id: string, patch: Partial<Pick<E2ERun, "status" | "branch" | "pullRequestUrl" | "error" | "artifacts">>): Promise<E2ERun> {
+    const current = await this.get(owner, id);
     if (!current) throw new Error(`Run ${id} not found`);
     const updated = { ...current, ...patch, updatedAt: new Date().toISOString() };
-    await this.pool.query("UPDATE qasey_runs SET payload = $2::jsonb, updated_at = now() WHERE id = $1", [id, JSON.stringify(updated)]);
+    await this.pool.query(
+      "UPDATE agent_application_runs SET payload = $4::jsonb, updated_at = now() WHERE application_id = $1 AND tenant_id = $2 AND id = $3",
+      [owner.applicationId, owner.tenantId, id, JSON.stringify(updated)],
+    );
     return updated;
   }
 
-  async addEvent(runId: string, type: string, message: string, metadata: Record<string, unknown> = {}): Promise<RunEvent> {
+  async addEvent(owner: OwnerScope, runId: string, type: string, message: string, metadata: Record<string, unknown> = {}): Promise<RunEvent> {
     await this.ensureInitialized();
     const event = { id: randomUUID(), runId, at: new Date().toISOString(), type, message, metadata };
-    await this.pool.query("INSERT INTO qasey_run_events(id, run_id, payload) VALUES ($1, $2, $3::jsonb)", [event.id, runId, JSON.stringify(event)]);
+    await this.pool.query(
+      "INSERT INTO agent_application_run_events(application_id, tenant_id, id, run_id, payload) VALUES ($1, $2, $3, $4, $5::jsonb)",
+      [owner.applicationId, owner.tenantId, event.id, runId, JSON.stringify(event)],
+    );
     return event;
   }
 
-  async events(runId: string): Promise<RunEvent[]> {
+  async events(owner: OwnerScope, runId: string): Promise<RunEvent[]> {
     await this.ensureInitialized();
-    const result = await this.pool.query<{ payload: RunEvent }>("SELECT payload FROM qasey_run_events WHERE run_id = $1 ORDER BY created_at, id", [runId]);
+    const result = await this.pool.query<{ payload: RunEvent }>(
+      "SELECT payload FROM agent_application_run_events WHERE application_id = $1 AND tenant_id = $2 AND run_id = $3 ORDER BY created_at, id",
+      [owner.applicationId, owner.tenantId, runId],
+    );
     return result.rows.map(row => row.payload);
   }
+
+  async close(): Promise<void> { await this.pool.end(); }
 }
 
-export interface EventInbox { accept(key: string): Promise<boolean>; }
-
-export class InMemoryEventInbox implements EventInbox {
-  private readonly keys = new Set<string>();
-  async accept(key: string): Promise<boolean> {
-    if (this.keys.has(key)) return false;
-    this.keys.add(key);
-    return true;
-  }
+function ownerKey(owner: OwnerScope, id: string): string {
+  return `${owner.applicationId}\u0000${owner.tenantId}\u0000${id}`;
 }
 
-export class PostgresEventInbox implements EventInbox {
-  private readonly pool: Pool;
-  private initialized?: Promise<void>;
-  constructor(connectionString: string) { this.pool = new Pool({ connectionString, max: 5 }); }
-  private ensureInitialized(): Promise<void> {
-    this.initialized ??= this.pool.query(`CREATE TABLE IF NOT EXISTS qasey_event_inbox (
-      idempotency_key text PRIMARY KEY,
-      accepted_at timestamptz NOT NULL DEFAULT now()
-    )`).then(() => undefined);
-    return this.initialized;
-  }
-  async accept(key: string): Promise<boolean> {
-    await this.ensureInitialized();
-    const result = await this.pool.query("INSERT INTO qasey_event_inbox(idempotency_key) VALUES ($1) ON CONFLICT DO NOTHING", [key]);
-    return result.rowCount === 1;
+function assertOwner(owner: OwnerScope, run: E2ERun): void {
+  if (run.applicationId !== owner.applicationId || run.tenantId !== owner.tenantId) {
+    throw new Error("Run owner does not match repository owner scope");
   }
 }
 

@@ -99,4 +99,6 @@ export class PostgresOAuthStorage implements OAuthStorage {
     await this.ensureInitialized();
     await this.pool.query("DELETE FROM qasey_mcp_oauth_credentials WHERE namespace=$1 AND storage_key=$2", [this.namespace, key]);
   }
+
+  async close(): Promise<void> { await this.pool.end(); }
 }

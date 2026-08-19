@@ -1,31 +1,31 @@
 import { createHash } from "node:crypto";
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { basename, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { ArtifactRef } from "../../contracts/src/index.ts";
+import type { ArtifactRef, OwnerScope } from "../../contracts/src/index.ts";
 
 export interface ArtifactStore {
-  savePatch(runId: string, patch: string): Promise<ArtifactRef>;
-  loadPatch(runId: string): Promise<string>;
-  persist(runId: string, phase: "author" | "verifier", artifacts: ArtifactRef[]): Promise<ArtifactRef[]>;
+  savePatch(owner: OwnerScope, runId: string, patch: string): Promise<ArtifactRef>;
+  loadPatch(owner: OwnerScope, runId: string): Promise<string>;
+  persist(owner: OwnerScope, runId: string, phase: "author" | "verifier", artifacts: ArtifactRef[]): Promise<ArtifactRef[]>;
 }
 
 export class LocalArtifactStore implements ArtifactStore {
   constructor(private readonly root: string) {}
 
-  async savePatch(runId: string, patch: string): Promise<ArtifactRef> {
-    const directory = await this.directory(runId);
+  async savePatch(owner: OwnerScope, runId: string, patch: string): Promise<ArtifactRef> {
+    const directory = await this.directory(owner, runId);
     const target = join(directory, "changes.patch");
     await writeFile(target, patch, { mode: 0o600 });
     return { id: `${runId}:patch`, kind: "patch", name: "changes.patch", uri: pathToFileURL(target).href };
   }
 
-  async loadPatch(runId: string): Promise<string> {
-    return readFile(join(await this.directory(runId), "changes.patch"), "utf8");
+  async loadPatch(owner: OwnerScope, runId: string): Promise<string> {
+    return readFile(join(await this.directory(owner, runId), "changes.patch"), "utf8");
   }
 
-  async persist(runId: string, phase: "author" | "verifier", artifacts: ArtifactRef[]): Promise<ArtifactRef[]> {
-    const directory = join(await this.directory(runId), phase);
+  async persist(owner: OwnerScope, runId: string, phase: "author" | "verifier", artifacts: ArtifactRef[]): Promise<ArtifactRef[]> {
+    const directory = join(await this.directory(owner, runId), phase);
     await mkdir(directory, { recursive: true });
     const persisted: ArtifactRef[] = [];
     for (const [index, artifact] of artifacts.entries()) {
@@ -39,10 +39,17 @@ export class LocalArtifactStore implements ArtifactStore {
     return persisted;
   }
 
-  private async directory(runId: string): Promise<string> {
-    const safeRunId = runId.replace(/[^a-zA-Z0-9-]/g, "-");
-    const directory = resolve(this.root, safeRunId);
+  private async directory(owner: OwnerScope, runId: string): Promise<string> {
+    const root = resolve(this.root);
+    const directory = resolve(root, safeSegment(owner.applicationId), safeSegment(owner.tenantId), safeSegment(runId));
+    if (directory !== root && !directory.startsWith(`${root}${sep}`)) throw new Error("Artifact path escaped configured root");
     await mkdir(directory, { recursive: true });
     return directory;
   }
+}
+
+function safeSegment(value: string): string {
+  const segment = value.replace(/[^a-zA-Z0-9._-]/g, "-").replace(/^\.+$/u, "-").slice(0, 160);
+  if (!segment) throw new Error("Artifact owner scope contains an empty path segment");
+  return segment;
 }

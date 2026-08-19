@@ -1,4 +1,4 @@
-import "dotenv/config";
+import "../../../src/load-env.ts";
 import { spawn } from "node:child_process";
 import { getCallbackUrlCandidates } from "@mastra/mcp";
 import { loadConfig, loadMcpServerConfigs, McpServerNameSchema, QaseyMcpCatalog } from "../../../packages/adapters/src/index.ts";
@@ -31,7 +31,7 @@ if (!server.success) {
     if (callbackUrls.length > 0) {
       console.info(`OAuth callback allowlist: ${callbackUrls[0]} through ${callbackUrls.at(-1)}`);
     }
-    await catalog.authenticate(server.data);
+    await catalog.authenticate(server.data, { applicationId: "qasey", tenantId: "local-cli", subjectId: process.env.USER ?? "operator" });
     console.info(`${server.data} OAuth authorization completed`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

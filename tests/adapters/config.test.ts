@@ -2,20 +2,22 @@ import { describe, expect, it } from "vitest";
 import { loadConfig } from "../../packages/adapters/src/index.ts";
 
 const productionAuth = {
-  DATABASE_URL: "postgresql://qasey.example/qasey",
-  MASTRA_LICENSE_KEY: "mastra-license",
+  DATABASE_URL: "postgresql://qasey.example/moego_qasey",
   GOOGLE_CLIENT_ID: "google-client-id",
   GOOGLE_CLIENT_SECRET: "google-client-secret",
   GOOGLE_COOKIE_PASSWORD: "a-secure-cookie-password-over-32-chars",
+  WORKER_TOKEN: "dedicated-worker-token",
+  REDIS_HOST: "redis.internal",
+  REDIS_PORT: "6379",
+  REDIS_PASSWORD: "redis-password",
+  REDIS_TLS: "true",
 };
 
-describe("worker lease configuration", () => {
-  it("uses a heartbeat comfortably shorter than the job lease", () => {
+describe("shared runtime configuration", () => {
+  it("uses native workflow and memory defaults", () => {
     const config = loadConfig({ NODE_ENV: "test" } as NodeJS.ProcessEnv);
-    expect(config.QASEY_JOB_HEARTBEAT_MS).toBe(15_000);
-    expect(config.QASEY_JOB_LEASE_MS).toBe(90_000);
-    expect(config.QASEY_AGENT_TIMEOUT_MS).toBe(600_000);
-    expect(config.QASEY_MEMORY_MODEL).toBe("gpt-5.4-mini");
+    expect(config.QASEY_AGENT_TIMEOUT_MS).toBe(1_800_000);
+    expect(config.QASEY_MEMORY_MODEL).toBe("gpt-5.6-luna");
     expect(config.QASEY_MEMORY_MESSAGE_TOKENS).toBe(30_000);
     expect(config.QASEY_MEMORY_OBSERVATION_TOKENS).toBe(40_000);
     expect(config.QASEY_MEMORY_INPUT_TOKEN_LIMIT).toBe(120_000);
@@ -26,6 +28,8 @@ describe("worker lease configuration", () => {
     expect(config.QASEY_ENABLE_DATADOG).toBe(false);
     expect(config.QASEY_DATADOG_CAPTURE_CONTENT).toBe(false);
     expect(config.DD_SERVICE).toBe("qasey");
+    expect(config.METERSPHERE_BASE_URL).toBe("https://metersphere.devops.moego.pet");
+    expect(config.METERSPHERE_PROJECT_ID).toBe("20a78db9-19aa-11ee-a261-5a66b98c4036");
   });
 
   it("requires an LLM application name when Datadog is enabled", () => {
@@ -56,14 +60,25 @@ describe("worker lease configuration", () => {
       ...productionAuth,
       QASEY_ENABLE_STUDIO_EDITOR: "true",
       QASEY_ENABLE_STUDIO_MCP_PREVIEW: "false",
-      EDITOR_DATABASE_URL: "postgresql://editor.example/qasey_editor",
-      OBSERVABILITY_DATABASE_URL: "postgresql://observability.example/qasey_observability",
+      EDITOR_DATABASE_URL: "postgresql://editor.example/moego_qasey_editor",
+      OBSERVABILITY_DATABASE_URL: "postgresql://observability.example/moego_qasey_observability",
     } as NodeJS.ProcessEnv);
 
     expect(config.QASEY_ENABLE_STUDIO_EDITOR).toBe(true);
     expect(config.QASEY_ENABLE_STUDIO_MCP_PREVIEW).toBe(false);
     expect(config.EDITOR_DATABASE_URL).toContain("qasey_editor");
-    expect(config.OBSERVABILITY_DATABASE_URL).toContain("qasey_observability");
+    expect(config.OBSERVABILITY_DATABASE_URL).toContain("moego_qasey_observability");
+  });
+
+  it("requires complete GitHub App installation authentication", () => {
+    expect(() => loadConfig({ GITHUB_APP_ID: "123" } as NodeJS.ProcessEnv)).toThrow(/GITHUB_APP_INSTALLATION_ID/);
+    const config = loadConfig({
+      GITHUB_APP_ID: "123",
+      GITHUB_APP_INSTALLATION_ID: "456",
+      GITHUB_APP_PRIVATE_KEY: "private-key",
+    } as NodeJS.ProcessEnv);
+    expect(config.GITHUB_APP_ID).toBe("123");
+    expect(config.GITHUB_APP_INSTALLATION_ID).toBe(456);
   });
 
   it("requires Google OAuth and a durable cookie password in production", () => {
@@ -76,12 +91,37 @@ describe("worker lease configuration", () => {
     } as NodeJS.ProcessEnv)).toThrow();
   });
 
-  it("rejects a heartbeat interval that cannot safely renew the lease", () => {
+  it("requires a dedicated Mastra worker token in production", () => {
     expect(() => loadConfig({
-      NODE_ENV: "test",
-      QASEY_JOB_HEARTBEAT_MS: "50000",
-      QASEY_JOB_LEASE_MS: "90000",
-    } as NodeJS.ProcessEnv)).toThrow(/less than half/);
+      NODE_ENV: "production",
+      ...productionAuth,
+      WORKER_TOKEN: undefined,
+    } as NodeJS.ProcessEnv)).toThrow(/WORKER_TOKEN/);
+    expect(() => loadConfig({
+      NODE_ENV: "production",
+      ...productionAuth,
+      PLATFORM_SERVICE_TOKEN: productionAuth.WORKER_TOKEN,
+    } as NodeJS.ProcessEnv)).toThrow(/distinct from PLATFORM_SERVICE_TOKEN/);
+  });
+
+  it("requires shared Redis for the production multi-pod runtime", () => {
+    expect(() => loadConfig({
+      NODE_ENV: "production",
+      ...productionAuth,
+      REDIS_HOST: undefined,
+    } as NodeJS.ProcessEnv)).toThrow(/REDIS_HOST/);
+
+    const config = loadConfig({
+      NODE_ENV: "production",
+      ...productionAuth,
+      REDIS_HOST: "redis.ns-testing.svc.cluster.local",
+      REDIS_TLS: "TRUE",
+      REDIS_TLS_SERVERNAME: "master.redis.example.com",
+    } as NodeJS.ProcessEnv);
+    expect(config.REDIS_HOST).toBe("redis.ns-testing.svc.cluster.local");
+    expect(config.REDIS_PORT).toBe(6379);
+    expect(config.REDIS_TLS).toBe(true);
+    expect(config.REDIS_TLS_SERVERNAME).toBe("master.redis.example.com");
   });
 
   it("keeps the hard context limit above both observational memory windows", () => {

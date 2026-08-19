@@ -2,7 +2,6 @@ export * from "./config.ts";
 export * from "./mcp.ts";
 export * from "./mcp-config.ts";
 export * from "./oauth-storage.ts";
-export * from "./slack.ts";
 export * from "./read-connectors.ts";
 export * from "./attachments.ts";
 export * from "./logging.ts";

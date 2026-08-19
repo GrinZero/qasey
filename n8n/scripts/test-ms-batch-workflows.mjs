@@ -192,6 +192,10 @@ const upsert = loadWorkflow('ms_bulk_upsert_test_cases.json', 'Bulk Upsert Test 
   }, mock.helpers);
   assert.equal(result[0].json.item_count, 2);
   assert.equal(result[0].json.deletion_ids_forced_empty, true);
+  assert.equal(result[0].json.updates[0].node_id, MODULE_ID);
+  assert.equal(result[0].json.updates[0].priority, 'P2');
+  assert.equal(result[0].json.creates[0].node_id, MODULE_ID);
+  assert.equal(result[0].json.creates[0].priority, 'P1');
   assert.equal(mock.calls.some((call) => call.method === 'POST'), false);
 }
 {
@@ -215,6 +219,7 @@ const upsert = loadWorkflow('ms_bulk_upsert_test_cases.json', 'Bulk Upsert Test 
   assert.equal(result[0].json.created_count, 1);
   assert.equal(result[0].json.updated_count, 1);
   assert.ok(result[0].json.results.every((item) => item.verified));
+  assert.equal(result[0].json.results[0].priority, 'P0');
   const mutation = mock.calls.find((call) => call.path.endsWith('/track/test/case/minder/edit'));
   assert.deepEqual(mutation.body.ids, []);
   assert.equal(mutation.body.data.some((item) => 'ids' in item), false);

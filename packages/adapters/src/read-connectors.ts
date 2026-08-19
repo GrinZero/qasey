@@ -4,15 +4,32 @@ import { Octokit } from "@octokit/rest";
 import { WebClient } from "@slack/web-api";
 import { z } from "zod";
 import type { QaseyConfig } from "./config.ts";
+import { createGitHubClient } from "./github.ts";
+
+/** Static upper bound used by safe experiment validation; credentials only reduce this set. */
+export const QASEY_READ_CONNECTOR_TOOL_NAMES = [
+  "slack_search_messages",
+  "slack_get_thread",
+  "slack_get_history",
+  "slack_get_user",
+  "slack_get_file",
+  "github_get_file",
+  "github_get_pull_request",
+  "github_get_pull_request_diff",
+  "github_list_reviews",
+  "github_search_repositories",
+  "jira_search_issues",
+  "jira_get_issue",
+] as const;
 
 export class ReadConnectorCatalog {
   private readonly slackBot: WebClient | undefined;
   private readonly slackUser: WebClient | undefined;
   private readonly github: Octokit | undefined;
-  constructor(private readonly config: QaseyConfig) {
+  constructor(private readonly config: QaseyConfig, github: Octokit | undefined = createGitHubClient(config)) {
     this.slackBot = config.SLACK_BOT_TOKEN ? new WebClient(config.SLACK_BOT_TOKEN) : undefined;
     this.slackUser = config.SLACK_USER_TOKEN ? new WebClient(config.SLACK_USER_TOKEN) : undefined;
-    this.github = config.GITHUB_TOKEN ? new Octokit({ auth: config.GITHUB_TOKEN }) : undefined;
+    this.github = github;
   }
 
   tools(): ToolsInput {

@@ -1,9 +1,29 @@
 import { describe, expect, it, vi } from "vitest";
 import { InMemoryRunRepository } from "../../packages/domain/src/index.ts";
+import { CreateE2ERunSchema } from "../../packages/contracts/src/index.ts";
 import { E2ECoordinator, type ArtifactStore, type CodingHarness, type DraftPrBroker, type E2ERunner, type WorkspaceManager, type WorkspaceRef } from "../../packages/e2e/src/index.ts";
 
 describe("E2E coordinator", () => {
+  it("rejects client-supplied dependency commands", () => {
+    expect(CreateE2ERunSchema.safeParse({
+      sourceSessionId: "s",
+      sourceCaseIds: ["case-1"],
+      platform: "web",
+      framework: "playwright",
+      repository: {
+        owner: "o",
+        repository: "r",
+        cloneUrl: "https://example.test/r.git",
+        baseRef: "main",
+        allowedPaths: ["e2e"],
+        skillsPaths: [],
+        installCommand: ["sh", "-c", "echo unsafe"],
+      },
+    }).success).toBe(false);
+  });
+
   it("requires an author pass and an independent verifier pass before a Draft PR", async () => {
+    const owner = { applicationId: "qasey", tenantId: "tenant-1" };
     const repository = new InMemoryRunRepository();
     const createdWorkspaces: WorkspaceRef[] = [];
     const workspaces: WorkspaceManager = {
@@ -27,9 +47,9 @@ describe("E2E coordinator", () => {
       run: vi.fn(async workspace => { phases.push(workspace.id); return { passed: true, exitCode: 0, summary: "passed", artifacts: [] }; }),
     };
     const artifacts: ArtifactStore = {
-      savePatch: vi.fn(async runId => ({ id: `${runId}:patch`, kind: "patch" as const, name: "changes.patch", uri: "file:///artifact.patch" })),
+      savePatch: vi.fn(async (_owner, runId) => ({ id: `${runId}:patch`, kind: "patch" as const, name: "changes.patch", uri: "file:///artifact.patch" })),
       loadPatch: vi.fn(async () => "patch"),
-      persist: vi.fn(async (_runId, _phase, refs) => refs),
+      persist: vi.fn(async (_owner, _runId, _phase, refs) => refs),
     };
     let markedReady = false;
     const broker: DraftPrBroker = {
@@ -37,18 +57,18 @@ describe("E2E coordinator", () => {
       markReady: vi.fn(async () => { markedReady = true; }),
     };
     const coordinator = new E2ECoordinator(repository, workspaces, harness, { playwright: runner, maestro: { ...runner, framework: "maestro" } }, artifacts, broker, false, { maxRepairs: 2, reviewBaseUrl: "https://qasey.test" });
-    const run = await coordinator.create({
+    const run = await coordinator.create(owner, {
       sourceSessionId: "s", sourceCaseIds: ["case-1"], platform: "web", framework: "playwright",
       repository: { owner: "o", repository: "r", cloneUrl: "https://example.test/r.git", baseRef: "main", allowedPaths: ["e2e"], skillsPaths: [] },
     });
-    await coordinator.execute(run.id);
+    await coordinator.execute(owner, run.id);
     expect(createdWorkspaces).toHaveLength(2);
     expect(phases[0]).toContain("author");
     expect(phases[1]).toContain("verifier");
     expect(broker.publish).toHaveBeenCalledTimes(1);
-    expect(await repository.get(run.id)).toMatchObject({ status: "awaiting_qa", pullRequestUrl: "https://github.com/o/r/pull/1" });
-    await coordinator.verdict(run.id, { verdict: "approve", reviewerId: "qa-1" });
+    expect(await repository.get(owner, run.id)).toMatchObject({ status: "awaiting_qa", pullRequestUrl: "https://github.com/o/r/pull/1" });
+    await coordinator.verdict(owner, run.id, { verdict: "approve", reviewerId: "qa-1" });
     expect(markedReady).toBe(true);
-    expect(await repository.get(run.id)).toMatchObject({ status: "succeeded" });
+    expect(await repository.get(owner, run.id)).toMatchObject({ status: "succeeded" });
   });
 });

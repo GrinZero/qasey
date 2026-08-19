@@ -43,34 +43,11 @@ const McpConfigFileSchema = z.object({
   }).default({}),
 });
 
-const legacyServers: Array<[McpServerName, keyof QaseyConfig, keyof QaseyConfig, number]> = [
-  ["metersphere", "METERSPHERE_MCP_URL", "METERSPHERE_MCP_TOKEN", 60_000],
-  ["figma", "FIGMA_MCP_URL", "FIGMA_MCP_TOKEN", 120_000],
-  ["qaExperience", "QA_EXPERIENCE_MCP_URL", "QA_EXPERIENCE_MCP_TOKEN", 60_000],
-  ["rag", "MOEGO_RAG_MCP_URL", "MOEGO_RAG_MCP_TOKEN", 180_000],
-  ["lark", "LARK_MCP_URL", "LARK_MCP_TOKEN", 60_000],
-];
-
 export function loadMcpServerConfigs(config: QaseyConfig): McpServerConfigs {
   const path = resolve(config.QASEY_MCP_CONFIG_FILE);
-  if (existsSync(path)) {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
-    return Object.fromEntries(
-      Object.entries(McpConfigFileSchema.parse(parsed).servers).filter((entry): entry is [McpServerName, McpServerConfig] => Boolean(entry[1])),
-    );
-  }
-
-  const servers: McpServerConfigs = {};
-  for (const [name, urlKey, tokenKey, timeoutMs] of legacyServers) {
-    const url = config[urlKey];
-    const token = config[tokenKey];
-    if (typeof url !== "string") continue;
-    servers[name] = {
-      url,
-      auth: typeof token === "string" ? { type: "bearer", tokenEnv: String(tokenKey) } : { type: "none" },
-      allowedHosts: [],
-      timeoutMs,
-    };
-  }
-  return servers;
+  if (!existsSync(path)) return {};
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  return Object.fromEntries(
+    Object.entries(McpConfigFileSchema.parse(parsed).servers).filter((entry): entry is [McpServerName, McpServerConfig] => Boolean(entry[1])),
+  );
 }

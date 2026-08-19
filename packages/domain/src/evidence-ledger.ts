@@ -1,4 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
+import {
+  buildMeterSphereCaseOperationReceipt,
+  mergeMeterSphereCaseOperationReceipts,
+  parseMeterSphereBulkOperation,
+  type MeterSphereCaseOperationReceipt,
+} from "./metersphere-receipt.ts";
+import {
+  buildEvidenceSnapshotHash,
+  buildMeterSphereCasePlan,
+  canonicalBulkWriteInput,
+  canonicalSingleWriteInput,
+  completeCaseOperationAgainstPlan,
+  validateMeterSphereCasePlan,
+  type MeterSphereCasePlan,
+} from "./case-plan.ts";
 
 export type EvidenceStatus = "in_flight" | "acquired" | "failed";
 
@@ -45,8 +60,11 @@ export interface EvidenceIterationDecision {
 }
 
 export interface EvidenceCompletionReceipt {
+  casePlanHash: string;
   write: EvidenceManifestEntry;
   verification: EvidenceManifestEntry;
+  verificationMode: "internal_read_back" | "separate_read_back";
+  caseOperation?: MeterSphereCaseOperationReceipt;
 }
 
 export interface EvidenceLedgerStats {
@@ -79,6 +97,7 @@ export interface EvidenceLedgerOptions {
   previewChars?: number;
   maxArtifactChunkChars?: number;
   maxRetryableAttempts?: number;
+  casePlan?: MeterSphereCasePlan;
 }
 
 export class IncompleteOutcomeError extends Error {
@@ -99,6 +118,7 @@ export class EvidenceLedger {
   private readonly previewChars: number;
   private readonly maxArtifactChunkChars: number;
   private readonly maxRetryableAttempts: number;
+  private casePlanValue: MeterSphereCasePlan | undefined;
   private progressVersion = 0;
   private observedProgressVersion = 0;
   private noProgressStreak = 0;
@@ -119,13 +139,15 @@ export class EvidenceLedger {
     this.previewChars = options.previewChars ?? 4_000;
     this.maxArtifactChunkChars = options.maxArtifactChunkChars ?? 20_000;
     this.maxRetryableAttempts = options.maxRetryableAttempts ?? 2;
+    this.casePlanValue = options.casePlan ? validateMeterSphereCasePlan(options.casePlan) : undefined;
   }
 
   async execute(
     toolName: string,
     input: unknown,
-    operation: () => Promise<unknown>,
+    operation: (effectiveInput: unknown) => Promise<unknown>,
   ): Promise<unknown> {
+    input = this.validatedMutationInput(toolName, input);
     const baseCallKey = createCallKey(toolName, input);
     const callKey = isMeterSphereRead(toolName) ? `${baseCallKey}:epoch:${this.mutationEpoch}` : baseCallKey;
     const baseSourceKey = createSourceKey(toolName, input);
@@ -160,8 +182,15 @@ export class EvidenceLedger {
     this.counters.actualExecutions += 1;
 
     try {
-      const result = await operation();
+      const result = await operation(input);
       if (isToolErrorResult(result)) throw toolResultError(result);
+      const candidatePlan = this.casePlanFromDryRun(toolName, input, result);
+      if (candidatePlan) {
+        if (this.casePlanValue && this.casePlanValue.planHash !== candidatePlan.planHash) {
+          throw new Error("A different MeterSphere CasePlan already exists for this run");
+        }
+        this.casePlanValue ??= candidatePlan;
+      }
       const artifact = this.storeArtifact(result);
       entry.status = "acquired";
       entry.result = result;
@@ -191,8 +220,39 @@ export class EvidenceLedger {
       entry.completedSequence = ++this.executionSequence;
       if (!isOrchestrationTool(toolName)) this.progressVersion += 1;
       entry.resolveCompletion();
-      throw error;
+      return failureReceipt(entry);
     }
+  }
+
+  private validatedMutationInput(toolName: string, input: unknown): unknown {
+    if (isMeterSphereBulkMutation(toolName) && isRecord(input) && input.dry_run === false) {
+      if (this.casePlanValue) return canonicalBulkWriteInput(input, this.casePlanValue);
+      throw new Error("A successful MeterSphere dry-run CasePlan is required before writing test cases");
+    }
+    if (isMeterSphereSingleCaseMutation(toolName)) {
+      if (!this.casePlanValue) throw new Error("A persisted MeterSphere CasePlan is required before single-case fallback writes");
+      return canonicalSingleWriteInput(toolName, input, this.casePlanValue);
+    }
+    return input;
+  }
+
+  private casePlanFromDryRun(toolName: string, input: unknown, result: unknown): MeterSphereCasePlan | undefined {
+    if (!isMeterSphereBulkMutation(toolName) || !isRecord(input) || input.dry_run !== true) return undefined;
+    return buildMeterSphereCasePlan({
+      dryRunInput: input,
+      dryRunResult: result,
+      evidenceSnapshotHash: this.evidenceSnapshotHash(),
+    });
+  }
+
+  private evidenceSnapshotHash(): string {
+    return buildEvidenceSnapshotHash([...this.entries.values()]
+      .filter(entry => entry.status === "acquired" && entry.contentHash && isCasePlanEvidence(entry.toolName))
+      .map(entry => ({ sourceKey: entry.sourceKey, contentHash: entry.contentHash! })));
+  }
+
+  casePlan(): MeterSphereCasePlan | undefined {
+    return this.casePlanValue ? structuredClone(this.casePlanValue) : undefined;
   }
 
   readArtifact(artifactId: string, offset = 0, maxChars = this.maxArtifactChunkChars) {
@@ -233,7 +293,11 @@ export class EvidenceLedger {
   }
 
   snapshot(): EvidenceManifestEntry[] {
-    return [...this.entries.values()].map(entry => ({
+    return [...this.entries.values()].map(entry => this.manifestEntry(entry));
+  }
+
+  private manifestEntry(entry: EvidenceEntry): EvidenceManifestEntry {
+    return {
       sourceKey: entry.sourceKey,
       toolName: entry.toolName,
       status: entry.status,
@@ -246,7 +310,7 @@ export class EvidenceLedger {
       ...(entry.completedAt ? { completedAt: entry.completedAt } : {}),
       ...(entry.startedSequence !== undefined ? { startedSequence: entry.startedSequence } : {}),
       ...(entry.completedSequence !== undefined ? { completedSequence: entry.completedSequence } : {}),
-    }));
+    };
   }
 
   stats(): EvidenceLedgerStats {
@@ -273,14 +337,61 @@ export class EvidenceLedger {
   }
 
   completionReceipt(): EvidenceCompletionReceipt | undefined {
-    const acquired = this.snapshot().filter(entry => entry.status === "acquired" && entry.completedSequence !== undefined);
-    const writes = acquired.filter(entry => isMeterSphereWrite(entry.toolName));
+    const casePlan = this.casePlanValue;
+    if (!casePlan) return undefined;
+    const acquiredEntries = [...this.entries.values()].filter(entry =>
+      entry.status === "acquired" && entry.completedSequence !== undefined,
+    );
+    const writes = acquiredEntries.filter(entry => isEffectiveMeterSphereWrite(entry));
     if (writes.length === 0) return undefined;
     const write = writes.reduce((latest, current) => current.completedSequence! > latest.completedSequence! ? current : latest);
-    const verification = acquired
+    const moduleResults = acquiredEntries
+      .filter(entry => entry.toolName.toLowerCase().includes("metersphere") && entry.toolName.toLowerCase().includes("upsert_module"))
+      .map(entry => entry.result);
+    const internalOperations = writes.map(entry => buildMeterSphereCaseOperationReceipt({
+      writeInput: entry.input,
+      writeResult: entry.result,
+      moduleResults,
+    })).filter((operation): operation is MeterSphereCaseOperationReceipt => Boolean(operation));
+    const internalCaseOperation = buildMeterSphereCaseOperationReceipt({
+      writeInput: write.input,
+      writeResult: write.result,
+      moduleResults,
+    });
+    if (internalCaseOperation?.verificationMode === "internal_read_back") {
+      const completeOperation = completeCaseOperationAgainstPlan(
+        casePlan,
+        mergeMeterSphereCaseOperationReceipts(internalOperations) ?? internalCaseOperation,
+      );
+      if (!completeOperation) return undefined;
+      const manifest = this.manifestEntry(write);
+      return {
+        casePlanHash: casePlan.planHash,
+        write: manifest,
+        verification: manifest,
+        verificationMode: "internal_read_back",
+        caseOperation: completeOperation,
+      };
+    }
+    const verification = acquiredEntries
       .filter(entry => isMeterSphereVerification(entry.toolName) && entry.startedSequence! > write.completedSequence!)
       .sort((a, b) => a.startedSequence! - b.startedSequence!)[0];
-    return verification ? { write, verification } : undefined;
+    if (!verification) return undefined;
+    const caseOperation = buildMeterSphereCaseOperationReceipt({
+      writeInput: write.input,
+      writeResult: write.result,
+      verificationResult: verification.result,
+      moduleResults,
+    });
+    const completeOperation = completeCaseOperationAgainstPlan(casePlan, caseOperation);
+    if (!completeOperation) return undefined;
+    return {
+      casePlanHash: casePlan.planHash,
+      write: this.manifestEntry(write),
+      verification: this.manifestEntry(verification),
+      verificationMode: "separate_read_back",
+      caseOperation: completeOperation,
+    };
   }
 
   private replay(entry: EvidenceEntry): unknown {
@@ -361,6 +472,14 @@ export function isMeterSphereVerification(toolName: string): boolean {
   return normalized.includes("metersphere") && /(?:list_test_cases|get_test_case_detail)/.test(normalized);
 }
 
+function isEffectiveMeterSphereWrite(entry: EvidenceEntry): boolean {
+  if (!isMeterSphereWrite(entry.toolName)) return false;
+  if (!entry.toolName.toLowerCase().includes("bulk_upsert_test_cases")) return true;
+  const operation = parseMeterSphereBulkOperation(entry.input, entry.result);
+  if (operation) return !operation.dryRun && operation.success;
+  return !(isRecord(entry.input) && entry.input.dry_run === true);
+}
+
 function isMeterSphereRead(toolName: string): boolean {
   const normalized = toolName.toLowerCase();
   return normalized.includes("metersphere") && /(?:list|get)/.test(normalized);
@@ -369,6 +488,23 @@ function isMeterSphereRead(toolName: string): boolean {
 function isMeterSphereMutation(toolName: string): boolean {
   const normalized = toolName.toLowerCase();
   return normalized.includes("metersphere") && /(?:create|edit|upsert|batch)/.test(normalized);
+}
+
+function isMeterSphereBulkMutation(toolName: string): boolean {
+  const normalized = toolName.toLowerCase();
+  return normalized.includes("metersphere") && normalized.includes("bulk_upsert_test_cases");
+}
+
+function isMeterSphereSingleCaseMutation(toolName: string): boolean {
+  const normalized = toolName.toLowerCase();
+  return normalized.includes("metersphere") && /(?:create_test_case|edit_test_case)/.test(normalized);
+}
+
+function isCasePlanEvidence(toolName: string): boolean {
+  const normalized = toolName.toLowerCase();
+  return !normalized.includes("metersphere")
+    && normalized !== "qasey_report_progress"
+    && !isOrchestrationTool(toolName);
 }
 
 function isOrchestrationTool(toolName: string): boolean {

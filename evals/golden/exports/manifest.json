@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "1.0",
+  "datasetName": "qasey-real-qa-workflows-v1",
+  "recordCount": 32,
+  "byWorkflow": {
+    "ambiguous_follow_up": 1,
+    "business_fact_correction": 1,
+    "case_fact_boundary": 1,
+    "case_gap_fill": 4,
+    "case_matrix_expansion": 1,
+    "case_publish": 1,
+    "case_refactor": 1,
+    "case_replace": 1,
+    "case_scope_correction": 2,
+    "case_structure_update": 3,
+    "case_tree_refactor": 2,
+    "discussion_to_test_scope": 1,
+    "fact_correction": 1,
+    "goal_correction": 1,
+    "module_rename": 1,
+    "module_reorder": 2,
+    "pr_to_cases": 1,
+    "priority_calibration": 1,
+    "qa_quick_support": 1,
+    "requirement_to_cases": 3,
+    "terminology_normalization": 2
+  },
+  "byIntent": {
+    "case_create_full": 5,
+    "case_maintain_fast": 24,
+    "qa_quick_query": 1,
+    "qa_review": 1,
+    "unknown": 1
+  },
+  "sourceFiles": [
+    "evals/soruce_case/chat-export/20260628-2239_你还记得之前让你生成的测试用例的任务吗.md",
+    "evals/soruce_case/chat-export/20260730-1738_你根据里历史写case的skill-现在需要你帮我重构payment的case-.md",
+    "evals/soruce_case/chat-export/20260731-1020_你还记得之前让你写case的skill以及preauth的case吗-现在根据这.md",
+    "evals/soruce_case/chat-export/20260731-1642_BT-reader如何链接.md",
+    "evals/soruce_case/chat-export/20260731-1847_重启刚刚写的preauth的case.md",
+    "evals/soruce_case/chat-export/20260804-1032_这个需求帮我写一下metersphere的case-这是设计稿.md",
+    "evals/soruce_case/chat-export/20260804-1200_把-Pre-auth-二期的-case-导入-MeterSphere-删掉旧的.md",
+    "evals/soruce_case/chat-export/20260804-1626_继续用-MCP-改.md",
+    "evals/soruce_case/chat-export/20260807-1802_根据这个PR-帮我写一下metersphere的case.md",
+    "evals/soruce_case/chat-export/20260810-1710_继续之前之前写的package-retail支持split-payment的ca.md",
+    "evals/soruce_case/chat-export/20260810-1712_继续之前未完成的payment-case-refactor的任务.md",
+    "evals/soruce_case/chat-export/20260811-1505_继续之前的额写pachage-retail-支持split-payment的任务.md",
+    "evals/soruce_case/chat-export/20260811-1908_这个需求帮我写下case-这是设计稿-这是相关PR-MoeGolibrary-m.md"
+  ],
+  "provenance": "../source-evidence.v1.json",
+  "rawSourceRequired": false,
+  "exportFormats": {
+    "canonical": "canonical.jsonl",
+    "mastra": "mastra-items.json",
+    "mastraSafe": "mastra-safe-items.json",
+    "datadogJson": "datadog-records.json",
+    "datadogCsv": "datadog-records.csv"
+  }
+}

@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://moego.local/qasey/golden-dataset.schema.v1.json",
+  "title": "Qasey Golden Dataset v1",
+  "type": "object",
+  "required": ["schemaVersion", "name", "records"],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "name": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "records": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/record" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "route": {
+      "type": "object",
+      "required": ["intent", "relation", "writeTarget", "depth"],
+      "properties": {
+        "intent": {
+          "enum": [
+            "qa_quick_query",
+            "qa_review",
+            "case_create_full",
+            "case_maintain_fast",
+            "experience_read",
+            "experience_write",
+            "meta_or_out_of_scope",
+            "unknown"
+          ]
+        },
+        "relation": { "enum": ["new", "follow_up", "unknown"] },
+        "writeTarget": { "enum": ["none", "metersphere", "qa_experience", "git"] },
+        "depth": { "enum": ["quick", "standard", "deep"] }
+      },
+      "additionalProperties": false
+    },
+    "record": {
+      "type": "object",
+      "required": ["id", "status", "source", "input", "groundTruth", "expectedTrajectory", "metadata"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^qasey-gw-[0-9]{3}$" },
+        "status": { "enum": ["golden", "candidate", "excluded"] },
+        "source": {
+          "type": "object",
+          "required": ["file", "excerpt"],
+          "properties": {
+            "file": { "type": "string", "pattern": "^evals/soruce_case/chat-export/.+\\.md$" },
+            "excerpt": { "type": "string", "minLength": 2 }
+          },
+          "additionalProperties": false
+        },
+        "input": {
+          "type": "object",
+          "required": ["message"],
+          "properties": {
+            "message": { "type": "string", "minLength": 1 },
+            "priorContext": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["role", "content"],
+                "properties": {
+                  "role": { "enum": ["user", "assistant"] },
+                  "content": { "type": "string", "minLength": 1 }
+                },
+                "additionalProperties": false
+              }
+            },
+            "attachments": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["name", "mimeType", "source"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "mimeType": { "type": "string" },
+                  "source": { "enum": ["api", "jira", "slack"] }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "groundTruth": {
+          "type": "object",
+          "required": ["route", "objective", "mustInclude", "mustNot", "writePolicy", "readbackRequired"],
+          "properties": {
+            "route": { "$ref": "#/$defs/route" },
+            "objective": { "type": "string", "minLength": 1 },
+            "mustInclude": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "mustNot": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "writePolicy": { "enum": ["none", "metersphere_upsert", "qa_experience_approval", "blocked_delete"] },
+            "readbackRequired": { "type": "boolean" },
+            "clarification": {
+              "type": ["object", "null"],
+              "properties": {
+                "required": { "type": "boolean" },
+                "maxQuestions": { "type": "integer", "minimum": 0, "maximum": 1 },
+                "reason": { "type": "string" }
+              },
+              "required": ["required", "maxQuestions", "reason"],
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "expectedTrajectory": {
+          "type": "object",
+          "required": ["requiredCapabilities", "forbiddenCapabilities", "terminalEvidence"],
+          "properties": {
+            "requiredCapabilities": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "optionalCapabilities": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "forbiddenCapabilities": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "terminalEvidence": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+          },
+          "additionalProperties": false
+        },
+        "metadata": {
+          "type": "object",
+          "required": ["workflow", "difficulty", "tags"],
+          "properties": {
+            "workflow": { "type": "string", "minLength": 1 },
+            "difficulty": { "enum": ["easy", "medium", "hard"] },
+            "tags": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "notes": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

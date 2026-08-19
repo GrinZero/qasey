@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { MCPClient, MCPOAuthClientProvider } from "@mastra/mcp";
 import type { MastraMCPServerDefinition, OAuthStorage } from "@mastra/mcp";
@@ -8,6 +9,7 @@ import type { QaseyConfig } from "./config.ts";
 import { logError } from "./logging.ts";
 import { loadMcpServerConfigs, type McpServerConfig, type McpServerConfigs, type McpServerName } from "./mcp-config.ts";
 import { FileOAuthStorage, PostgresOAuthStorage } from "./oauth-storage.ts";
+import { SubjectMcpClientPool } from "../../../src/platform/mcp/create-clients.ts";
 
 const allowedTools = {
   metersphere: new Set([
@@ -20,6 +22,11 @@ const allowedTools = {
   lark: new Set(["lark_doc_search", "lark_doc_read"]),
 } as const;
 
+/** Static upper bound used by safe experiment validation; does not contact MCP servers. */
+export const QASEY_MCP_ALLOWED_TOOL_NAMES = Object.entries(allowedTools).flatMap(([server, tools]) =>
+  [...tools].map(tool => `${server}_${tool}`),
+);
+
 const defaultTimeouts: Record<McpServerName, number> = {
   metersphere: 60_000,
   figma: 120_000,
@@ -28,21 +35,25 @@ const defaultTimeouts: Record<McpServerName, number> = {
   lark: 60_000,
 };
 
-function storageFor(config: QaseyConfig, serverName: McpServerName): OAuthStorage {
+function storageFor(config: QaseyConfig, serverName: McpServerName, subjectKey: string): OAuthStorage {
+  const namespace = `qasey:${subjectKey}:${serverName}`;
   if (config.DATABASE_URL && config.MASTRA_ENCRYPTION_KEY) {
-    return new PostgresOAuthStorage(config.DATABASE_URL, config.MASTRA_ENCRYPTION_KEY, serverName);
+    return new PostgresOAuthStorage(config.DATABASE_URL, config.MASTRA_ENCRYPTION_KEY, namespace);
   }
   if (config.NODE_ENV === "production") {
     throw new Error(`OAuth MCP ${serverName} requires DATABASE_URL and MASTRA_ENCRYPTION_KEY in production`);
   }
-  return new FileOAuthStorage(resolve(config.QASEY_MCP_OAUTH_DIR, `${serverName}.json`));
+  const digest = createHash("sha256").update(namespace).digest("hex");
+  return new FileOAuthStorage(resolve(config.QASEY_MCP_OAUTH_DIR, `${digest}.json`));
 }
 
 function serverDefinition(
   name: McpServerName,
   spec: McpServerConfig,
   config: QaseyConfig,
+  subjectKey?: string,
   onAuthorizationUrl?: (server: McpServerName, url: URL) => void | Promise<void>,
+  onOAuthStorage?: (storage: OAuthStorage) => void,
 ): MastraMCPServerDefinition {
   const endpoint = new URL(spec.url);
   const allowedHosts = [...new Set([endpoint.host, ...spec.allowedHosts])];
@@ -70,10 +81,13 @@ function serverDefinition(
     };
   }
 
+  if (!subjectKey) throw new Error(`OAuth MCP ${name} requires a credential subject`);
   const clientId = spec.auth.clientIdEnv ? process.env[spec.auth.clientIdEnv] : undefined;
   const clientSecret = spec.auth.clientSecretEnv ? process.env[spec.auth.clientSecretEnv] : undefined;
   if (spec.auth.clientIdEnv && !clientId) throw new Error(`MCP ${name} expects OAuth client ID in ${spec.auth.clientIdEnv}`);
   if (spec.auth.clientSecretEnv && !clientSecret) throw new Error(`MCP ${name} expects OAuth client secret in ${spec.auth.clientSecretEnv}`);
+  const storage = storageFor(config, name, subjectKey);
+  onOAuthStorage?.(storage);
   const authProvider = new MCPOAuthClientProvider({
     redirectUrl: spec.auth.redirectUrl,
     clientMetadata: {
@@ -85,7 +99,7 @@ function serverDefinition(
       ...(spec.auth.scopes ? { scope: spec.auth.scopes.join(" ") } : {}),
     },
     ...(clientId ? { clientInformation: { client_id: clientId, ...(clientSecret ? { client_secret: clientSecret } : {}) } } : {}),
-    storage: storageFor(config, name),
+    storage,
     ...(onAuthorizationUrl ? { onRedirectToAuthorization: url => onAuthorizationUrl(name, url) } : {}),
   });
   return { ...common, authProvider };
@@ -93,6 +107,12 @@ function serverDefinition(
 
 export interface QaseyMcpCatalogOptions {
   onAuthorizationUrl?: (server: McpServerName, url: URL) => void | Promise<void>;
+}
+
+export interface McpCredentialSubject {
+  applicationId: string;
+  tenantId: string;
+  subjectId: string;
 }
 
 export class InvalidToolInputError extends Error {
@@ -126,41 +146,60 @@ export function validateFigmaToolInput(toolName: string, input: unknown): void {
 }
 
 export class QaseyMcpCatalog {
-  private client?: MCPClient;
+  private sharedClient?: MCPClient;
+  private readonly subjectClients: SubjectMcpClientPool;
+  private readonly oauthStorages = new Set<OAuthStorage & { close?: () => Promise<void> }>();
   private readonly servers: McpServerConfigs;
 
   constructor(private readonly config: QaseyConfig, private readonly options: QaseyMcpCatalogOptions = {}) {
     this.servers = loadMcpServerConfigs(config);
+    this.subjectClients = new SubjectMcpClientPool(subjectKey => new MCPClient({
+      id: `qasey-oauth-${createHash("sha256").update(subjectKey).digest("hex").slice(0, 16)}`,
+      servers: Object.fromEntries(this.oauthServerNames().map(name => [
+        name,
+        serverDefinition(name, this.servers[name]!, this.config, subjectKey, this.options.onAuthorizationUrl, storage => {
+          this.oauthStorages.add(storage);
+        }),
+      ])),
+    }), 64, 15 * 60_000);
   }
 
   configuredServers(): McpServerName[] {
     return Object.keys(this.servers) as McpServerName[];
   }
 
-  private getClient(): MCPClient | undefined {
-    if (this.client) return this.client;
-    const configured = Object.fromEntries(this.configuredServers().map(name => [
-      name,
-      serverDefinition(name, this.servers[name]!, this.config, this.options.onAuthorizationUrl),
-    ]));
-    if (Object.keys(configured).length === 0) return undefined;
-    this.client = new MCPClient({ id: "qasey-mcp-catalog", servers: configured });
-    return this.client;
+  private oauthServerNames(): McpServerName[] {
+    return this.configuredServers().filter(name => this.servers[name]!.auth.type === "oauth");
   }
 
-  async authenticate(serverName: McpServerName): Promise<void> {
+  private getSharedClient(): MCPClient | undefined {
+    if (this.sharedClient) return this.sharedClient;
+    const configured = Object.fromEntries(this.configuredServers().filter(name => this.servers[name]!.auth.type !== "oauth").map(name => [
+      name,
+      serverDefinition(name, this.servers[name]!, this.config),
+    ]));
+    if (Object.keys(configured).length === 0) return undefined;
+    this.sharedClient = new MCPClient({ id: "qasey-shared-service-mcp", servers: configured });
+    return this.sharedClient;
+  }
+
+  async authenticate(serverName: McpServerName, subject: McpCredentialSubject): Promise<void> {
     const spec = this.servers[serverName];
     if (!spec) throw new Error(`MCP server is not configured: ${serverName}`);
     if (spec.auth.type !== "oauth") throw new Error(`MCP server ${serverName} does not use OAuth`);
-    await this.getClient()!.authenticate(serverName);
+    await (await this.subjectClients.get(subjectKey(subject))).authenticate(serverName);
   }
 
-  async toolsFor(route: IntentRoute, channel: QaseyChannel): Promise<ToolsInput> {
-    const client = this.getClient();
-    if (!client) return {};
-    const { tools, errors } = await client.listToolsWithErrors();
-    for (const [server, message] of Object.entries(errors)) {
-      logError("mcp.tools.discovery_failed", new Error(message), { server });
+  async toolsFor(route: IntentRoute, channel: QaseyChannel, subject?: McpCredentialSubject): Promise<ToolsInput> {
+    const clients: MCPClient[] = [];
+    const shared = this.getSharedClient();
+    if (shared) clients.push(shared);
+    if (subject && this.oauthServerNames().length > 0) clients.push(await this.subjectClients.get(subjectKey(subject)));
+    if (clients.length === 0) return {};
+    const discovered = await Promise.all(clients.map(client => client.listToolsWithErrors()));
+    const tools = Object.assign({}, ...discovered.map(result => result.tools)) as ToolsInput;
+    for (const result of discovered) for (const [server, message] of Object.entries(result.errors)) {
+      logError("mcp.tools.discovery_failed", new Error(message), { server, subjectBound: Boolean(subject) });
     }
     const canWriteCases = route.intent === "case_create_full" || route.intent === "case_maintain_fast";
     const canWriteExperience = route.intent === "experience_write" && channel === "slack";
@@ -182,7 +221,7 @@ export class QaseyMcpCatalog {
           ? "qa_experience_write"
           : "external_read";
       const policy = TOOL_POLICIES[policyId]!;
-      const execute = tool.execute;
+      const execute = "execute" in tool ? tool.execute : undefined;
       return [qualified, {
         ...tool,
         requireApproval: policy.requiresApproval,
@@ -197,6 +236,17 @@ export class QaseyMcpCatalog {
   }
 
   async close(): Promise<void> {
-    await this.client?.disconnect();
+    await Promise.allSettled([
+      this.sharedClient?.disconnect() ?? Promise.resolve(),
+      this.subjectClients.close(),
+    ]);
+    await Promise.allSettled([...this.oauthStorages].map(storage => storage.close?.() ?? Promise.resolve()));
+    this.oauthStorages.clear();
   }
+}
+
+function subjectKey(subject: McpCredentialSubject): string {
+  const values = [subject.applicationId, subject.tenantId, subject.subjectId].map(value => value.trim());
+  if (values.some(value => !value)) throw new Error("MCP credential subject fields must be non-empty");
+  return values.map(value => encodeURIComponent(value)).join(":");
 }
