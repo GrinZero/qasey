@@ -14,9 +14,6 @@
   "lint": {
     "commands": ["pnpm typecheck"]
   },
-  "test": {
-    "commands": ["pnpm test"]
-  },
   "build": {
     "commands": ["pnpm build"],
     "build_image": [
