@@ -69,6 +69,7 @@ runtimeReadiness.register("mastra-storage", async () => {
 runtimeReadiness.register("run-repository", () => runRepository.healthCheck?.() ?? Promise.resolve());
 runtimeReadiness.register("channel-delivery-inbox", () => channelDeliveryInbox.healthCheck?.() ?? Promise.resolve());
 export const mcpCatalog = new QaseyMcpCatalog(config);
+runtimeReadiness.register("mcp-oauth-storage", () => mcpCatalog.healthCheck());
 export const githubClient = createGitHubClient(config);
 export const readConnectorCatalog = new ReadConnectorCatalog(config, githubClient);
 export const jiraClient = new JiraClient(config.JIRA_BASE_URL, config.JIRA_EMAIL, config.JIRA_API_TOKEN);
@@ -113,6 +114,7 @@ export function initializeQaseyInfrastructure(): Promise<void> {
     runtimeStore.storage.init(),
     runRepository.init?.(),
     channelDeliveryInbox.init?.(),
+    mcpCatalog.init(),
   ]).then(() => undefined);
   return infrastructureInitialization;
 }

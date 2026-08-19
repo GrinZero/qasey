@@ -8,7 +8,7 @@ import { authorizeToolAccess, TOOL_POLICIES } from "../../domain/src/index.ts";
 import type { QaseyConfig } from "./config.ts";
 import { logError, logInfo } from "./logging.ts";
 import { loadMcpServerConfigs, type McpServerConfig, type McpServerConfigs, type McpServerName } from "./mcp-config.ts";
-import { FileOAuthStorage, PostgresOAuthStorage } from "./oauth-storage.ts";
+import { FileOAuthStorage, PostgresOAuthStorage, PostgresOAuthStorageBackend } from "./oauth-storage.ts";
 import { SubjectMcpClientPool } from "../../../src/platform/mcp/create-clients.ts";
 
 const allowedTools = {
@@ -139,10 +139,16 @@ export class McpToolDiscoveryCache {
   }
 }
 
-function storageFor(config: QaseyConfig, serverName: McpServerName, subjectKey: string): OAuthStorage {
+function storageFor(
+  config: QaseyConfig,
+  serverName: McpServerName,
+  subjectKey: string,
+  postgresBackend?: PostgresOAuthStorageBackend,
+): OAuthStorage {
   const namespace = `qasey:${subjectKey}:${serverName}`;
   if (config.DATABASE_URL && config.MASTRA_ENCRYPTION_KEY) {
-    return new PostgresOAuthStorage(config.DATABASE_URL, config.MASTRA_ENCRYPTION_KEY, namespace);
+    if (!postgresBackend) throw new Error("Postgres OAuth storage backend has not been configured");
+    return new PostgresOAuthStorage(postgresBackend, config.MASTRA_ENCRYPTION_KEY, namespace);
   }
   if (config.NODE_ENV === "production") {
     throw new Error(`OAuth MCP ${serverName} requires DATABASE_URL and MASTRA_ENCRYPTION_KEY in production`);
@@ -157,7 +163,7 @@ function serverDefinition(
   config: QaseyConfig,
   subjectKey?: string,
   onAuthorizationUrl?: (server: McpServerName, url: URL) => void | Promise<void>,
-  onOAuthStorage?: (storage: OAuthStorage) => void,
+  postgresBackend?: PostgresOAuthStorageBackend,
 ): MastraMCPServerDefinition {
   const endpoint = new URL(spec.url);
   const allowedHosts = [...new Set([endpoint.host, ...spec.allowedHosts])];
@@ -190,8 +196,7 @@ function serverDefinition(
   const clientSecret = spec.auth.clientSecretEnv ? process.env[spec.auth.clientSecretEnv] : undefined;
   if (spec.auth.clientIdEnv && !clientId) throw new Error(`MCP ${name} expects OAuth client ID in ${spec.auth.clientIdEnv}`);
   if (spec.auth.clientSecretEnv && !clientSecret) throw new Error(`MCP ${name} expects OAuth client secret in ${spec.auth.clientSecretEnv}`);
-  const storage = storageFor(config, name, subjectKey);
-  onOAuthStorage?.(storage);
+  const storage = storageFor(config, name, subjectKey, postgresBackend);
   const authProvider = new MCPOAuthClientProvider({
     redirectUrl: spec.auth.redirectUrl,
     clientMetadata: {
@@ -253,24 +258,39 @@ export class QaseyMcpCatalog {
   private sharedClient?: MCPClient;
   private readonly subjectClients: SubjectMcpClientPool;
   private readonly toolDiscovery = new McpToolDiscoveryCache();
-  private readonly oauthStorages = new Set<OAuthStorage & { close?: () => Promise<void> }>();
+  private readonly oauthBackend: PostgresOAuthStorageBackend | undefined;
   private readonly servers: McpServerConfigs;
 
   constructor(private readonly config: QaseyConfig, private readonly options: QaseyMcpCatalogOptions = {}) {
     this.servers = loadMcpServerConfigs(config);
+    this.oauthBackend = config.DATABASE_URL && config.MASTRA_ENCRYPTION_KEY && this.oauthServerNames().length > 0
+      ? new PostgresOAuthStorageBackend(config.DATABASE_URL)
+      : undefined;
     this.subjectClients = new SubjectMcpClientPool(subjectKey => new MCPClient({
       id: `qasey-oauth-${createHash("sha256").update(subjectKey).digest("hex").slice(0, 16)}`,
       servers: Object.fromEntries(this.oauthServerNames().map(name => [
-        name,
-        serverDefinition(name, this.servers[name]!, this.config, subjectKey, this.options.onAuthorizationUrl, storage => {
-          this.oauthStorages.add(storage);
-        }),
+        name, serverDefinition(
+          name,
+          this.servers[name]!,
+          this.config,
+          subjectKey,
+          this.options.onAuthorizationUrl,
+          this.oauthBackend,
+        ),
       ])),
     }), 64, 15 * 60_000);
   }
 
   configuredServers(): McpServerName[] {
     return Object.keys(this.servers) as McpServerName[];
+  }
+
+  async init(): Promise<void> {
+    await this.oauthBackend?.init();
+  }
+
+  async healthCheck(): Promise<void> {
+    await this.oauthBackend?.healthCheck();
   }
 
   private oauthServerNames(): McpServerName[] {
@@ -346,9 +366,8 @@ export class QaseyMcpCatalog {
     await Promise.allSettled([
       this.sharedClient?.disconnect() ?? Promise.resolve(),
       this.subjectClients.close(),
+      this.oauthBackend?.close() ?? Promise.resolve(),
     ]);
-    await Promise.allSettled([...this.oauthStorages].map(storage => storage.close?.() ?? Promise.resolve()));
-    this.oauthStorages.clear();
   }
 
   private async discoverTools(client: MCPClient): Promise<ToolDiscoveryResult> {

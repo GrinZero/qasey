@@ -60,15 +60,15 @@ function decrypt(value: string, masterKey: string): string {
   return Buffer.concat([decipher.update(Buffer.from(ciphertext, "base64url")), decipher.final()]).toString("utf8");
 }
 
-export class PostgresOAuthStorage implements OAuthStorage {
+export class PostgresOAuthStorageBackend {
   private readonly pool: Pool;
   private initialized?: Promise<void>;
 
-  constructor(connectionString: string, private readonly masterKey: string, private readonly namespace: string) {
+  constructor(connectionString: string) {
     this.pool = new Pool({ connectionString, max: 2 });
   }
 
-  private ensureInitialized(): Promise<void> {
+  init(): Promise<void> {
     this.initialized ??= this.pool.query(`CREATE TABLE IF NOT EXISTS qasey_mcp_oauth_credentials (
       namespace text NOT NULL,
       storage_key text NOT NULL,
@@ -79,26 +79,57 @@ export class PostgresOAuthStorage implements OAuthStorage {
     return this.initialized;
   }
 
-  async set(key: string, value: string): Promise<void> {
-    await this.ensureInitialized();
+  private ready(): Promise<void> {
+    if (!this.initialized) return Promise.reject(new Error("PostgresOAuthStorageBackend has not been initialized"));
+    return this.initialized;
+  }
+
+  async healthCheck(): Promise<void> {
+    await this.ready();
+    await this.pool.query("SELECT 1");
+  }
+
+  async set(namespace: string, key: string, encryptedValue: string): Promise<void> {
+    await this.ready();
     await this.pool.query(`INSERT INTO qasey_mcp_oauth_credentials(namespace, storage_key, encrypted_value)
       VALUES($1,$2,$3) ON CONFLICT(namespace, storage_key) DO UPDATE SET encrypted_value=EXCLUDED.encrypted_value, updated_at=now()`,
-    [this.namespace, key, encrypt(value, this.masterKey)]);
+    [namespace, key, encryptedValue]);
   }
 
-  async get(key: string): Promise<string | undefined> {
-    await this.ensureInitialized();
+  async get(namespace: string, key: string): Promise<string | undefined> {
+    await this.ready();
     const result = await this.pool.query<{ encrypted_value: string }>(
       "SELECT encrypted_value FROM qasey_mcp_oauth_credentials WHERE namespace=$1 AND storage_key=$2",
-      [this.namespace, key],
+      [namespace, key],
     );
-    return result.rows[0] ? decrypt(result.rows[0].encrypted_value, this.masterKey) : undefined;
+    return result.rows[0]?.encrypted_value;
   }
 
-  async delete(key: string): Promise<void> {
-    await this.ensureInitialized();
-    await this.pool.query("DELETE FROM qasey_mcp_oauth_credentials WHERE namespace=$1 AND storage_key=$2", [this.namespace, key]);
+  async delete(namespace: string, key: string): Promise<void> {
+    await this.ready();
+    await this.pool.query("DELETE FROM qasey_mcp_oauth_credentials WHERE namespace=$1 AND storage_key=$2", [namespace, key]);
   }
 
   async close(): Promise<void> { await this.pool.end(); }
+}
+
+export class PostgresOAuthStorage implements OAuthStorage {
+  constructor(
+    private readonly backend: PostgresOAuthStorageBackend,
+    private readonly masterKey: string,
+    private readonly namespace: string,
+  ) {}
+
+  async set(key: string, value: string): Promise<void> {
+    await this.backend.set(this.namespace, key, encrypt(value, this.masterKey));
+  }
+
+  async get(key: string): Promise<string | undefined> {
+    const value = await this.backend.get(this.namespace, key);
+    return value ? decrypt(value, this.masterKey) : undefined;
+  }
+
+  async delete(key: string): Promise<void> {
+    await this.backend.delete(this.namespace, key);
+  }
 }

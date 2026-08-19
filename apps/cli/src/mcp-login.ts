@@ -28,6 +28,7 @@ if (!server.success) {
     },
   });
   try {
+    await catalog.init();
     if (callbackUrls.length > 0) {
       console.info(`OAuth callback allowlist: ${callbackUrls[0]} through ${callbackUrls.at(-1)}`);
     }
