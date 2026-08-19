@@ -23,6 +23,7 @@ import type { WorkspaceRef } from "../../packages/e2e/src/index.ts";
 import { ownerScopeFromRequestContext } from "../platform/context/owner-scope.ts";
 import { createCompositeStore } from "../platform/storage/create-composite-store.ts";
 import { InMemoryChannelDeliveryInbox, PostgresChannelDeliveryInbox } from "../platform/channels/delivery-inbox.ts";
+import { runtimeReadiness } from "../platform/storage/readiness.ts";
 
 const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
 const resolveProjectPath = (value: string) => isAbsolute(value) ? value : resolve(projectRoot, value);
@@ -59,6 +60,14 @@ export const runRepository = config.DATABASE_URL ? new PostgresRunRepository(con
 export const channelDeliveryInbox = config.DATABASE_URL
   ? new PostgresChannelDeliveryInbox(config.DATABASE_URL)
   : new InMemoryChannelDeliveryInbox();
+// The registry can survive a development hot reload. Reset it before replacing
+// checks so readiness never reports the previous runtime while this one starts.
+runtimeReadiness.markInitializationStarted();
+runtimeReadiness.register("mastra-storage", async () => {
+  if (mastraStorage) await mastraStorage.db.one("SELECT 1");
+});
+runtimeReadiness.register("run-repository", () => runRepository.healthCheck?.() ?? Promise.resolve());
+runtimeReadiness.register("channel-delivery-inbox", () => channelDeliveryInbox.healthCheck?.() ?? Promise.resolve());
 export const mcpCatalog = new QaseyMcpCatalog(config);
 export const githubClient = createGitHubClient(config);
 export const readConnectorCatalog = new ReadConnectorCatalog(config, githubClient);
@@ -95,6 +104,18 @@ export const e2eCoordinator = new E2ECoordinator(
     ...(config.QASEY_ENABLE_CUA_FALLBACK ? { cua: new CuaFallback() } : {}),
   },
 );
+
+let infrastructureInitialization: Promise<void> | undefined;
+
+/** Complete storage migrations before the HTTP server can accept traffic. */
+export function initializeQaseyInfrastructure(): Promise<void> {
+  infrastructureInitialization ??= Promise.all([
+    runtimeStore.storage.init(),
+    runRepository.init?.(),
+    channelDeliveryInbox.init?.(),
+  ]).then(() => undefined);
+  return infrastructureInitialization;
+}
 
 export async function closeQaseyInfrastructure(): Promise<void> {
   const resources: Array<{ close(): Promise<void> }> = [mcpCatalog, channelDeliveryInbox, runRepository, runtimeStore.storage];

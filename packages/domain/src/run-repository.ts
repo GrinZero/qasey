@@ -3,6 +3,8 @@ import { Pool } from "pg";
 import type { E2ERun, OwnerScope, RunEvent, RunStatus } from "../../contracts/src/index.ts";
 
 export interface RunRepository {
+  init?(): Promise<void>;
+  healthCheck?(): Promise<void>;
   create(owner: OwnerScope, run: E2ERun): Promise<E2ERun>;
   get(owner: OwnerScope, id: string): Promise<E2ERun | undefined>;
   list(owner: OwnerScope, limit?: number): Promise<E2ERun[]>;
@@ -15,6 +17,9 @@ export interface RunRepository {
 export class InMemoryRunRepository implements RunRepository {
   readonly runs = new Map<string, E2ERun>();
   readonly runEvents = new Map<string, RunEvent[]>();
+
+  async init(): Promise<void> {}
+  async healthCheck(): Promise<void> {}
 
   async create(owner: OwnerScope, run: E2ERun): Promise<E2ERun> {
     assertOwner(owner, run);
@@ -72,7 +77,7 @@ export class PostgresRunRepository implements RunRepository {
     this.pool = new Pool({ connectionString, max: 10 });
   }
 
-  private ensureInitialized(): Promise<void> {
+  init(): Promise<void> {
     this.initialized ??= this.pool.query(`
       CREATE TABLE IF NOT EXISTS agent_application_runs (
         application_id text NOT NULL,
@@ -100,9 +105,19 @@ export class PostgresRunRepository implements RunRepository {
     return this.initialized;
   }
 
+  private ready(): Promise<void> {
+    if (!this.initialized) return Promise.reject(new Error("PostgresRunRepository has not been initialized"));
+    return this.initialized;
+  }
+
+  async healthCheck(): Promise<void> {
+    await this.ready();
+    await this.pool.query("SELECT 1");
+  }
+
   async create(owner: OwnerScope, run: E2ERun): Promise<E2ERun> {
     assertOwner(owner, run);
-    await this.ensureInitialized();
+    await this.ready();
     await this.pool.query(
       "INSERT INTO agent_application_runs(application_id, tenant_id, id, payload) VALUES ($1, $2, $3, $4::jsonb)",
       [owner.applicationId, owner.tenantId, run.id, JSON.stringify(run)],
@@ -111,7 +126,7 @@ export class PostgresRunRepository implements RunRepository {
   }
 
   async get(owner: OwnerScope, id: string): Promise<E2ERun | undefined> {
-    await this.ensureInitialized();
+    await this.ready();
     const result = await this.pool.query<{ payload: E2ERun }>(
       "SELECT payload FROM agent_application_runs WHERE application_id = $1 AND tenant_id = $2 AND id = $3",
       [owner.applicationId, owner.tenantId, id],
@@ -120,7 +135,7 @@ export class PostgresRunRepository implements RunRepository {
   }
 
   async list(owner: OwnerScope, limit = 100): Promise<E2ERun[]> {
-    await this.ensureInitialized();
+    await this.ready();
     const result = await this.pool.query<{ payload: E2ERun }>(
       `SELECT payload FROM agent_application_runs
        WHERE application_id = $1 AND tenant_id = $2
@@ -142,7 +157,7 @@ export class PostgresRunRepository implements RunRepository {
   }
 
   async addEvent(owner: OwnerScope, runId: string, type: string, message: string, metadata: Record<string, unknown> = {}): Promise<RunEvent> {
-    await this.ensureInitialized();
+    await this.ready();
     const event = { id: randomUUID(), runId, at: new Date().toISOString(), type, message, metadata };
     await this.pool.query(
       "INSERT INTO agent_application_run_events(application_id, tenant_id, id, run_id, payload) VALUES ($1, $2, $3, $4, $5::jsonb)",
@@ -152,7 +167,7 @@ export class PostgresRunRepository implements RunRepository {
   }
 
   async events(owner: OwnerScope, runId: string): Promise<RunEvent[]> {
-    await this.ensureInitialized();
+    await this.ready();
     const result = await this.pool.query<{ payload: RunEvent }>(
       "SELECT payload FROM agent_application_run_events WHERE application_id = $1 AND tenant_id = $2 AND run_id = $3 ORDER BY created_at, id",
       [owner.applicationId, owner.tenantId, runId],

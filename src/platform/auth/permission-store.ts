@@ -11,6 +11,8 @@ export interface PermissionCheck {
 }
 
 export interface PermissionStore {
+  init?(): Promise<void>;
+  healthCheck?(): Promise<void>;
   permissionsForRoles(tenantId: string, roles: readonly string[]): Promise<ReadonlySet<string>>;
   rolesForSubject(tenantId: string, subjectId: string): Promise<ReadonlySet<string>>;
   grantRolePermissions?(tenantId: string, role: string, permissions: readonly string[]): Promise<void>;
@@ -53,6 +55,9 @@ export class PermissionService {
 export class InMemoryPermissionStore implements PermissionStore {
   private readonly rolePermissions = new Map<string, Set<string>>();
   private readonly subjectRoles = new Map<string, Set<string>>();
+
+  async init(): Promise<void> {}
+  async healthCheck(): Promise<void> {}
 
   grant(tenantId: string, role: string, ...permissions: string[]): void {
     const key = `${tenantId}:${role}`;
@@ -100,7 +105,7 @@ export class PostgresPermissionStore implements PermissionStore {
     this.pool = new Pool({ connectionString, max: 5 });
   }
 
-  private ensureInitialized(): Promise<void> {
+  init(): Promise<void> {
     this.initialized ??= this.pool.query(`
       CREATE TABLE IF NOT EXISTS platform_roles (
         tenant_id text NOT NULL,
@@ -125,9 +130,19 @@ export class PostgresPermissionStore implements PermissionStore {
     return this.initialized;
   }
 
+  private ready(): Promise<void> {
+    if (!this.initialized) return Promise.reject(new Error("PostgresPermissionStore has not been initialized"));
+    return this.initialized;
+  }
+
+  async healthCheck(): Promise<void> {
+    await this.ready();
+    await this.pool.query("SELECT 1");
+  }
+
   async permissionsForRoles(tenantId: string, roles: readonly string[]): Promise<ReadonlySet<string>> {
     if (roles.length === 0) return new Set();
-    await this.ensureInitialized();
+    await this.ready();
     const result = await this.pool.query<{ permission: string }>(
       "SELECT permission FROM platform_role_permissions WHERE tenant_id = $1 AND role_id = ANY($2::text[])",
       [tenantId, roles],
@@ -136,7 +151,7 @@ export class PostgresPermissionStore implements PermissionStore {
   }
 
   async rolesForSubject(tenantId: string, subjectId: string): Promise<ReadonlySet<string>> {
-    await this.ensureInitialized();
+    await this.ready();
     const result = await this.pool.query<{ role_id: string }>(
       "SELECT role_id FROM platform_subject_roles WHERE tenant_id = $1 AND subject_id = $2",
       [tenantId, subjectId],
@@ -150,7 +165,7 @@ export class PostgresPermissionStore implements PermissionStore {
 
   async grantRolePermissions(tenantId: string, role: string, permissions: readonly string[]): Promise<void> {
     if (permissions.length === 0) return;
-    await this.ensureInitialized();
+    await this.ready();
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -174,7 +189,7 @@ export class PostgresPermissionStore implements PermissionStore {
   }
 
   async bindSubjectRole(tenantId: string, subjectId: string, role: string): Promise<void> {
-    await this.ensureInitialized();
+    await this.ready();
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");

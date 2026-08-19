@@ -14,6 +14,8 @@ export interface AuditRecord {
 }
 
 export interface AuditLog {
+  init?(): Promise<void>;
+  healthCheck?(): Promise<void>;
   write(record: AuditRecord): Promise<void>;
   list?(tenantId: string, limit: number): Promise<readonly AuditRecord[]>;
   close?(): Promise<void>;
@@ -21,6 +23,8 @@ export interface AuditLog {
 
 export class InMemoryAuditLog implements AuditLog {
   readonly records: AuditRecord[] = [];
+  async init(): Promise<void> {}
+  async healthCheck(): Promise<void> {}
   async write(record: AuditRecord): Promise<void> { this.records.push(structuredClone(record)); }
   async list(tenantId: string, limit: number): Promise<readonly AuditRecord[]> {
     return structuredClone(this.records.filter(record => record.tenantId === tenantId).slice(-limit).reverse());
@@ -33,7 +37,7 @@ export class PostgresAuditLog implements AuditLog {
   private initialized?: Promise<void>;
   constructor(connectionString: string) { this.pool = new Pool({ connectionString, max: 3 }); }
 
-  private ensureInitialized(): Promise<void> {
+  init(): Promise<void> {
     this.initialized ??= this.pool.query(`CREATE TABLE IF NOT EXISTS platform_audit_log (
       id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
       request_id text NOT NULL,
@@ -51,8 +55,18 @@ export class PostgresAuditLog implements AuditLog {
     return this.initialized;
   }
 
+  private ready(): Promise<void> {
+    if (!this.initialized) return Promise.reject(new Error("PostgresAuditLog has not been initialized"));
+    return this.initialized;
+  }
+
+  async healthCheck(): Promise<void> {
+    await this.ready();
+    await this.pool.query("SELECT 1");
+  }
+
   async write(record: AuditRecord): Promise<void> {
-    await this.ensureInitialized();
+    await this.ready();
     await this.pool.query(
       `INSERT INTO platform_audit_log
        (request_id, tenant_id, subject_id, application_id, resource_type, resource_id, action, decision, reason, metadata)
@@ -63,7 +77,7 @@ export class PostgresAuditLog implements AuditLog {
   }
 
   async list(tenantId: string, limit: number): Promise<readonly AuditRecord[]> {
-    await this.ensureInitialized();
+    await this.ready();
     const result = await this.pool.query<{
       request_id: string; tenant_id?: string; subject_id?: string; application_id?: string;
       resource_type: string; resource_id: string; action: string; decision: "allow" | "deny"; reason: string; metadata: Record<string, unknown>;

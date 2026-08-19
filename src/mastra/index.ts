@@ -8,7 +8,7 @@ import { RedisServerCache } from "@mastra/redis";
 import { RedisStreamsPubSub } from "@mastra/redis-streams";
 import Redis from "ioredis";
 import { QASEY_TRACE_REQUEST_CONTEXT_KEYS } from "./observability.ts";
-import { closeQaseyInfrastructure, config, createMastraRuntimeStorage, studioEditorEnabled } from "./runtime.ts";
+import { closeQaseyInfrastructure, config, createMastraRuntimeStorage, initializeQaseyInfrastructure, studioEditorEnabled } from "./runtime.ts";
 import { createQaseyApplication } from "../agent-apps/qasey/application.ts";
 import * as qaseyAgentModule from "./qasey-agent.ts";
 import * as intentModule from "./intent-agent.ts";
@@ -32,6 +32,7 @@ import { GoogleOidcService, type PlatformGoogleUser } from "../platform/auth/goo
 import { MASTRA_API_PREFIX, MASTRA_STUDIO_BASE } from "../runtime/mastra-paths.ts";
 import { closeDevelopmentConnections } from "../platform/http/development-connections.ts";
 import { seedServiceRolePermissions } from "../platform/auth/service-role-permissions.ts";
+import { runtimeReadiness } from "../platform/storage/readiness.ts";
 
 const googleOidc = new GoogleOidcService({
   ...(config.GOOGLE_CLIENT_ID ? { clientId: config.GOOGLE_CLIENT_ID } : {}),
@@ -82,10 +83,18 @@ const permissionStore = config.NODE_ENV === "production" && config.DATABASE_URL
   ? new PostgresPermissionStore(config.DATABASE_URL)
   : new InMemoryPermissionStore();
 const permissionService = new PermissionService(permissionStore);
-await seedServiceRolePermissions(permissionService, config.JIRA_BASE_URL);
 const auditLog = config.NODE_ENV === "production" && config.DATABASE_URL
   ? new PostgresAuditLog(config.DATABASE_URL)
   : new InMemoryAuditLog();
+runtimeReadiness.register("permission-store", () => permissionStore.healthCheck?.() ?? Promise.resolve());
+runtimeReadiness.register("audit-log", () => auditLog.healthCheck?.() ?? Promise.resolve());
+await Promise.all([
+  initializeQaseyInfrastructure(),
+  permissionStore.init?.(),
+  auditLog.init?.(),
+]);
+await seedServiceRolePermissions(permissionService, config.JIRA_BASE_URL);
+runtimeReadiness.markInitializationComplete();
 const bootstrapAdmins = new Set((process.env.PLATFORM_BOOTSTRAP_ADMIN_EMAILS ?? "")
   .split(",").map(value => value.trim().toLowerCase()).filter(Boolean));
 const qaseyApplication = await createQaseyApplication({

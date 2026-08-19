@@ -14,6 +14,7 @@ import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../platform/contex
 import { OAuthPrincipalSchema } from "../platform/auth/oauth-principal.ts";
 import type { PlatformGoogleUser } from "../platform/auth/google-oidc.ts";
 import { runQaseyTaskWorkflow } from "./qasey-task-workflow.ts";
+import { runtimeReadiness } from "../platform/storage/readiness.ts";
 
 const QaseyTaskRequestSchema = z.object({
   prompt: z.string().trim().min(1).max(100_000),
@@ -36,7 +37,18 @@ function errorBody(error: unknown, requestId: string) {
 
 export const apiRoutes = [
   registerApiRoute("/healthz", { method: "GET", requiresAuth: false, handler: async c => c.json({ status: "ok", service: "qasey" }) }),
-  registerApiRoute("/readyz", { method: "GET", requiresAuth: false, handler: async c => c.json({ status: "ready", storage: config.DATABASE_URL ? "postgres" : "memory" }) }),
+  registerApiRoute("/readyz", {
+    method: "GET",
+    requiresAuth: false,
+    handler: async c => {
+      const snapshot = await runtimeReadiness.inspect();
+      return c.json({
+        status: snapshot.ready ? "ready" : "not_ready",
+        storage: config.DATABASE_URL ? "postgres" : "memory",
+        dependencies: snapshot.dependencies,
+      }, snapshot.ready ? 200 : 503);
+    },
+  }),
   registerApiRoute("/webhooks/jira", {
     method: "POST",
     requiresAuth: false,
