@@ -6,6 +6,7 @@
   { "method": "GET", "path": "/studio/api/scorers/alpha-quality", "type": "scorer", "id": "alpha-quality", "action": "read" },
   { "method": "POST", "path": "/studio/api/agents/alpha-main/channels/slack/webhook", "type": "channel", "id": "slack", "action": "receive" },
   { "method": "GET", "path": "/studio/api/agents", "type": "platform", "id": "catalog", "action": "list" },
+  { "method": "GET", "path": "/studio/api/mcp/v0/servers", "type": "platform", "id": "runtime", "action": "read" },
   { "method": "GET", "path": "/studio/api/observability/traces", "type": "platform", "id": "runtime", "action": "read" },
   { "method": "GET", "path": "/studio/api/stored/agents", "type": "platform", "id": "runtime", "action": "read" },
   { "method": "GET", "path": "/studio/api/channels/platforms", "type": "platform", "id": "runtime", "action": "read" },
