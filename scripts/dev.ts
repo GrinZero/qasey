@@ -3,7 +3,9 @@ import { resolve } from "node:path";
 import process from "node:process";
 import { acquireDevelopmentLock } from "./dev-lock.ts";
 
-const lock = await acquireDevelopmentLock(resolve(".mastra/qasey-dev-runner.lock"));
+// Mastra recreates `.mastra` during startup, so the outer process lock must
+// live in Qasey's own ignored runtime directory.
+const lock = await acquireDevelopmentLock(resolve(".qasey/dev-runner.lock"));
 let child: ChildProcess | undefined;
 let forwardedSignal: NodeJS.Signals | undefined;
 
