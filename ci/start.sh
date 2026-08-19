@@ -2,6 +2,7 @@
 set -eu
 
 echo "Loading Qasey secrets from AWS Secrets Manager..."
-pnpm exec moego-aws-secret-env generate --default-environment testing
+SECRET_ENV_CLI="node_modules/@moego/aws-secret-env/dist/esm/cli.mjs"
+node "$SECRET_ENV_CLI" generate --default-environment testing
 
-exec pnpm exec moego-aws-secret-env run --default-environment testing -- sh ci/runtime.sh "${1:-api}"
+exec node "$SECRET_ENV_CLI" run --default-environment testing -- sh ci/runtime.sh "${1:-api}"
