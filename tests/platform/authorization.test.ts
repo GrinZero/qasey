@@ -231,16 +231,114 @@ describe("permission route coverage", () => {
       permission: "beta.agent.execute", audiences: ["api"],
     });
     expect(classifyRuntimeRoute("/studio/api/v1/responses", "POST", ambiguousProtocols, [])).toBeUndefined();
-    for (const [method, path] of [
-      ["GET", "/studio/api/background-tasks"],
-      ["GET", "/studio/api/background-tasks/task-1"],
-      ["GET", "/studio/api/schedules"],
-      ["POST", "/studio/api/schedules/schedule-1/run"],
-    ] as const) {
-      expect(classifyRuntimeRoute(path, method, catalog, []), `${method} ${path}`).toBeUndefined();
-    }
+    expect(classifyRuntimeRoute("/studio/api/background-tasks", "GET", catalog, [])).toMatchObject({
+      resourceType: "platform", resourceId: "background-tasks", action: "read",
+      permission: "platform.background-tasks.read",
+    });
+    expect(classifyRuntimeRoute("/studio/api/background-tasks/task-1", "GET", catalog, [])).toMatchObject({
+      resourceType: "platform", resourceId: "background-tasks", action: "read",
+    });
+    expect(classifyRuntimeRoute("/studio/api/background-tasks/task-1", "POST", catalog, [])).toMatchObject({
+      resourceType: "platform", resourceId: "runtime", action: "write", permission: "platform.runtime.manage",
+    });
+    expect(classifyRuntimeRoute("/studio/api/schedules", "GET", catalog, [])).toMatchObject({
+      resourceType: "platform", resourceId: "schedules", action: "read",
+      permission: "platform.schedules.read",
+    });
+    expect(classifyRuntimeRoute("/studio/api/schedules", "POST", catalog, [])).toMatchObject({
+      resourceType: "platform", resourceId: "schedules", action: "write",
+      permission: "platform.schedules.write",
+    });
+    expect(classifyRuntimeRoute("/studio/api/schedules/schedule-1/run", "POST", catalog, [])).toMatchObject({
+      resourceType: "platform", resourceId: "schedules", action: "execute",
+      permission: "platform.schedules.execute",
+    });
+    expect(classifyRuntimeRoute("/studio/api/schedules/schedule-1", "DELETE", catalog, [])).toMatchObject({
+      resourceType: "platform", resourceId: "schedules", action: "delete",
+      permission: "platform.schedules.delete",
+    });
+    expect(classifyRuntimeRoute("/studio/api/workflows/durable-agentic-loop/runs", "GET", catalog, [])).toMatchObject({
+      resourceType: "platform", resourceId: "workflow:durable-agentic-loop", action: "read",
+      permission: "platform.internal-workflow.read",
+    });
+    expect(classifyRuntimeRoute("/studio/api/workflows/durable-agentic-loop/start-async", "POST", catalog, [])).toMatchObject({
+      resourceType: "platform", resourceId: "workflow:durable-agentic-loop", action: "execute",
+      permission: "platform.internal-workflow.manage",
+    });
     expect(classifyRuntimeRoute("/api/unclassified/danger", "POST", catalog, [])).toBeUndefined();
     expect(classifyRuntimeRoute("/studio/api/agents/not-registered/generate", "POST", catalog, [])).toBeUndefined();
+    expect(classifyRuntimeRoute("/studio/api/new-mastra-surface", "POST", catalog, [])).toMatchObject({
+      resourceType: "platform", resourceId: "runtime", action: "write", permission: "platform.runtime.manage",
+    });
+    expect(classifyRuntimeRoute("/studio/api/workflows", "POST", catalog, [])).toMatchObject({
+      resourceType: "platform", resourceId: "catalog", action: "write", permission: "platform.catalog.manage",
+    });
+  });
+
+  it("gives platform admins the complete scheduler management surface", async () => {
+    const permissionStore = new InMemoryPermissionStore();
+    const middleware = createAuthorizationMiddleware({
+      catalog: entries,
+      permissions: new PermissionService(permissionStore),
+      audit: { write: vi.fn(async () => undefined) },
+      studioUiEnabled: true,
+      resolvePrincipal: () => OAuthPrincipalSchema.parse({
+        subjectId: "admin-1", tenantId: "tenant-1", roles: ["platform-admin"], audience: "admin-ui",
+      }),
+    });
+    const handler = middleware as Exclude<typeof middleware, { path: string }>;
+    for (const [method, url] of [
+      ["GET", "http://localhost:4111/studio/api/schedules?workflowId=alpha-job"],
+      ["POST", "http://localhost:4111/studio/api/schedules"],
+      ["PATCH", "http://localhost:4111/studio/api/schedules/schedule-1"],
+      ["POST", "http://localhost:4111/studio/api/schedules/schedule-1/run"],
+      ["DELETE", "http://localhost:4111/studio/api/schedules/schedule-1"],
+      ["GET", "http://localhost:4111/studio/api/background-tasks"],
+      ["GET", "http://localhost:4111/studio/api/workflows/durable-agentic-loop/runs?limit=20&offset=0"],
+    ] as const) {
+      const raw = new Request(url, { method });
+      const next = vi.fn(async () => undefined);
+      await handler({
+        req: {
+          path: new URL(raw.url).pathname,
+          method: raw.method,
+          raw,
+          header: (name: string) => name.toLowerCase() === "x-mastra-client-type" ? "studio" : undefined,
+        },
+        get: (key: string) => key === "requestContext" ? new RequestContext() : undefined,
+        json: vi.fn(),
+      } as never, next);
+      expect(next, `${method} ${url}`).toHaveBeenCalledOnce();
+    }
+  });
+
+  it("does not turn platform management routes into tenant-role grants", async () => {
+    const middleware = createAuthorizationMiddleware({
+      catalog: entries,
+      permissions: new PermissionService(new InMemoryPermissionStore()),
+      audit: { write: vi.fn(async () => undefined) },
+      studioUiEnabled: true,
+      resolvePrincipal: () => OAuthPrincipalSchema.parse({
+        subjectId: "user-1", tenantId: "tenant-1", roles: ["user"], audience: "admin-ui",
+      }),
+    });
+    const raw = new Request("http://localhost:4111/studio/api/schedules?workflowId=alpha-job");
+    const next = vi.fn(async () => undefined);
+    const json = vi.fn();
+
+    await (middleware as Exclude<typeof middleware, { path: string }>)({
+      req: {
+        path: new URL(raw.url).pathname,
+        method: raw.method,
+        raw,
+        header: (name: string) => name.toLowerCase() === "x-mastra-client-type" ? "studio" : undefined,
+      },
+      get: (key: string) => key === "requestContext" ? new RequestContext() : undefined,
+      json,
+    } as never, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(json).toHaveBeenCalledWith(expect.objectContaining({ error: "not_found" }), 404);
   });
 
   it("preserves public custom-route metadata for pre-login shells", () => {

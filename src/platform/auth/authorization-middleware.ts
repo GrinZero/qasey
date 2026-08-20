@@ -218,11 +218,35 @@ export function classifyRuntimeRoute(
   routes: readonly CatalogEntry[],
 ): ClassifiedResource | undefined {
   const mastraPath = stripMastraApiPrefix(path);
-  // These Mastra management handlers read global rows by caller-provided
-  // filters or raw ids; the reserved resource context is not enforced. Keep
-  // their HTTP surface closed until a tenant-aware facade owns every action.
-  // Internal background task and scheduler execution does not use these routes.
-  if (mastraPath && /^\/(?:background-tasks|schedules)(?:\/|$)/u.test(mastraPath)) return undefined;
+  // Mastra's scheduler is a platform management surface: its GET routes read
+  // global rows, while POST/PATCH/DELETE can mutate or execute them. Classify
+  // every operation instead of turning the entire feature into a synthetic
+  // 404. These permissions are intentionally not granted to tenant roles;
+  // PermissionService's platform-admin bypass is the control-plane boundary.
+  if (mastraPath && /^\/schedules(?:\/|$)/u.test(mastraPath)) {
+    const action = method === "DELETE" ? "delete" : actionFor(method, path);
+    const permission = method === "GET"
+      ? "platform.schedules.read"
+      : method === "DELETE"
+        ? "platform.schedules.delete"
+        : /\/(?:run|pause|resume)\/?$/u.test(mastraPath)
+          ? "platform.schedules.execute"
+          : "platform.schedules.write";
+    return {
+      applicationId: "platform", resourceType: "platform", resourceId: "schedules",
+      action, permission, audiences: ["admin-ui", "api", "service"],
+    };
+  }
+  // Background-task HTTP handlers are read-only in the pinned Mastra server.
+  // They expose global operational state, so keep them platform-admin-only via
+  // an ungranted platform permission rather than rejecting legitimate Studio
+  // polling before RBAC gets a chance to decide.
+  if (mastraPath && method === "GET" && /^\/background-tasks(?:\/|$)/u.test(mastraPath)) {
+    return {
+      applicationId: "platform", resourceType: "platform", resourceId: "background-tasks",
+      action: "read", permission: "platform.background-tasks.read", audiences: ["admin-ui", "api", "service"],
+    };
+  }
   const channelWebhook = mastraPath
     ? /^\/agents\/([^/]+)\/channels\/([^/]+)\/webhook\/?$/u.exec(mastraPath)
     : null;
@@ -235,13 +259,13 @@ export function classifyRuntimeRoute(
   // Mastra exposes collection-level routes below a primitive namespace. Match
   // those before `/:resourceId`, otherwise `/agents/providers` is interpreted
   // as an Agent whose id is `providers` and is hidden behind a misleading 404.
-  if (mastraPath && /^\/agents\/providers\/?$/u.test(mastraPath)) {
+  if (mastraPath && method === "GET" && /^\/agents\/providers\/?$/u.test(mastraPath)) {
     return {
       applicationId: "platform", resourceType: "platform", resourceId: "runtime",
       action: actionFor(method, path), permission: "platform.runtime.inspect", audiences: ["admin-ui", "service"],
     };
   }
-  if (mastraPath && /^\/workflows\/run-counts\/?$/u.test(mastraPath)) {
+  if (mastraPath && method === "GET" && /^\/workflows\/run-counts\/?$/u.test(mastraPath)) {
     return {
       applicationId: "platform", resourceType: "platform", resourceId: "workflow-catalog",
       action: "read", permission: "platform.catalog.read", audiences: ["admin-ui", "service"],
@@ -267,19 +291,37 @@ export function classifyRuntimeRoute(
     const resourceType = primitive[1] === "agents" ? "agent" : primitive[1] === "workflows" ? "workflow" : "scorer";
     const resourceId = decodeURIComponent(primitive[2]!);
     const entry = catalog.get(`${resourceType}:${resourceId}`);
+    // Mastra registers framework-owned workflows (for example an Agent's
+    // durable loop) in its runtime catalog. They correctly appear in Studio,
+    // but are not business workflows and therefore do not belong in an app's
+    // authorization catalog. Let platform admins inspect and operate any such
+    // upstream-validated workflow; typos still become Mastra's own 404.
+    if (!entry && resourceType === "workflow") {
+      const action = actionFor(method, path);
+      return {
+        applicationId: "platform", resourceType: "platform", resourceId: `workflow:${resourceId}`,
+        action,
+        permission: method === "GET" ? "platform.internal-workflow.read" : "platform.internal-workflow.manage",
+        audiences: ["admin-ui", "api", "service"],
+      };
+    }
     if (!entry) return undefined;
     return { ...entry, action: actionFor(method, path) };
   }
   if (mastraPath && /^\/(agents|workflows|scorers)\/?$/u.test(mastraPath)) {
     return {
       applicationId: "platform", resourceType: "platform", resourceId: "catalog",
-      action: "list", permission: "platform.catalog.read", audiences: ["admin-ui", "service"],
+      action: method === "GET" ? "list" : "write",
+      permission: method === "GET" ? "platform.catalog.read" : "platform.catalog.manage",
+      audiences: ["admin-ui", "api", "service"],
     };
   }
   if (mastraPath) {
     return {
       applicationId: "platform", resourceType: "platform", resourceId: "runtime",
-      action: actionFor(method, path), permission: "platform.runtime.inspect", audiences: ["admin-ui", "service"],
+      action: actionFor(method, path),
+      permission: method === "GET" ? "platform.runtime.inspect" : "platform.runtime.manage",
+      audiences: ["admin-ui", "api", "service"],
     };
   }
   const route = routes.find(entry => entry.routeMethod === method && routeMatches(entry.routePath!, path));
