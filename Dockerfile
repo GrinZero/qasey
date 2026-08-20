@@ -78,5 +78,5 @@ RUN corepack enable \
   && Xvfb -help >/dev/null 2>&1
 RUN chown pwuser:pwuser /app
 USER 1001
-EXPOSE 4111
+EXPOSE 8080
 CMD ["sh", "ci/start.sh", "api"]

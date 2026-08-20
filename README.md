@@ -46,6 +46,15 @@ pnpm dev
 
 本地开发默认把 Observability 写入 `QASEY_OBSERVABILITY_DB_PATH` 指向的 DuckDB；即使本机通过拆分 PG 配置连接共享应用数据库，也不会隐式初始化远端 Observability schema。确需联调时可显式设置 `OBSERVABILITY_DATABASE_URL`。生产仍使用独立的 PostgreSQL Observability 数据库。
 
+本地脚本或 API 客户端不需要复制浏览器 Cookie。可在被 Git 忽略的 `.env.local` 中配置一个至少 32 字符的 `QASEY_DEV_AUTH_TOKEN`，然后发送标准 Bearer 请求头：
+
+```bash
+curl -H "Authorization: Bearer $QASEY_DEV_AUTH_TOKEN" \
+  http://localhost:4111/studio/api/agents
+```
+
+该 token 只在 `NODE_ENV=development` 生效，并映射为服务端固定的 `local-developer` / `local-development` 开发管理员身份；请求不能自行指定 user、tenant 或 role。测试环境会忽略它，生产环境若出现该配置会直接拒绝启动。浏览器界面仍使用正常的 Google OAuth Cookie，避免把开发 token 暴露进前端产物。
+
 MCP 示例见 [config/mcp.example.json](./config/mcp.example.json)。OAuth MCP 登录：
 
 ```bash

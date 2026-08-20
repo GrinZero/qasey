@@ -37,6 +37,10 @@ export const ConfigSchema = z.object({
   GOOGLE_HOSTED_DOMAIN: optionalString,
   WORKER_TOKEN: optionalString,
   PLATFORM_SERVICE_TOKEN: optionalString,
+  QASEY_DEV_AUTH_TOKEN: z.preprocess(
+    value => value === "" ? undefined : value,
+    z.string().min(32).optional(),
+  ),
   REDIS_HOST: optionalString,
   REDIS_PORT: optionalPositiveInteger,
   REDIS_USERNAME: optionalString,
@@ -134,6 +138,26 @@ export const ConfigSchema = z.object({
       path: ["WORKER_TOKEN"],
       message: "WORKER_TOKEN must be distinct from PLATFORM_SERVICE_TOKEN",
     });
+  }
+  if (value.QASEY_DEV_AUTH_TOKEN && value.NODE_ENV === "production") {
+    context.addIssue({
+      code: "custom",
+      path: ["QASEY_DEV_AUTH_TOKEN"],
+      message: "QASEY_DEV_AUTH_TOKEN must not be configured in production",
+    });
+  }
+  for (const [key, token] of [
+    ["WORKER_TOKEN", value.WORKER_TOKEN],
+    ["PLATFORM_SERVICE_TOKEN", value.PLATFORM_SERVICE_TOKEN],
+    ["JIRA_WEBHOOK_TOKEN", value.JIRA_WEBHOOK_TOKEN],
+  ] as const) {
+    if (value.QASEY_DEV_AUTH_TOKEN && token === value.QASEY_DEV_AUTH_TOKEN) {
+      context.addIssue({
+        code: "custom",
+        path: ["QASEY_DEV_AUTH_TOKEN"],
+        message: `QASEY_DEV_AUTH_TOKEN must be distinct from ${key}`,
+      });
+    }
   }
   if (value.QASEY_ENABLE_DATADOG && !value.DD_LLMOBS_ML_APP) {
     context.addIssue({

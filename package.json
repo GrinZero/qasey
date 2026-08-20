@@ -11,7 +11,7 @@
   "scripts": {
     "dev": "tsx scripts/dev.ts",
     "mcp:login": "tsx apps/cli/src/mcp-login.ts",
-    "start": "node .mastra/output/index.mjs",
+    "start": "sh ci/runtime.sh api",
     "admin-ui:build": "pnpm --dir apps/admin-ui build",
     "admin-ui:test": "pnpm --dir apps/admin-ui test",
     "build": "pnpm admin-ui:build && tsup && mastra build --dir src/mastra --studio && mastra worker build --dir src/mastra --output-dir .mastra/worker",

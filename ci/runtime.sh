@@ -3,6 +3,12 @@ set -eu
 
 case "${1:-api}" in
   api)
+    if [ "${NODE_ENV:-development}" = "production" ]; then
+      PORT=8080
+    else
+      PORT=4111
+    fi
+    export PORT
     exec node .mastra/output/index.mjs
     ;;
   worker)

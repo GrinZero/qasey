@@ -34,6 +34,7 @@ import { closeDevelopmentConnections } from "../platform/http/development-connec
 import { applyStudioNetworkPolicy } from "../platform/http/studio-network-policy.ts";
 import { seedServiceRolePermissions } from "../platform/auth/service-role-permissions.ts";
 import { runtimeReadiness } from "../platform/storage/readiness.ts";
+import { resolveDevelopmentPrincipal } from "../platform/auth/development-principal.ts";
 
 const googleOidc = new GoogleOidcService({
   ...(config.GOOGLE_CLIENT_ID ? { clientId: config.GOOGLE_CLIENT_ID } : {}),
@@ -239,6 +240,13 @@ const sharedRuntime = createSharedMastraConfig({
             audience: request.path.startsWith("/admin") || isMastraStudioRequest(request) ? "admin-ui" : "api",
           });
         }
+        const developmentPrincipal = resolveDevelopmentPrincipal({
+          nodeEnv: config.NODE_ENV,
+          configuredToken: config.QASEY_DEV_AUTH_TOKEN,
+          authorization: request.header("authorization"),
+          audience: request.path.startsWith("/admin") || isMastraStudioRequest(request) ? "admin-ui" : "api",
+        });
+        if (developmentPrincipal) return developmentPrincipal;
         const ingressToken = request.header("authorization")?.replace(/^Bearer\s+/iu, "")
           ?? request.header("x-qasey-webhook-token");
         const jiraIngress = request.path.includes("jira");

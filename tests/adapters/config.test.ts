@@ -116,6 +116,33 @@ describe("shared runtime configuration", () => {
     } as NodeJS.ProcessEnv)).toThrow(/distinct from PLATFORM_SERVICE_TOKEN/);
   });
 
+  it("accepts a dedicated developer token locally, ignores it in tests, and rejects it in production", () => {
+    const token = "dev-auth-token-that-is-at-least-32-characters";
+    expect(loadConfig({
+      NODE_ENV: "development",
+      QASEY_DEV_AUTH_TOKEN: token,
+    } as NodeJS.ProcessEnv).QASEY_DEV_AUTH_TOKEN).toBe(token);
+
+    expect(loadConfig({
+      NODE_ENV: "test",
+      QASEY_DEV_AUTH_TOKEN: token,
+    } as NodeJS.ProcessEnv).QASEY_DEV_AUTH_TOKEN).toBe(token);
+    expect(() => loadConfig({
+      NODE_ENV: "production",
+      ...productionAuth,
+      QASEY_DEV_AUTH_TOKEN: token,
+    } as NodeJS.ProcessEnv)).toThrow(/must not be configured in production/);
+    expect(() => loadConfig({
+      NODE_ENV: "development",
+      QASEY_DEV_AUTH_TOKEN: "too-short",
+    } as NodeJS.ProcessEnv)).toThrow();
+    expect(() => loadConfig({
+      NODE_ENV: "development",
+      QASEY_DEV_AUTH_TOKEN: token,
+      PLATFORM_SERVICE_TOKEN: token,
+    } as NodeJS.ProcessEnv)).toThrow(/distinct from PLATFORM_SERVICE_TOKEN/);
+  });
+
   it("requires shared Redis for the production multi-pod runtime", () => {
     expect(() => loadConfig({
       NODE_ENV: "production",
