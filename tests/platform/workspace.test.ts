@@ -10,12 +10,14 @@ const root = mkdtempSync(join(tmpdir(), "shared-mastra-workspace-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 describe("native scoped workspace", () => {
-  it("separates application, tenant, task, execution, and role paths", async () => {
+  it("reuses one path within a session and separates different owners", async () => {
     const workspace = createScopedWorkspace({ root, production: false, enableCodeExecution: false });
     const alpha = await workspace.resolveFilesystem({ requestContext: context("alpha", "tenant-a", "task-1", "run-1", "author") });
+    const alphaFollowUp = await workspace.resolveFilesystem({ requestContext: context("alpha", "tenant-a", "task-2", "run-2", "verifier") });
     const beta = await workspace.resolveFilesystem({ requestContext: context("beta", "tenant-b", "task-1", "run-1", "verifier") });
-    expect(alpha?.basePath).toContain("alpha/tenant-a/task-1/run-1/author");
-    expect(beta?.basePath).toContain("beta/tenant-b/task-1/run-1/verifier");
+    expect(alpha?.basePath).toContain("alpha/tenant-a/session");
+    expect(alphaFollowUp?.basePath).toBe(alpha?.basePath);
+    expect(beta?.basePath).toContain("beta/tenant-b/session");
     expect(alpha?.basePath).not.toBe(beta?.basePath);
     await workspace.close();
   });

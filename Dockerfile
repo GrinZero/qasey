@@ -32,6 +32,36 @@ RUN pnpm build
 
 FROM mcr.microsoft.com/playwright:v1.62.1-noble AS runtime
 ENV NODE_ENV=production
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    at-spi2-core \
+    bubblewrap \
+    build-essential \
+    ca-certificates \
+    curl \
+    dbus-x11 \
+    ffmpeg \
+    fonts-dejavu-core \
+    fonts-noto-color-emoji \
+    git \
+    jq \
+    libxi6 \
+    mousepad \
+    openbox \
+    openssh-client \
+    pcmanfm \
+    pkg-config \
+    python3 \
+    python3-pip \
+    python3-venv \
+    unzip \
+    wget \
+    x11-utils \
+    x11-xserver-utils \
+    xterm \
+    xvfb \
+    zip \
+  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/.mastra/output ./.mastra/output
@@ -41,7 +71,11 @@ COPY --from=build /app/apps/admin-ui/dist ./apps/admin-ui/dist
 COPY --from=build /app/.qasey/mcp.json ./.qasey/mcp.json
 COPY .env .env.testing .env.devops ./
 COPY ci ./ci
-RUN corepack enable && git --version
+RUN corepack enable \
+  && git --version \
+  && python3 --version \
+  && ffmpeg -version >/dev/null \
+  && Xvfb -help >/dev/null 2>&1
 RUN chown pwuser:pwuser /app
 USER 1001
 EXPOSE 4111

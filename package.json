@@ -46,6 +46,7 @@
     "@octokit/rest": "^22.0.0",
     "@playwright/test": "1.62.1",
     "@slack/web-api": "^7.10.0",
+    "@trycua/cua-driver": "0.21.0",
     "chat": "4.37.0",
     "dd-trace": "5.117.0",
     "ioredis": "6.0.0",

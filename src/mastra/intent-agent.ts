@@ -44,6 +44,8 @@ export async function routeIntent(
       `current_message:\n${context.chatInput}`,
     ].join("\n"), {
       maxSteps: 1,
+      activeTools: [],
+      toolChoice: "none",
       ...(abortSignal ? { abortSignal } : {}),
       ...(observability.requestContext ? { requestContext: observability.requestContext } : {}),
       ...(observability.tracingContext ? { tracingContext: observability.tracingContext } : {}),

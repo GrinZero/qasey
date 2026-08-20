@@ -4,6 +4,9 @@ import type { Span, TracingContext } from "@mastra/core/observability";
 import type { RequestContext } from "@mastra/core/request-context";
 import type { IntentRoute, QaseyRequestContext } from "../../packages/contracts/src/index.ts";
 
+const QASEY_TRACE_ID_KEY = "qasey__traceId";
+const QASEY_REQUEST_SPAN_ID_KEY = "qasey__requestSpanId";
+
 export const QASEY_TRACE_REQUEST_CONTEXT_KEYS = [
   "requestId",
   "channel",
@@ -63,10 +66,11 @@ export function startQaseyRequestSpan(
   context: QaseyRequestContext,
   runId: string,
   trace: QaseyTraceContext = {},
+  parentTracingContext?: TracingContext,
 ): { span?: QaseyRequestSpan; tracingContext?: TracingContext } {
   const instance = mastra.observability.getDefaultInstance();
   if (!instance) return {};
-  const span = instance.startSpan({
+  const details = {
     type: SpanType.GENERIC,
     name: "qasey request",
     entityType: EntityType.AGENT,
@@ -96,9 +100,85 @@ export function startQaseyRequestSpan(
       ...definedTraceMetadata(trace),
     },
     requestContext,
-    tags: ["qasey", `channel:${context.channel}`],
-  });
+  } as const;
+  const parentSpan = parentTracingContext?.currentSpan;
+  const span = parentSpan && typeof parentSpan.createChildSpan === "function"
+    ? parentSpan.createChildSpan(details)
+    : instance.startSpan({ ...details, tags: ["qasey", `channel:${context.channel}`] });
+  requestContext.set(QASEY_TRACE_ID_KEY, span.traceId);
+  requestContext.set(QASEY_REQUEST_SPAN_ID_KEY, span.id);
   return { span, tracingContext: { currentSpan: span } };
+}
+
+/**
+ * Dynamic Agent arguments in the installed Mastra version do not receive a
+ * TracingContext. Correlate their spans through serializable trace/span ids
+ * placed on RequestContext instead of storing a live Span there.
+ */
+export function startQaseyCorrelatedSpan(
+  mastra: Mastra | undefined,
+  requestContext: RequestContext<any>,
+  name: string,
+  input?: unknown,
+): QaseyRequestSpan | undefined {
+  const instance = mastra?.observability.getDefaultInstance();
+  const traceId = requestContext.get(QASEY_TRACE_ID_KEY);
+  const parentSpanId = requestContext.get(QASEY_REQUEST_SPAN_ID_KEY);
+  if (!instance || typeof traceId !== "string" || typeof parentSpanId !== "string") return undefined;
+  return instance.startSpan({
+    type: SpanType.GENERIC,
+    name,
+    entityType: EntityType.AGENT,
+    entityId: "qasey",
+    entityName: "Qasey",
+    ...(input === undefined ? {} : { input }),
+    requestContext,
+    traceId,
+    parentSpanId,
+  });
+}
+
+export async function traceQaseyOperation<T>(
+  parent: QaseyRequestSpan | undefined,
+  name: string,
+  metadata: Record<string, unknown>,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const span = parent && typeof parent.createChildSpan === "function" ? parent.createChildSpan({
+    type: SpanType.GENERIC,
+    name,
+    entityType: EntityType.AGENT,
+    entityId: "qasey",
+    entityName: "Qasey",
+    metadata,
+  }) : undefined;
+  try {
+    const result = await operation();
+    span?.end();
+    return result;
+  } catch (error) {
+    span?.error({
+      error: error instanceof Error ? error : new Error(String(error)),
+      endSpan: true,
+    });
+    throw error;
+  }
+}
+
+export function recordQaseyEvent(
+  parent: QaseyRequestSpan | undefined,
+  name: string,
+  metadata: Record<string, unknown>,
+): void {
+  if (!parent || typeof parent.createEventSpan !== "function") return;
+  parent.createEventSpan({
+    type: SpanType.GENERIC,
+    name,
+    entityType: EntityType.AGENT,
+    entityId: "qasey",
+    entityName: "Qasey",
+    metadata,
+  });
 }
 
 export function updateQaseyRequestSpanForRoute(span: QaseyRequestSpan | undefined, route: IntentRoute): void {

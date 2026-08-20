@@ -68,3 +68,21 @@ export interface AuditRecord {
   decision: "allow" | "deny";
   reason: string;
 }
+
+export interface SandboxSessionState {
+  sessionId: string;
+  workspaceId: string;
+  generation: number;
+  ordinal: number;
+  lastActivityAt: string;
+  browser: { running: boolean; url?: string; title?: string };
+  desktop: {
+    running: boolean;
+    available: boolean;
+    display?: string;
+    width?: number;
+    height?: number;
+    recording?: boolean;
+    applications?: string[];
+  };
+}

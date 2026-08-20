@@ -86,6 +86,18 @@ export const ConfigSchema = z.object({
   QASEY_MEMORY_INPUT_TOKEN_LIMIT: z.coerce.number().int().min(20_000).default(120_000),
   QASEY_ARTIFACT_DIR: z.string().default(".qasey/artifacts"),
   QASEY_WORKSPACE_DIR: z.string().default(".qasey/workspaces"),
+  QASEY_DATA_ROOT: z.string().default(".qasey/data"),
+  QASEY_SANDBOX_ENABLED: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
+  QASEY_SANDBOX_ENDPOINT_TEMPLATE: z.string().min(1).default("http://moego-qasey-sandbox-{ordinal}.moego-qasey-sandbox:4120"),
+  QASEY_SANDBOX_REPLICAS: z.coerce.number().int().min(1).max(20).default(2),
+  QASEY_SANDBOX_MAX_SESSIONS: z.coerce.number().int().min(1).max(50).default(5),
+  QASEY_SANDBOX_IDLE_TTL_MS: z.coerce.number().int().min(60_000).default(30 * 60_000),
+  QASEY_SANDBOX_DESKTOP_ENABLED: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
+  QASEY_SANDBOX_DESKTOP_DISPLAY: z.coerce.number().int().min(1).max(999).default(99),
+  QASEY_SANDBOX_DESKTOP_WIDTH: z.coerce.number().int().min(800).max(3840).default(1440),
+  QASEY_SANDBOX_DESKTOP_HEIGHT: z.coerce.number().int().min(600).max(2160).default(900),
+  QASEY_WORKSPACE_RETENTION_MS: z.coerce.number().int().min(60_000).default(7 * 24 * 60 * 60_000),
+  QASEY_SANDBOX_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(10_000).default(30 * 60_000),
   QASEY_ACP_COMMAND: z.string().default("codex-acp"),
   QASEY_ACP_ARGS: z.string().default("").transform(value => value.trim() ? value.trim().split(/\s+/) : []),
 }).superRefine((value, context) => {
@@ -125,6 +137,20 @@ export const ConfigSchema = z.object({
       code: "custom",
       path: ["DD_LLMOBS_ML_APP"],
       message: "DD_LLMOBS_ML_APP is required when QASEY_ENABLE_DATADOG=true",
+    });
+  }
+  if (value.QASEY_SANDBOX_ENABLED && !value.QASEY_SANDBOX_ENDPOINT_TEMPLATE.includes("{ordinal}")) {
+    context.addIssue({
+      code: "custom",
+      path: ["QASEY_SANDBOX_ENDPOINT_TEMPLATE"],
+      message: "QASEY_SANDBOX_ENDPOINT_TEMPLATE must contain {ordinal}",
+    });
+  }
+  if (value.NODE_ENV === "production" && value.QASEY_SANDBOX_ENABLED && (!value.DATABASE_URL || !value.GOOGLE_COOKIE_PASSWORD)) {
+    context.addIssue({
+      code: "custom",
+      path: ["QASEY_SANDBOX_ENABLED"],
+      message: "Production sandbox leases require DATABASE_URL and GOOGLE_COOKIE_PASSWORD",
     });
   }
   const githubAppKeys = ["GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY"] as const;

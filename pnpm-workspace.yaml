@@ -19,3 +19,10 @@ minimumReleaseAgeExclude:
   - '@mastra/deployer@1.58.0'
   - '@mastra/server@1.58.0'
   - mastra@1.24.0
+  - '@trycua/cua-driver-darwin-arm64@0.21.0'
+  - '@trycua/cua-driver-darwin-x64@0.21.0'
+  - '@trycua/cua-driver-linux-arm64-gnu@0.21.0'
+  - '@trycua/cua-driver-linux-x64-gnu@0.21.0'
+  - '@trycua/cua-driver-win32-arm64-msvc@0.21.0'
+  - '@trycua/cua-driver-win32-x64-msvc@0.21.0'
+  - '@trycua/cua-driver@0.21.0'

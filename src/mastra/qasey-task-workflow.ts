@@ -1,5 +1,6 @@
 import type { Agent } from "@mastra/core/agent";
 import type { Mastra } from "@mastra/core/mastra";
+import type { TracingContext } from "@mastra/core/observability";
 import { RequestContext } from "@mastra/core/request-context";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { z } from "zod";
@@ -55,7 +56,7 @@ const classifyIntentStep = createStep({
   inputSchema: QaseyRequestContextSchema,
   outputSchema: RoutedTaskSchema,
   requestContextSchema: PlatformRequestContextSchema,
-  execute: async ({ inputData, mastra, requestContext, abortSignal, runId }) => {
+  execute: async ({ inputData, mastra, requestContext, abortSignal, runId, tracingContext }) => {
     const events = requestContext.get(QASEY_WORKFLOW_EVENTS_KEY) as QaseyExecutionEvents | undefined;
     await events?.onPhase?.({ runId, phase: "routing" });
     const route = await routeIntent(
@@ -63,7 +64,7 @@ const classifyIntentStep = createStep({
       [],
       abortSignal,
       mastra.getAgent("qasey-intent-router") as Agent<any, any, any, any, any>,
-      { requestContext },
+      { requestContext, ...(tracingContext ? { tracingContext } : {}) },
     );
     requestContext.set("intent-route", route);
     return { context: inputData, route };
@@ -76,7 +77,7 @@ const executeRoutedTaskStep = createStep({
   inputSchema: RoutedTaskSchema,
   outputSchema: QaseyTaskOutputSchema,
   requestContextSchema: PlatformRequestContextSchema,
-  execute: async ({ inputData, mastra, requestContext, abortSignal, runId }) => {
+  execute: async ({ inputData, mastra, requestContext, abortSignal, runId, tracingContext }) => {
     const events = requestContext.get(QASEY_WORKFLOW_EVENTS_KEY) as QaseyExecutionEvents | undefined;
     const resumeCasePlan = requestContext.get(QASEY_WORKFLOW_RESUME_PLAN_KEY) as MeterSphereCasePlan | undefined;
     const resumeReceipt = requestContext.get(QASEY_WORKFLOW_RESUME_RECEIPT_KEY) as EvidenceCompletionReceipt | undefined;
@@ -85,6 +86,7 @@ const executeRoutedTaskStep = createStep({
       runId,
       requestContext,
       abortSignal,
+      ...(tracingContext ? { tracingContext } : {}),
       ...(events ? { events } : {}),
       ...(resumeCasePlan ? { resumeCasePlan } : {}),
       ...(resumeReceipt ? { resumeReceipt } : {}),
@@ -105,6 +107,7 @@ export const qaseyTaskWorkflow = createWorkflow({
 
 export interface RunQaseyTaskOptions {
   requestContext?: RequestContext<any>;
+  tracingContext?: TracingContext;
   events?: QaseyExecutionEvents;
   abortSignal?: AbortSignal;
   runId?: string;
@@ -131,6 +134,7 @@ export async function runQaseyTaskWorkflow(
       inputData: context,
       requestContext,
       ...(options.abortSignal ? { abortSignal: options.abortSignal } : {}),
+      ...(options.tracingContext ? { tracingContext: options.tracingContext } : {}),
     });
     if (result.status !== "success") {
       const detail = result.status === "failed" ? result.error.message : result.status;

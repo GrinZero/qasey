@@ -7,6 +7,7 @@ import { config, getRuntimeContext, mastraStorage, toolsForRequest } from "./run
 import { createResponsesModel, qaseyResponsesModel } from "./models.ts";
 import { PlatformRequestContextSchema } from "../platform/context/schema.ts";
 import { qaseyChannels } from "../agent-apps/qasey/channels.ts";
+import { startQaseyCorrelatedSpan } from "./observability.ts";
 
 const statelessResponsesOptions = {
   openai: {
@@ -125,7 +126,31 @@ export const qaseyAgent = new Agent({
   },
   ...(qaseyMemory ? { memory: qaseyMemory } : {}),
   inputProcessors: [new TokenLimiter({ limit: config.QASEY_MEMORY_INPUT_TOKEN_LIMIT })],
-  tools: async ({ requestContext }) => toolsForRequest(requestContext),
+  tools: async ({ requestContext, mastra }) => {
+    const route = requestContext.get("intent-route") as { intent?: unknown; depth?: unknown } | undefined;
+    const span = startQaseyCorrelatedSpan(mastra, requestContext, "qasey tools resolve", {
+      intent: route?.intent,
+      depth: route?.depth,
+    });
+    try {
+      const tools = await toolsForRequest(requestContext);
+      span?.end({
+        metadata: {
+          intent: route?.intent,
+          depth: route?.depth,
+          toolCount: Object.keys(tools).length,
+          toolNames: Object.keys(tools).sort(),
+        },
+      });
+      return tools;
+    } catch (error) {
+      span?.error({
+        error: error instanceof Error ? error : new Error(String(error)),
+        endSpan: true,
+      });
+      throw error;
+    }
+  },
 });
 
 const nativeQaseyInstructions = `You are Qasey, MoeGo's shared-runtime QA agent.

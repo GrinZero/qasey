@@ -30,6 +30,11 @@ describe("model-based intent routing", () => {
     const route = await routeIntent(context, [], undefined, { generate } as never);
 
     expect(generate).toHaveBeenCalledOnce();
+    expect(generate).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      activeTools: [],
+      toolChoice: "none",
+      maxSteps: 1,
+    }));
     expect(route).toMatchObject({ intent: "qa_review", reason: "model decision" });
   });
 

@@ -9,6 +9,9 @@ case "${1:-api}" in
     : "${MASTRA_WORKER_AUTH_TOKEN:?MASTRA_WORKER_AUTH_TOKEN is required for the orchestration worker}"
     exec node .mastra/worker/index.mjs
     ;;
+  sandbox)
+    exec node dist/sandbox-runtime.mjs
+    ;;
   *)
     echo "Unknown Qasey process: $1" >&2
     exit 64

@@ -8,7 +8,7 @@ import { RedisServerCache } from "@mastra/redis";
 import { RedisStreamsPubSub } from "@mastra/redis-streams";
 import Redis from "ioredis";
 import { QASEY_TRACE_REQUEST_CONTEXT_KEYS } from "./observability.ts";
-import { closeQaseyInfrastructure, config, createMastraRuntimeStorage, initializeQaseyInfrastructure, studioEditorEnabled } from "./runtime.ts";
+import { closeQaseyInfrastructure, config, createMastraRuntimeStorage, initializeQaseyInfrastructure, sandboxPoolClient, studioEditorEnabled } from "./runtime.ts";
 import { createQaseyApplication } from "../agent-apps/qasey/application.ts";
 import * as qaseyAgentModule from "./qasey-agent.ts";
 import * as intentModule from "./intent-agent.ts";
@@ -119,10 +119,15 @@ const lifecycle = new LifecycleContainer();
 lifecycle.own({ close: closeQaseyInfrastructure });
 if (permissionStore.close) lifecycle.own({ close: () => permissionStore.close!() });
 if (auditLog.close) lifecycle.own({ close: () => auditLog.close!() });
+const remoteSandboxPool = sandboxPoolClient;
 const workspace = lifecycle.own(createScopedWorkspace({
   root: config.QASEY_WORKSPACE_DIR,
   production: config.NODE_ENV === "production",
-  enableCodeExecution: config.QASEY_ENABLE_LOCAL_CODE_MODE,
+  enableCodeExecution: config.QASEY_ENABLE_LOCAL_CODE_MODE || config.QASEY_SANDBOX_ENABLED,
+  ...(remoteSandboxPool ? {
+    remoteFilesystem: scope => remoteSandboxPool.filesystem(scope),
+    remoteSandbox: scope => remoteSandboxPool.sandbox(scope),
+  } : {}),
 }));
 const redisKeyPrefix = `qasey:${process.env.NAMESPACE?.trim() || config.NODE_ENV}`;
 const redisUrl = config.REDIS_HOST
@@ -223,6 +228,7 @@ const sharedRuntime = createSharedMastraConfig({
               "qasey.runs.read",
               "qasey.runs.write",
               "qasey.runs.approve",
+              "qasey.sandbox.use",
             );
           }
           return mapOAuthPrincipal(user, {

@@ -12,6 +12,8 @@ import {
   addRouteToTraceRequestContext,
   initializeQaseyTraceRequestContext,
   startQaseyRequestSpan,
+  recordQaseyEvent,
+  traceQaseyOperation,
   updateQaseyRequestSpanForRoute,
 } from "./observability.ts";
 import type { QaseyTraceContext } from "./observability.ts";
@@ -65,6 +67,8 @@ export interface ExecuteQaseyOptions {
   events?: QaseyExecutionEvents;
   timeoutMs?: number;
   trace?: QaseyTraceContext;
+  /** Parent workflow/channel tracing position for one continuous request trace. */
+  tracingContext?: import("@mastra/core/observability").TracingContext;
   resumeCasePlan?: MeterSphereCasePlan;
   resumeReceipt?: EvidenceCompletionReceipt;
   caseOperationRunner?: (input: {
@@ -90,7 +94,14 @@ export async function executeQasey(mastra: Mastra, context: QaseyRequestContext,
   const requestContext = prepareQaseyRequestContext(context, options.requestContext);
   if (options.resumeCasePlan) requestContext.set("case-plan", options.resumeCasePlan);
   initializeQaseyTraceRequestContext(requestContext, context, options.trace);
-  const requestTrace = startQaseyRequestSpan(mastra, requestContext, context, runId, options.trace);
+  const requestTrace = startQaseyRequestSpan(
+    mastra,
+    requestContext,
+    context,
+    runId,
+    options.trace,
+    options.tracingContext,
+  );
   let route: IntentRoute | undefined;
   try {
     if (!options.route) await options.events?.onPhase?.({ runId, phase: "routing" });
@@ -162,63 +173,83 @@ export async function executeQasey(mastra: Mastra, context: QaseyRequestContext,
           });
         },
       },
-      onIterationComplete: async ({ iteration, toolCalls, toolResults, text, finishReason, isFinal }) => {
-        const evidenceToolCallCount = toolCalls.filter(call => call.name !== "qasey_report_progress").length;
-        const progress = evidenceLedger.finishIteration(evidenceToolCallCount);
-        const casePlan = evidenceLedger.casePlan();
-        if (casePlan && casePlan.planHash !== checkpointedPlanHash) {
-          await options.events?.onCasePlanCheckpoint?.({ runId, plan: casePlan });
-          checkpointedPlanHash = casePlan.planHash;
-        }
-        const checkpoint = routedCaseIntent
-          ? validCaseCompletionReceipt(casePlan, evidenceLedger.completionReceipt())
-          : evidenceLedger.completionReceipt();
-        if (checkpoint) await options.events?.onCompletionCheckpoint?.({ runId, receipt: checkpoint });
-        await options.events?.onIteration?.({
-          runId,
-          iteration,
+      onStepFinish: ({ finishReason, toolCalls, toolResults, text }) => {
+        recordQaseyEvent(requestTrace.span, "qasey agent step finished", {
           finishReason,
-          isFinal,
           textChars: text.length,
-          toolNames: toolCalls.map(call => call.name),
-          toolCallIds: toolCalls.map(call => call.id),
-          failedTools: toolResults.filter(result => result.error).map(result => result.name),
+          toolCallCount: toolCalls.length,
+          toolResultCount: toolResults.length,
         });
-        if (iteration >= 80) return { continue: false };
-        const durableCompletion = checkpoint ?? resumeReceipt;
-        if (
-          durableCompletion
-          && isFinal
-          && finishReason === "tool-calls"
-          && !receiptFinalizationContinuationRequested
-        ) {
-          receiptFinalizationContinuationRequested = true;
-          return { continue: true };
-        }
-        if (
-          casePlan
-          && routedCaseIntent
-          && isFinal
-          && finishReason === "tool-calls"
-          && !planHandoffContinuationRequested
-        ) {
-          planHandoffContinuationRequested = true;
-          return { continue: true };
-        }
-        if (iteration > 4 && toolCalls.length === 0 && text.trim().length === 0) return { continue: false, feedback: "Stop: no progress was made." };
-        if (progress.shouldStop) {
-          return {
-            continue: false,
-            feedback: `Stop: two consecutive tool iterations produced no new evidence or state transition.\n${evidenceLedger.manifestText()}`,
-          };
-        }
-        if (!isFinal) {
-          return {
-            feedback: `${progress.shouldWarn ? "Warning: the last tool iteration produced no new evidence. Synthesize from acquired artifacts or finish with an explicit blocker; do not repeat the same source call.\n" : ""}${evidenceLedger.manifestText()}`,
-          };
-        }
-        return undefined;
       },
+      onFinish: ({ finishReason, text, steps }) => {
+        recordQaseyEvent(requestTrace.span, "qasey agent generation finished", {
+          finishReason,
+          textChars: text.length,
+          stepCount: steps.length,
+        });
+      },
+      onIterationComplete: async ({ iteration, toolCalls, toolResults, text, finishReason, isFinal }) => traceQaseyOperation(
+        requestTrace.span,
+        "qasey agent iteration callback",
+        { iteration, finishReason, isFinal, toolCallCount: toolCalls.length },
+        async () => {
+          const evidenceToolCallCount = toolCalls.filter(call => call.name !== "qasey_report_progress").length;
+          const progress = evidenceLedger.finishIteration(evidenceToolCallCount);
+          const casePlan = evidenceLedger.casePlan();
+          if (casePlan && casePlan.planHash !== checkpointedPlanHash) {
+            await options.events?.onCasePlanCheckpoint?.({ runId, plan: casePlan });
+            checkpointedPlanHash = casePlan.planHash;
+          }
+          const checkpoint = routedCaseIntent
+            ? validCaseCompletionReceipt(casePlan, evidenceLedger.completionReceipt())
+            : evidenceLedger.completionReceipt();
+          if (checkpoint) await options.events?.onCompletionCheckpoint?.({ runId, receipt: checkpoint });
+          await options.events?.onIteration?.({
+            runId,
+            iteration,
+            finishReason,
+            isFinal,
+            textChars: text.length,
+            toolNames: toolCalls.map(call => call.name),
+            toolCallIds: toolCalls.map(call => call.id),
+            failedTools: toolResults.filter(result => result.error).map(result => result.name),
+          });
+          if (iteration >= 80) return { continue: false };
+          const durableCompletion = checkpoint ?? resumeReceipt;
+          if (
+            durableCompletion
+            && isFinal
+            && finishReason === "tool-calls"
+            && !receiptFinalizationContinuationRequested
+          ) {
+            receiptFinalizationContinuationRequested = true;
+            return { continue: true };
+          }
+          if (
+            casePlan
+            && routedCaseIntent
+            && isFinal
+            && finishReason === "tool-calls"
+            && !planHandoffContinuationRequested
+          ) {
+            planHandoffContinuationRequested = true;
+            return { continue: true };
+          }
+          if (iteration > 4 && toolCalls.length === 0 && text.trim().length === 0) return { continue: false, feedback: "Stop: no progress was made." };
+          if (progress.shouldStop) {
+            return {
+              continue: false,
+              feedback: `Stop: two consecutive tool iterations produced no new evidence or state transition.\n${evidenceLedger.manifestText()}`,
+            };
+          }
+          if (!isFinal) {
+            return {
+              feedback: `${progress.shouldWarn ? "Warning: the last tool iteration produced no new evidence. Synthesize from acquired artifacts or finish with an explicit blocker; do not repeat the same source call.\n" : ""}${evidenceLedger.manifestText()}`,
+            };
+          }
+          return undefined;
+        },
+      ),
     });
     abortSignal.throwIfAborted();
     let completionReceipt = routedCaseIntent

@@ -1,4 +1,4 @@
-import type { AgentApplication, AuditRecord, CatalogEntry, QaseyRun, Session } from "./types";
+import type { AgentApplication, AuditRecord, CatalogEntry, QaseyRun, SandboxSessionState, Session } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -18,8 +18,8 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
       ...init?.headers,
     },
   });
-  const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
     if (response.status === 401) window.dispatchEvent(new Event("qasey:unauthorized"));
     const message = typeof body.message === "string"
       ? body.message
@@ -30,7 +30,20 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
           : "请求未完成，请稍后重试。";
     throw new ApiError(message, response.status, typeof body.requestId === "string" ? body.requestId : undefined);
   }
-  return body as T;
+  return await response.json() as T;
+}
+
+async function requestBlob(url: string): Promise<{ blob: Blob; url?: string; title?: string }> {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    if (response.status === 401) window.dispatchEvent(new Event("qasey:unauthorized"));
+    throw new ApiError("无法读取实时画面。", response.status);
+  }
+  return {
+    blob: await response.blob(),
+    ...(response.headers.get("x-qasey-browser-url") ? { url: decodeURIComponent(response.headers.get("x-qasey-browser-url") ?? "") } : {}),
+    ...(response.headers.get("x-qasey-browser-title") ? { title: decodeURIComponent(response.headers.get("x-qasey-browser-title") ?? "") } : {}),
+  };
 }
 
 export const api = {
@@ -44,6 +57,35 @@ export const api = {
   ),
   cancelRun: (runId: string) => requestJson<QaseyRun>(`/v1/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
   rerun: (runId: string) => requestJson<QaseyRun>(`/v1/runs/${encodeURIComponent(runId)}/rerun`, { method: "POST" }),
+  sandboxState: (sessionId: string) => requestJson<SandboxSessionState>(`/v1/sandbox-sessions/${encodeURIComponent(sessionId)}`),
+  browserStart: (sessionId: string, url?: string) => requestJson<SandboxSessionState>(
+    `/v1/sandbox-sessions/${encodeURIComponent(sessionId)}/browser/start`,
+    { method: "POST", body: JSON.stringify({ ...(url ? { url } : {}) }) },
+  ),
+  browserAction: (sessionId: string, action: Record<string, unknown>) => requestJson<SandboxSessionState>(
+    `/v1/sandbox-sessions/${encodeURIComponent(sessionId)}/browser/action`,
+    { method: "POST", body: JSON.stringify(action) },
+  ),
+  browserFrame: (sessionId: string) => requestBlob(`/v1/sandbox-sessions/${encodeURIComponent(sessionId)}/browser/frame`),
+  desktopStart: (sessionId: string, input: { application?: "none" | "browser" | "terminal" | "editor" | "files"; url?: string; recordVideo?: boolean } = {}) => requestJson<SandboxSessionState>(
+    `/v1/sandbox-sessions/${encodeURIComponent(sessionId)}/desktop/start`,
+    { method: "POST", body: JSON.stringify(input) },
+  ),
+  desktopAction: (sessionId: string, action: Record<string, unknown>) => requestJson<SandboxSessionState & { result?: unknown }>(
+    `/v1/sandbox-sessions/${encodeURIComponent(sessionId)}/desktop/action`,
+    { method: "POST", body: JSON.stringify(action) },
+  ),
+  desktopApplication: (sessionId: string, application: "browser" | "terminal" | "editor" | "files", url?: string) => requestJson<SandboxSessionState>(
+    `/v1/sandbox-sessions/${encodeURIComponent(sessionId)}/desktop/app`,
+    { method: "POST", body: JSON.stringify({ application, ...(url ? { url } : {}) }) },
+  ),
+  desktopFrame: (sessionId: string) => requestBlob(`/v1/sandbox-sessions/${encodeURIComponent(sessionId)}/desktop/frame`),
+  desktopStop: (sessionId: string) => requestJson<SandboxSessionState>(
+    `/v1/sandbox-sessions/${encodeURIComponent(sessionId)}/desktop/stop`, { method: "POST" },
+  ),
+  sandboxStop: (sessionId: string) => requestJson<{ stopped: true }>(
+    `/v1/sandbox-sessions/${encodeURIComponent(sessionId)}/stop`, { method: "POST" },
+  ),
   verdict: (runId: string, verdict: "approve" | "request_changes", feedback?: string) => requestJson<QaseyRun>(
     `/v1/runs/${encodeURIComponent(runId)}/qa-verdict`,
     { method: "POST", body: JSON.stringify({ verdict, ...(feedback ? { feedback } : {}) }) },

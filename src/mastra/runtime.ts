@@ -24,6 +24,8 @@ import { ownerScopeFromRequestContext } from "../platform/context/owner-scope.ts
 import { createCompositeStore } from "../platform/storage/create-composite-store.ts";
 import { InMemoryChannelDeliveryInbox, PostgresChannelDeliveryInbox } from "../platform/channels/delivery-inbox.ts";
 import { runtimeReadiness } from "../platform/storage/readiness.ts";
+import { InMemorySandboxLeaseStore, PostgresSandboxLeaseStore } from "../platform/workspace/sandbox-lease-store.ts";
+import { SandboxPoolClient } from "../platform/workspace/sandbox-client.ts";
 
 const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
 const resolveProjectPath = (value: string) => isAbsolute(value) ? value : resolve(projectRoot, value);
@@ -35,6 +37,7 @@ export const config = {
   QASEY_OBSERVABILITY_DB_PATH: resolveProjectPath(loadedConfig.QASEY_OBSERVABILITY_DB_PATH),
   QASEY_ARTIFACT_DIR: resolveProjectPath(loadedConfig.QASEY_ARTIFACT_DIR),
   QASEY_WORKSPACE_DIR: resolveProjectPath(loadedConfig.QASEY_WORKSPACE_DIR),
+  QASEY_DATA_ROOT: resolveProjectPath(loadedConfig.QASEY_DATA_ROOT),
 };
 export const studioEditorEnabled = config.QASEY_ENABLE_STUDIO_EDITOR
   ?? config.NODE_ENV === "development";
@@ -60,6 +63,23 @@ export const runRepository = config.DATABASE_URL ? new PostgresRunRepository(con
 export const channelDeliveryInbox = config.DATABASE_URL
   ? new PostgresChannelDeliveryInbox(config.DATABASE_URL)
   : new InMemoryChannelDeliveryInbox();
+const sandboxLeaseOptions = {
+  replicas: config.QASEY_SANDBOX_REPLICAS,
+  maxSessionsPerReplica: config.QASEY_SANDBOX_MAX_SESSIONS,
+  idleTtlMs: config.QASEY_SANDBOX_IDLE_TTL_MS,
+  encryptionKey: config.GOOGLE_COOKIE_PASSWORD ?? config.MASTRA_ENCRYPTION_KEY ?? "qasey-local-sandbox-lease-key",
+};
+export const sandboxLeaseStore = config.QASEY_SANDBOX_ENABLED
+  ? config.DATABASE_URL
+    ? new PostgresSandboxLeaseStore(config.DATABASE_URL, sandboxLeaseOptions)
+    : new InMemorySandboxLeaseStore(sandboxLeaseOptions)
+  : undefined;
+export const sandboxPoolClient = sandboxLeaseStore
+  ? new SandboxPoolClient(sandboxLeaseStore, {
+      endpointTemplate: config.QASEY_SANDBOX_ENDPOINT_TEMPLATE,
+      requestTimeoutMs: config.QASEY_SANDBOX_REQUEST_TIMEOUT_MS,
+    })
+  : undefined;
 // The registry can survive a development hot reload. Reset it before replacing
 // checks so readiness never reports the previous runtime while this one starts.
 runtimeReadiness.markInitializationStarted();
@@ -68,6 +88,7 @@ runtimeReadiness.register("mastra-storage", async () => {
 });
 runtimeReadiness.register("run-repository", () => runRepository.healthCheck?.() ?? Promise.resolve());
 runtimeReadiness.register("channel-delivery-inbox", () => channelDeliveryInbox.healthCheck?.() ?? Promise.resolve());
+if (sandboxLeaseStore) runtimeReadiness.register("sandbox-lease-store", () => sandboxLeaseStore.healthCheck());
 export const mcpCatalog = new QaseyMcpCatalog(config);
 runtimeReadiness.register("mcp-oauth-storage", () => mcpCatalog.healthCheck());
 export const githubClient = createGitHubClient(config);
@@ -114,13 +135,17 @@ export function initializeQaseyInfrastructure(): Promise<void> {
     runtimeStore.storage.init(),
     runRepository.init?.(),
     channelDeliveryInbox.init?.(),
+    sandboxLeaseStore?.init(),
     mcpCatalog.init(),
   ]).then(() => undefined);
   return infrastructureInitialization;
 }
 
 export async function closeQaseyInfrastructure(): Promise<void> {
-  const resources: Array<{ close(): Promise<void> }> = [mcpCatalog, channelDeliveryInbox, runRepository, runtimeStore.storage];
+  const resources: Array<{ close(): Promise<void> }> = [
+    mcpCatalog, channelDeliveryInbox, runRepository, runtimeStore.storage,
+    ...(sandboxLeaseStore ? [sandboxLeaseStore] : []),
+  ];
   const results = await Promise.allSettled(resources.map(resource => resource.close()));
   const errors = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);
   if (errors.length > 0) throw new AggregateError(errors, "Qasey infrastructure shutdown failed");

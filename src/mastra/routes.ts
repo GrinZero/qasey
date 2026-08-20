@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { CreateE2ERunSchema, QaVerdictInputSchema } from "../../packages/contracts/src/index.ts";
 import { normalizeJiraWebhook } from "../../packages/domain/src/index.ts";
-import { config, channelDeliveryInbox, jiraClient, runRepository } from "./runtime.ts";
+import { config, channelDeliveryInbox, jiraClient, runRepository, sandboxPoolClient } from "./runtime.ts";
 import { cancelE2ERun, createAndStartE2ERun, rerunE2E, resumeE2EWithVerdict } from "./e2e-workflow.ts";
 import { ownerScopeFromRequestContext } from "../platform/context/owner-scope.ts";
 import type { OwnedApiRoute, PrimitiveAccessPolicy } from "../runtime/application.ts";
@@ -15,6 +15,10 @@ import { OAuthPrincipalSchema } from "../platform/auth/oauth-principal.ts";
 import type { PlatformGoogleUser } from "../platform/auth/google-oidc.ts";
 import { runQaseyTaskWorkflow } from "./qasey-task-workflow.ts";
 import { runtimeReadiness } from "../platform/storage/readiness.ts";
+import {
+  SandboxBrowserActionSchema, SandboxBrowserStartSchema, SandboxDesktopActionSchema,
+  SandboxDesktopApplicationSchema, SandboxDesktopStartSchema, SandboxDesktopToolSchema,
+} from "../platform/workspace/sandbox-protocol.ts";
 
 const QaseyTaskRequestSchema = z.object({
   prompt: z.string().trim().min(1).max(100_000),
@@ -33,6 +37,16 @@ function errorBody(error: unknown, requestId: string) {
     ? "The request could not be completed. Use the request ID to inspect server logs."
     : error instanceof Error ? error.message : String(error);
   return { message, requestId };
+}
+
+function sandboxScope(c: { get(key: "requestContext"): import("@mastra/core/request-context").RequestContext; req: { param(name: string): string } }) {
+  const ownerScope = owner(c);
+  return { ...ownerScope, sessionId: c.req.param("sessionId") };
+}
+
+function requireSandboxPool() {
+  if (!sandboxPoolClient) throw new Error("Qasey sandbox pool is disabled");
+  return sandboxPoolClient;
 }
 
 export const apiRoutes = [
@@ -190,6 +204,145 @@ export const apiRoutes = [
       catch (error) { return c.json(errorBody(error, crypto.randomUUID()), 409); }
     },
   }),
+  registerApiRoute("/v1/sandbox-sessions/:sessionId", {
+    method: "GET",
+    handler: async c => {
+      try {
+        const session = await requireSandboxPool().session(sandboxScope(c));
+        return c.json({ ...await session.claim(), ordinal: session.lease.ordinal });
+      } catch (error) {
+        return c.json({ error: "sandbox_unavailable", ...errorBody(error, crypto.randomUUID()) }, 503);
+      }
+    },
+  }),
+  registerApiRoute("/v1/sandbox-sessions/:sessionId/browser/start", {
+    method: "POST",
+    handler: async c => {
+      const parsed = SandboxBrowserStartSchema.safeParse(await c.req.json());
+      if (!parsed.success) return c.json({ error: "validation_error", details: parsed.error.issues }, 400);
+      try {
+        const session = await requireSandboxPool().session(sandboxScope(c));
+        return c.json({ ...await session.browserStart({
+          width: parsed.data.width,
+          height: parsed.data.height,
+          ...(parsed.data.url ? { url: parsed.data.url } : {}),
+        }), ordinal: session.lease.ordinal });
+      } catch (error) {
+        return c.json({ error: "browser_start_failed", ...errorBody(error, crypto.randomUUID()) }, 503);
+      }
+    },
+  }),
+  registerApiRoute("/v1/sandbox-sessions/:sessionId/browser/action", {
+    method: "POST",
+    handler: async c => {
+      const parsed = SandboxBrowserActionSchema.safeParse(await c.req.json());
+      if (!parsed.success) return c.json({ error: "validation_error", details: parsed.error.issues }, 400);
+      try {
+        const session = await requireSandboxPool().session(sandboxScope(c));
+        return c.json({ ...await session.browserAction(parsed.data), ordinal: session.lease.ordinal });
+      } catch (error) {
+        return c.json({ error: "browser_action_failed", ...errorBody(error, crypto.randomUUID()) }, 503);
+      }
+    },
+  }),
+  registerApiRoute("/v1/sandbox-sessions/:sessionId/browser/frame", {
+    method: "GET",
+    handler: async c => {
+      try {
+        const frame = await (await requireSandboxPool().session(sandboxScope(c))).browserFrame();
+        c.header("content-type", "image/jpeg");
+        c.header("cache-control", "no-store");
+        if (frame.url) c.header("x-qasey-browser-url", encodeURIComponent(frame.url));
+        if (frame.title) c.header("x-qasey-browser-title", encodeURIComponent(frame.title));
+        return c.body(new Uint8Array(frame.image));
+      } catch (error) {
+        return c.json({ error: "browser_frame_failed", ...errorBody(error, crypto.randomUUID()) }, 503);
+      }
+    },
+  }),
+  registerApiRoute("/v1/sandbox-sessions/:sessionId/desktop/start", {
+    method: "POST",
+    handler: async c => {
+      const parsed = SandboxDesktopStartSchema.safeParse(await c.req.json());
+      if (!parsed.success) return c.json({ error: "validation_error", details: parsed.error.issues }, 400);
+      try {
+        const started = await requireSandboxPool().startDesktop(sandboxScope(c), parsed.data);
+        return c.json({ ...started.state, ordinal: started.session.lease.ordinal });
+      } catch (error) {
+        return c.json({ error: "desktop_start_failed", ...errorBody(error, crypto.randomUUID()) }, 503);
+      }
+    },
+  }),
+  registerApiRoute("/v1/sandbox-sessions/:sessionId/desktop/action", {
+    method: "POST",
+    handler: async c => {
+      const parsed = SandboxDesktopActionSchema.safeParse(await c.req.json());
+      if (!parsed.success) return c.json({ error: "validation_error", details: parsed.error.issues }, 400);
+      try {
+        const session = await requireSandboxPool().session(sandboxScope(c));
+        return c.json({ ...await session.desktopAction(parsed.data), ordinal: session.lease.ordinal });
+      } catch (error) {
+        return c.json({ error: "desktop_action_failed", ...errorBody(error, crypto.randomUUID()) }, 503);
+      }
+    },
+  }),
+  registerApiRoute("/v1/sandbox-sessions/:sessionId/desktop/tool", {
+    method: "POST",
+    handler: async c => {
+      const parsed = SandboxDesktopToolSchema.safeParse(await c.req.json());
+      if (!parsed.success) return c.json({ error: "validation_error", details: parsed.error.issues }, 400);
+      try { return c.json(await (await requireSandboxPool().session(sandboxScope(c))).desktopTool(parsed.data)); }
+      catch (error) { return c.json({ error: "desktop_tool_failed", ...errorBody(error, crypto.randomUUID()) }, 503); }
+    },
+  }),
+  registerApiRoute("/v1/sandbox-sessions/:sessionId/desktop/app", {
+    method: "POST",
+    handler: async c => {
+      const parsed = SandboxDesktopApplicationSchema.safeParse(await c.req.json());
+      if (!parsed.success) return c.json({ error: "validation_error", details: parsed.error.issues }, 400);
+      try {
+        const session = await requireSandboxPool().session(sandboxScope(c));
+        return c.json({ ...await session.desktopApplication(parsed.data), ordinal: session.lease.ordinal });
+      } catch (error) {
+        return c.json({ error: "desktop_app_failed", ...errorBody(error, crypto.randomUUID()) }, 503);
+      }
+    },
+  }),
+  registerApiRoute("/v1/sandbox-sessions/:sessionId/desktop/frame", {
+    method: "GET",
+    handler: async c => {
+      try {
+        const frame = await (await requireSandboxPool().session(sandboxScope(c))).desktopFrame();
+        c.header("content-type", "image/png");
+        c.header("cache-control", "no-store");
+        return c.body(new Uint8Array(frame));
+      } catch (error) {
+        return c.json({ error: "desktop_frame_failed", ...errorBody(error, crypto.randomUUID()) }, 503);
+      }
+    },
+  }),
+  registerApiRoute("/v1/sandbox-sessions/:sessionId/desktop/stop", {
+    method: "POST",
+    handler: async c => {
+      try {
+        const session = await requireSandboxPool().session(sandboxScope(c));
+        return c.json({ ...await session.desktopStop(), ordinal: session.lease.ordinal });
+      } catch (error) {
+        return c.json({ error: "desktop_stop_failed", ...errorBody(error, crypto.randomUUID()) }, 503);
+      }
+    },
+  }),
+  registerApiRoute("/v1/sandbox-sessions/:sessionId/stop", {
+    method: "POST",
+    handler: async c => {
+      try {
+        await requireSandboxPool().release(sandboxScope(c));
+        return c.json({ stopped: true });
+      } catch (error) {
+        return c.json({ error: "sandbox_stop_failed", ...errorBody(error, crypto.randomUUID()) }, 503);
+      }
+    },
+  }),
   registerApiRoute("/runs/:runId", {
     method: "GET",
     handler: async c => {
@@ -217,6 +370,17 @@ const routePolicies: Record<string, { id: string; access: PrimitiveAccessPolicy;
   "POST /v1/runs/:runId/rerun": { id: "run-rerun", access: { permission: "qasey.runs.write", audiences: ["admin-ui", "api", "service"] } },
   "POST /v1/runs/:runId/cancel": { id: "run-cancel", access: { permission: "qasey.runs.write", audiences: ["admin-ui", "api", "service"] } },
   "POST /v1/runs/:runId/qa-verdict": { id: "run-verdict", access: { permission: "qasey.runs.approve", audiences: ["admin-ui", "api"] } },
+  "GET /v1/sandbox-sessions/:sessionId": { id: "sandbox-session-read", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },
+  "POST /v1/sandbox-sessions/:sessionId/browser/start": { id: "sandbox-browser-start", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },
+  "POST /v1/sandbox-sessions/:sessionId/browser/action": { id: "sandbox-browser-action", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },
+  "GET /v1/sandbox-sessions/:sessionId/browser/frame": { id: "sandbox-browser-frame", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },
+  "POST /v1/sandbox-sessions/:sessionId/desktop/start": { id: "sandbox-desktop-start", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },
+  "POST /v1/sandbox-sessions/:sessionId/desktop/action": { id: "sandbox-desktop-action", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },
+  "POST /v1/sandbox-sessions/:sessionId/desktop/tool": { id: "sandbox-desktop-tool", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },
+  "POST /v1/sandbox-sessions/:sessionId/desktop/app": { id: "sandbox-desktop-app", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },
+  "GET /v1/sandbox-sessions/:sessionId/desktop/frame": { id: "sandbox-desktop-frame", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },
+  "POST /v1/sandbox-sessions/:sessionId/desktop/stop": { id: "sandbox-desktop-stop", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },
+  "POST /v1/sandbox-sessions/:sessionId/stop": { id: "sandbox-session-stop", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },
   "GET /runs/:runId": { id: "run-page", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api"] } },
 };
 

@@ -1,9 +1,11 @@
 import { createSlackAdapter } from "@chat-adapter/slack";
 import type { ChannelConfig, ChannelHandler } from "@mastra/core/channels";
+import { EntityType, SpanType } from "@mastra/core/observability";
 import { resolveSlackChannelMode } from "../../../packages/adapters/src/config.ts";
 import { conversationScope } from "../../platform/context/conversation-scope.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../../platform/context/schema.ts";
 import { config } from "../../mastra/runtime.ts";
+import { traceQaseyOperation } from "../../mastra/observability.ts";
 import { runQaseyTaskWorkflow } from "../../mastra/qasey-task-workflow.ts";
 import { logError, logInfo } from "../../../packages/adapters/src/index.ts";
 import { slackCaseCompletionCards } from "./slack-case-delivery.ts";
@@ -74,19 +76,51 @@ function createQaseyChannels(): ChannelConfig | undefined {
     };
     const sourceMessage = thread.createSentMessageFromMessage(message);
     const receivedAt = Date.now();
+    const slackRequestSpan = mastra.observability.getDefaultInstance()?.startSpan({
+      type: SpanType.GENERIC,
+      name: "qasey slack request",
+      entityType: EntityType.AGENT,
+      entityId: "qasey",
+      entityName: "Qasey",
+      input: {
+        message: context.chatInput,
+        channelId: thread.channelId,
+        threadId: scope.threadId,
+        attachmentCount: context.attachments.length,
+      },
+      metadata: {
+        requestId: context.requestId,
+        channel: "slack",
+        actorId: context.actor.id,
+      },
+      requestContext,
+      tags: ["qasey", "channel:slack", "ingress:channel"],
+    });
     let firstToolAt: number | undefined;
     let firstProgressAt: number | undefined;
     let lastStatus: string | undefined;
     const updateStatus = async (status: string | undefined) => {
       if (!status || status === lastStatus) return;
       lastStatus = status;
-      await showSlackStatus(thread, status);
+      await traceQaseyOperation(
+        slackRequestSpan,
+        "qasey slack status delivery",
+        { status },
+        () => showSlackStatus(thread, status),
+      );
     };
-    await markSlackRequestStarted(sourceMessage);
+    await traceQaseyOperation(
+      slackRequestSpan,
+      "qasey slack acknowledgement",
+      {},
+      () => markSlackRequestStarted(sourceMessage),
+    );
     let outcome: "success" | "failure" = "failure";
+    let requestError: unknown;
     try {
       const result = await runQaseyTaskWorkflow(mastra, context, {
         requestContext,
+        ...(slackRequestSpan ? { tracingContext: { currentSpan: slackRequestSpan } } : {}),
         events: {
           onPhase: async ({ runId, phase }) => {
             await updateStatus(slackPhaseStatus(phase));
@@ -125,29 +159,57 @@ function createQaseyChannels(): ChannelConfig | undefined {
         baseUrl: config.METERSPHERE_BASE_URL,
         projectId: config.METERSPHERE_PROJECT_ID,
       });
-      if (completionCards.length > 0) {
-        try {
-          for (const card of completionCards) await thread.post(card);
-        } catch (error) {
-          logError("slack.case_table_delivery_failed", error, { requestId: context.requestId });
-          await thread.post({ markdown: result.text });
-        }
-      } else {
-        await thread.post({ markdown: result.text });
-      }
+      await traceQaseyOperation(
+        slackRequestSpan,
+        "qasey slack final delivery",
+        { completionCardCount: completionCards.length, finalization: result.finalization },
+        async () => {
+          if (completionCards.length > 0) {
+            try {
+              for (const card of completionCards) await thread.post(card);
+            } catch (error) {
+              logError("slack.case_table_delivery_failed", error, { requestId: context.requestId });
+              await thread.post({ markdown: result.text });
+            }
+          } else {
+            await thread.post({ markdown: result.text });
+          }
+        },
+      );
       outcome = "success";
     } catch (error) {
+      requestError = error;
       const detail = config.NODE_ENV === "production" ? "请稍后重试，或联系维护者并提供当前消息链接。" : error instanceof Error ? error.message : String(error);
-      await thread.post(`Qasey 未能完成这次任务。${detail}`);
+      await traceQaseyOperation(
+        slackRequestSpan,
+        "qasey slack failure delivery",
+        {},
+        () => thread.post(`Qasey 未能完成这次任务。${detail}`).then(() => undefined),
+      );
     } finally {
-      await markSlackRequestFinished(sourceMessage, outcome);
+      await traceQaseyOperation(
+        slackRequestSpan,
+        "qasey slack completion reaction",
+        { outcome },
+        () => markSlackRequestFinished(sourceMessage, outcome),
+      );
+      const durationMs = Date.now() - receivedAt;
       logInfo("slack.request.finished", {
         requestId: context.requestId,
         outcome,
-        durationMs: Date.now() - receivedAt,
+        durationMs,
         timeToFirstToolMs: firstToolAt ? firstToolAt - receivedAt : undefined,
         timeToFirstProgressMs: firstProgressAt ? firstProgressAt - receivedAt : undefined,
       });
+      if (requestError) {
+        slackRequestSpan?.error({
+          error: requestError instanceof Error ? requestError : new Error(String(requestError)),
+          endSpan: true,
+          metadata: { outcome, durationMs },
+        });
+      } else {
+        slackRequestSpan?.end({ metadata: { outcome, durationMs } });
+      }
     }
   };
   return {

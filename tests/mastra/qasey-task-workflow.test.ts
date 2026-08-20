@@ -59,7 +59,11 @@ describe("qasey-task workflow", () => {
     const createRun = vi.fn(async () => ({ start }));
     const mastra = { getWorkflow: vi.fn(() => ({ createRun })) } as unknown as Mastra;
 
-    await expect(runQaseyTaskWorkflow(mastra, context, { runId: "workflow-run-1" })).resolves.toEqual(response);
+    const tracingContext = { currentSpan: { id: "channel-span" } as never };
+    await expect(runQaseyTaskWorkflow(mastra, context, {
+      runId: "workflow-run-1",
+      tracingContext,
+    })).resolves.toEqual(response);
 
     expect(createRun).toHaveBeenCalledWith(expect.objectContaining({
       runId: "workflow-run-1",
@@ -68,6 +72,7 @@ describe("qasey-task workflow", () => {
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
       inputData: context,
       requestContext: expect.objectContaining({ get: expect.any(Function) }),
+      tracingContext,
     }));
     const requestContext = start.mock.calls[0]![0].requestContext;
     expect(requestContext.get("applicationId")).toBe("qasey");

@@ -236,6 +236,34 @@ textarea::placeholder, input::placeholder { color: #a4aaba; }
 .status-badge.success { color: var(--teal); background: var(--teal-soft); }
 .status-badge.danger { color: var(--coral); background: var(--coral-soft); }
 .status-badge.warning { color: #a66428; background: #fdf0e5; }
+.cua-toolbar { display: grid; grid-template-columns: minmax(220px, .65fr) minmax(320px, 1.35fr) auto; align-items: end; gap: 14px; padding: 18px 20px; }
+.cua-mode { width: fit-content; margin-bottom: 12px; }
+.cua-toolbar label { display: flex; flex-direction: column; gap: 6px; color: #6d7485; font-size: 10px; font-weight: 650; }
+.cua-toolbar input, .cua-controls input { min-height: 38px; padding: 0 12px; }
+.cua-stage { margin-top: 18px; overflow: hidden; }
+.cua-stage-head { min-height: 64px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 20px; border-bottom: 1px solid #e9ebf1; }
+.cua-stage-head > div { min-width: 0; display: grid; grid-template-columns: auto minmax(0, auto); column-gap: 9px; align-items: center; }
+.cua-stage-head strong { color: #343b4c; font-size: 12px; }
+.cua-stage-head small { grid-column: 2; overflow: hidden; color: #9299a8; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.cua-stage-head > span { color: #858c9c; font-size: 9px; }
+.cua-appbar { display: flex; align-items: center; gap: 6px; padding: 8px 16px; border-bottom: 1px solid #e9ebf1; background: #f8f9fc; }
+.cua-appbar button { min-height: 32px; display: inline-flex; align-items: center; gap: 6px; padding: 0 11px; border: 1px solid #e0e3eb; border-radius: 8px; background: #fff; color: #51596b; font-size: 10px; font-weight: 650; cursor: pointer; }
+.cua-appbar button:hover { border-color: #c9c6f2; color: #5c56b4; }
+.cua-appbar button:focus-visible { outline: 2px solid #7771d7; outline-offset: 2px; }
+.cua-appbar button:disabled { opacity: .55; cursor: wait; }
+.health-dot.offline { background: #a8adba; box-shadow: none; }
+.cua-screen { min-height: 520px; display: grid; place-items: center; overflow: auto; background: #171a24; }
+.cua-frame-button { width: min(100%, 1440px); padding: 0; border: 0; background: transparent; cursor: crosshair; }
+.cua-frame-button:focus-visible { outline: 3px solid #8f8ae9; outline-offset: -3px; }
+.cua-frame-button img { display: block; width: 100%; height: auto; pointer-events: none; }
+.cua-screen > div { display: flex; flex-direction: column; align-items: center; gap: 10px; color: #767f94; text-align: center; }
+.cua-screen > div strong { color: #d8dbe5; font-size: 12px; }
+.cua-screen > div span { font-size: 10px; }
+.cua-controls { display: grid; grid-template-columns: auto auto auto minmax(220px, 1fr) auto; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid #e9ebf1; }
+.cua-controls.desktop { grid-template-columns: minmax(220px, 1fr) auto; }
+.cua-type-field { position: relative; }
+.cua-type-field > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+@media (max-width: 760px) { .cua-toolbar { grid-template-columns: 1fr; } .cua-screen { min-height: 300px; } .cua-appbar { overflow-x: auto; } .cua-appbar button { flex: 0 0 auto; } .cua-controls { grid-template-columns: auto auto auto 1fr; } .cua-controls.desktop { grid-template-columns: 1fr; } .cua-controls .secondary-button { grid-column: 1 / -1; } }
 .evidence-rail { position: relative; margin: 24px 0 8px; padding-left: 4px; }
 .rail-step { position: relative; min-height: 52px; display: grid; grid-template-columns: 30px minmax(58px, auto) 1fr; align-items: start; column-gap: 9px; }
 .rail-node { z-index: 2; width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid #dfe2e9; border-radius: 50%; color: #9aa0ae; background: white; }
