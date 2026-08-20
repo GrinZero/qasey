@@ -34,6 +34,9 @@ describe("model-based intent routing", () => {
       activeTools: [],
       toolChoice: "none",
       maxSteps: 1,
+      structuredOutput: expect.objectContaining({
+        providerOptions: { openai: { reasoningEffort: "low", serviceTier: "priority" } },
+      }),
     }));
     expect(route).toMatchObject({ intent: "qa_review", reason: "model decision" });
   });
