@@ -9,10 +9,10 @@ import {
   type E2ERun,
   type OwnerScope,
   type QaVerdict,
-} from "../../packages/contracts/src/index.ts";
-import { config, e2eCoordinator, runRepository } from "./runtime.ts";
-import { ownerScopeFromRequestContext } from "../platform/context/owner-scope.ts";
-import { PlatformRequestContextSchema } from "../platform/context/schema.ts";
+} from "../../../packages/contracts/src/index.ts";
+import { config, e2eCoordinator, runRepository } from "../runtime.ts";
+import { ownerScopeFromRequestContext } from "../../platform/context/owner-scope.ts";
+import { PlatformRequestContextSchema } from "../../platform/context/schema.ts";
 
 const WorkflowInputSchema = z.object({
   runId: z.string().min(1),
@@ -25,7 +25,7 @@ const WorkflowOutputSchema = z.object({
 
 const authorAndPersistPatch = createStep({
   id: "author-and-persist-patch",
-  description: "Author E2E code, run bounded repairs, validate changed paths, and persist the patch.",
+  description: "编写 E2E 代码，执行次数受限的修复，验证变更路径并持久化补丁。",
   inputSchema: WorkflowInputSchema,
   outputSchema: z.object({ runId: z.string().min(1) }),
   requestContextSchema: PlatformRequestContextSchema,
@@ -43,7 +43,7 @@ const authorAndPersistPatch = createStep({
 
 const cleanVerifyAndPublish = createStep({
   id: "clean-verify-and-publish",
-  description: "Apply the persisted patch in a fresh workspace, verify it, and publish a Draft PR.",
+  description: "在全新的工作区应用已持久化的补丁，完成验证并发布 Draft PR。",
   inputSchema: z.object({ runId: z.string().min(1) }),
   outputSchema: z.object({ runId: z.string().min(1) }),
   requestContextSchema: PlatformRequestContextSchema,
@@ -64,7 +64,7 @@ const cleanVerifyAndPublish = createStep({
 
 export const awaitQaVerdictStep = createStep({
   id: "await-qa-verdict",
-  description: "Suspend after clean verification until QA approves or requests a bounded repair.",
+  description: "完成干净验证后暂停，等待 QA 批准或提出次数受限的修复要求。",
   inputSchema: z.object({ runId: z.string().min(1) }),
   outputSchema: WorkflowOutputSchema,
   suspendSchema: z.object({ runId: z.string(), reason: z.string(), reviewUrl: z.string().url() }),
@@ -103,7 +103,7 @@ export const awaitQaVerdictStep = createStep({
 
 export const e2eLifecycleWorkflow = createWorkflow({
   id: "qasey-e2e-lifecycle",
-  description: "Durable E2E authoring, clean verification, and QA approval lifecycle.",
+  description: "持久化的 E2E 编写、干净验证与 QA 审批生命周期。",
   inputSchema: WorkflowInputSchema,
   outputSchema: WorkflowOutputSchema,
   requestContextSchema: PlatformRequestContextSchema,

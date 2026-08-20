@@ -2,13 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   createQaseyApplication,
   type QaseyApplicationModules,
-} from "../../src/agent-apps/qasey/application.ts";
+} from "../../src/mastra/applications/qasey/application.ts";
 
 describe("Qasey application access policy", () => {
-  it("exposes primitives to authenticated UI, API, and service callers", async () => {
-    const application = await createQaseyApplication({
-      agentModule: { qaseyAgent: { id: "qasey-main" } },
-      intentModule: { intentRouterAgent: { id: "qasey-intent-router" } },
+  it("exposes filesystem agents and code primitives to authenticated UI, API, and service callers", () => {
+    const application = createQaseyApplication({
       taskWorkflowModule: { qaseyTaskWorkflow: { id: "qasey-task" } },
       e2eModule: { e2eLifecycleWorkflow: { id: "qasey-e2e-lifecycle" } },
       scorerModule: { qaseyEvalScorers: { "qasey-quality": { id: "qasey-quality" } } },
@@ -18,6 +16,8 @@ describe("Qasey application access policy", () => {
       routeModule: { qaseyOwnedApiRoutes: [] },
     } as unknown as QaseyApplicationModules);
 
+    expect(application.agents).toEqual({});
+    expect(application.filesystemAgents).toEqual(["qasey-main", "qasey-intent-router"]);
     expect(application.access.agents["qasey-main"]?.audiences).toEqual([
       "admin-ui",
       "api",

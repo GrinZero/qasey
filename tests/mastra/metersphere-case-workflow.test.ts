@@ -7,7 +7,7 @@ import {
   meterSphereCaseOperationWorkflow,
   meterSphereCaseWorkflowRunId,
   runMeterSphereCaseOperationWorkflow,
-} from "../../src/mastra/metersphere-case-workflow.ts";
+} from "../../src/mastra/workflows/metersphere-case-workflow.ts";
 
 describe("MeterSphere case operation workflow", () => {
   it("owns the frozen write, performs fresh detail read-back, and checkpoints a receipt", async () => {

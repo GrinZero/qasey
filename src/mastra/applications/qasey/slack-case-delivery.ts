@@ -1,5 +1,5 @@
 import { Card, CardText, Table, type CardElement } from "chat";
-import type { EvidenceCompletionReceipt } from "../../../packages/domain/src/index.ts";
+import type { EvidenceCompletionReceipt } from "../../../../packages/domain/src/index.ts";
 
 const MAX_ROWS_PER_TABLE = 100;
 

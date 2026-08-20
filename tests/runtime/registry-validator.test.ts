@@ -28,6 +28,45 @@ describe("shared application registry", () => {
     expect(() => flattenApplicationRegistry([invalid])).toThrow(/missing permission metadata/u);
   });
 
+  it("publishes filesystem agents in the catalog without code-registering them", () => {
+    const application: AgentApplicationBundle = {
+      id: "alpha",
+      agents: {},
+      filesystemAgents: ["alpha-main"],
+      workflows: {},
+      access: {
+        agents: { "alpha-main": { permission: "alpha.execute", audiences: ["api"] } },
+        workflows: {},
+      },
+    };
+
+    const runtime = createSharedMastraConfig({ applications: [application] });
+
+    expect(runtime.config.agents).toEqual({});
+    expect(runtime.catalog).toContainEqual({
+      applicationId: "alpha",
+      resourceType: "agent",
+      resourceId: "alpha-main",
+      permission: "alpha.execute",
+      audiences: ["api"],
+    });
+  });
+
+  it("rejects an agent declared for both code and filesystem registration", () => {
+    const duplicate: AgentApplicationBundle = {
+      id: "alpha",
+      agents: { "alpha-main": { id: "alpha-main" } as unknown as Agent },
+      filesystemAgents: ["alpha-main"],
+      workflows: {},
+      access: {
+        agents: { "alpha-main": { permission: "alpha.execute", audiences: ["api"] } },
+        workflows: {},
+      },
+    };
+
+    expect(() => flattenApplicationRegistry([duplicate])).toThrow(/both code and filesystem registered/u);
+  });
+
   it("fails startup when a key differs from its canonical id or crosses application ownership", () => {
     const fakeAgent = { id: "alpha-other" } as unknown as Agent;
     const invalid: AgentApplicationBundle = {

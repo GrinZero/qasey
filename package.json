@@ -14,7 +14,7 @@
     "start": "sh ci/runtime.sh api",
     "admin-ui:build": "pnpm --dir apps/admin-ui build",
     "admin-ui:test": "pnpm --dir apps/admin-ui test",
-    "build": "pnpm admin-ui:build && tsup && mastra build --dir src/mastra --studio && mastra worker build --dir src/mastra --output-dir .mastra/worker",
+    "build": "pnpm admin-ui:build && tsup && mastra build --dir src/mastra --studio && mastra worker build --dir src/mastra --output-dir .mastra/worker && node scripts/copy-mastra-skills.mjs",
     "typecheck": "tsc --noEmit",
     "pretest": "pnpm admin-ui:build",
     "test": "NODE_ENV=test QASEY_SHADOW_MODE=false vitest run",

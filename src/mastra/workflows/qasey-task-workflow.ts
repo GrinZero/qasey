@@ -9,16 +9,16 @@ import {
   IntentRouteSchema,
   QaseyRequestContextSchema,
   type QaseyRequestContext,
-} from "../../packages/contracts/src/index.ts";
-import type { EvidenceCompletionReceipt, MeterSphereCasePlan } from "../../packages/domain/src/index.ts";
-import { routeIntent } from "./intent-agent.ts";
+} from "../../../packages/contracts/src/index.ts";
+import type { EvidenceCompletionReceipt, MeterSphereCasePlan } from "../../../packages/domain/src/index.ts";
+import { routeIntent } from "../applications/qasey/intent-routing.ts";
 import {
   executeQasey,
   prepareQaseyRequestContext,
   type QaseyExecutionEvents,
   type QaseyResponse,
-} from "./service.ts";
-import { PlatformRequestContextSchema } from "../platform/context/schema.ts";
+} from "../applications/qasey/service.ts";
+import { PlatformRequestContextSchema } from "../../platform/context/schema.ts";
 
 const RoutedTaskSchema = z.object({
   context: QaseyRequestContextSchema,
@@ -52,7 +52,7 @@ const QASEY_WORKFLOW_RESUME_RECEIPT_KEY = "qasey-workflow-resume-receipt";
 
 const classifyIntentStep = createStep({
   id: "classify-intent",
-  description: "Classify the request before Qasey's dynamic instructions and tools are resolved.",
+  description: "在解析 Qasey 的动态指令和工具前对请求进行分类。",
   inputSchema: QaseyRequestContextSchema,
   outputSchema: RoutedTaskSchema,
   requestContextSchema: PlatformRequestContextSchema,
@@ -73,7 +73,7 @@ const classifyIntentStep = createStep({
 
 const executeRoutedTaskStep = createStep({
   id: "execute-routed-qasey",
-  description: "Run Qasey with route-scoped instructions and tools, then hand deterministic writes to domain workflows.",
+  description: "使用按路由限定的指令和工具运行 Qasey，然后将确定性写入交给领域 Workflow。",
   inputSchema: RoutedTaskSchema,
   outputSchema: QaseyTaskOutputSchema,
   requestContextSchema: PlatformRequestContextSchema,
@@ -96,7 +96,7 @@ const executeRoutedTaskStep = createStep({
 
 export const qaseyTaskWorkflow = createWorkflow({
   id: "qasey-task",
-  description: "Authoritative Qasey request workflow: classify, execute with route-scoped capabilities, and verify completion.",
+  description: "权威的 Qasey 请求 Workflow：分类、使用按路由限定的能力执行，并验证完成状态。",
   inputSchema: QaseyRequestContextSchema,
   outputSchema: QaseyTaskOutputSchema,
   requestContextSchema: PlatformRequestContextSchema,

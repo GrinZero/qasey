@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { IntentRoute, QaseyRequestContext } from "../../packages/contracts/src/index.ts";
 import type { EvidenceCompletionReceipt } from "../../packages/domain/src/evidence-ledger.ts";
 import { buildMeterSphereCasePlan } from "../../packages/domain/src/index.ts";
-import { assertNormalCompletion, completionReceiptText, executeQasey, selectFinalText } from "../../src/mastra/service.ts";
+import { assertNormalCompletion, completionReceiptText, executeQasey, selectFinalText } from "../../src/mastra/applications/qasey/service.ts";
 
 describe("Qasey service completion", () => {
   it("selects only the final step text instead of accumulated progress text", () => {
@@ -97,13 +97,12 @@ describe("Qasey service completion", () => {
     }));
     const mastra = {
       observability: { getDefaultInstance: () => ({ startSpan }) },
-      getAgent: (id: string) => id === "intentRouterAgent"
+      getAgent: (id: string) => id === "qasey-intent-router"
         ? { generate: routerGenerate }
         : { generate: qaseyGenerate },
     } as unknown as Mastra;
 
     const response = await executeQasey(mastra, context, {
-      intentAgent: mastra.getAgent("intentRouterAgent"),
       trace: {
         jobId: "job-1",
         eventId: "event-1",

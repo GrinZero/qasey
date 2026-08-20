@@ -2,7 +2,7 @@ import type { Mastra } from "@mastra/core/mastra";
 import { EntityType, SpanType } from "@mastra/core/observability";
 import type { Span, TracingContext } from "@mastra/core/observability";
 import type { RequestContext } from "@mastra/core/request-context";
-import type { IntentRoute, QaseyRequestContext } from "../../packages/contracts/src/index.ts";
+import type { IntentRoute, QaseyRequestContext } from "../../../../packages/contracts/src/index.ts";
 
 const QASEY_TRACE_ID_KEY = "qasey__traceId";
 const QASEY_REQUEST_SPAN_ID_KEY = "qasey__requestSpanId";

@@ -230,7 +230,7 @@ export function getRuntimeContext(
 
 const getCurrentTime = createTool({
   id: "get_current_time",
-  description: "Return the current ISO timestamp and Asia/Shanghai local time.",
+  description: "返回当前 ISO 时间戳和 Asia/Shanghai 本地时间。",
   inputSchema: z.object({}),
   outputSchema: z.object({ iso: z.string(), asiaShanghai: z.string() }),
   execute: async () => ({
@@ -242,7 +242,7 @@ const getCurrentTime = createTool({
 export function createAgentProgressTool(progressSession: AgentProgressSession) {
   return createTool({
     id: "qasey_report_progress",
-    description: "Share a task-specific discovery, decision, risk, or blocker through Qasey's reliable channel delivery. Do not announce generic workflow stages, tool calls, or that analysis merely started. Choose a stable milestone key. This is not a completion tool: never claim that an external write, verification, publication, or merge succeeded; those facts are reported by the runtime after trusted tool evidence.",
+    description: "通过 Qasey 的可靠渠道投递与当前任务相关的发现、决策、风险或阻塞。不要播报通用工作流阶段、工具调用，或仅仅宣布分析开始。选择稳定的 milestone key。这不是完成确认工具：不得声称外部写入、验证、发布或合并成功；这些事实会由运行时在取得可信工具证据后报告。",
     inputSchema: AgentProgressInputSchema,
     outputSchema: z.object({
       accepted: z.boolean(),
@@ -258,7 +258,7 @@ function e2eTools(route: IntentRoute) {
   if (route.intent === "e2e_generate") return {
     e2eCreateRun: createTool({
       id: "e2e_create_run",
-      description: "Queue an isolated Playwright (web) or Maestro (app) code-generation and verification run.",
+      description: "创建一个隔离的 Playwright（Web）或 Maestro（App）代码生成与验证运行。",
       inputSchema: CreateE2ERunSchema.omit({ requestId: true }),
       execute: async (input, { mastra, requestContext }) => {
         if (!requestContext) throw new Error("Trusted request context is required");
@@ -276,7 +276,7 @@ function e2eTools(route: IntentRoute) {
   };
   if (route.intent === "e2e_status") return {
     e2eGetRun: createTool({
-      id: "e2e_get_run", description: "Get E2E run status and evidence references. Read-only.",
+      id: "e2e_get_run", description: "获取 E2E 运行状态和证据引用。只读。",
       inputSchema: z.object({ runId: z.string().min(1) }),
       execute: async ({ runId }, { requestContext }) => {
         if (!requestContext) throw new Error("Trusted request context is required");
@@ -287,7 +287,7 @@ function e2eTools(route: IntentRoute) {
   };
   if (route.intent === "e2e_rerun") return {
     e2eRerun: createTool({
-      id: "e2e_rerun", description: "Create a new execution from an existing E2E run without modifying the old evidence.",
+      id: "e2e_rerun", description: "基于已有 E2E 运行创建新的执行，不修改旧证据。",
       inputSchema: z.object({ runId: z.string().min(1) }),
       execute: async ({ runId }, { mastra, requestContext }) => {
         if (!requestContext) throw new Error("Trusted request context is required");
@@ -355,7 +355,7 @@ export async function toolsForRequest(requestContext?: RequestContext<any>) {
   const evidenceReader = ledger ? {
     qasey_read_evidence_artifact: createTool({
       id: "qasey_read_evidence_artifact",
-      description: "Read a bounded slice of an evidence artifact already acquired in this run. Never re-fetch the original source just to recover compacted details.",
+      description: "读取本轮运行中已获取的证据工件的有限片段。不要为了恢复被压缩的细节而重新获取原始来源。",
       inputSchema: z.object({
         artifactId: z.string().min(1),
         offset: z.number().int().nonnegative().default(0),
@@ -400,7 +400,7 @@ export async function buildQaseyAgentTooling(toolInput: ToolsInput | Promise<Too
   }, quickJsCodeModeTransport);
   return {
     tools: { ...directTools, execute_typescript: codeMode.tool },
-    codeModeInstructions: `${codeMode.instructions}\n\nQasey-specific rules:\n- Code Mode contains read-only tools. Side-effecting tools, approvals, progress reporting, and durable workflows remain separate direct tools.\n- Use Code Mode when multiple reads can be parallelized, paginated, filtered, deduplicated, joined, or aggregated. Return a compact result that preserves the source identifiers needed as evidence.\n- Do not repeat an external call whose result says it was already acquired; use the returned artifact receipt or the dedicated evidence reader instead.`,
+    codeModeInstructions: `${codeMode.instructions}\n\nQasey 专属规则：\n- Code Mode 只包含只读工具。会产生副作用的工具、审批、进度报告和持久化 Workflow 仍作为独立的直接工具提供。\n- 当多个读取操作可以并行、分页、过滤、去重、连接或聚合时，使用 Code Mode。返回精简结果，同时保留作为证据所需的来源标识。\n- 如果某次外部调用的结果表明来源已经获取，不要重复调用；改用返回的工件回执或专用证据读取工具。`,
     codeModeToolNames,
   };
 }

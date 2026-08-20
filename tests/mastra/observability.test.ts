@@ -5,7 +5,7 @@ import type { QaseyRequestContext } from "../../packages/contracts/src/index.ts"
 import {
   startQaseyCorrelatedSpan,
   startQaseyRequestSpan,
-} from "../../src/mastra/observability.ts";
+} from "../../src/mastra/applications/qasey/observability.ts";
 
 const context: QaseyRequestContext = {
   requestId: "request-1",

@@ -67,8 +67,8 @@ export class E2ECoordinator {
       await this.harness.author({
         runId: run.id, framework: run.framework, sourceCaseIds: run.sourceCaseIds,
         instruction: qaFeedback
-          ? `QA requested these changes:\n${qaFeedback}\nUpdate only the E2E implementation, then run repository checks.`
-          : "Implement the accepted QA cases, then run repository checks. Preserve product code unless a test-enablement change is explicitly allowed.",
+          ? `QA 要求进行以下修改：\n${qaFeedback}\n只更新 E2E 实现，然后运行仓库检查。`
+          : "实现已验收的 QA 用例，然后运行仓库检查。除非明确允许为测试提供支持，否则保留产品代码不变。",
       }, author);
 
       let authorResult: E2ERunResult | undefined;
@@ -84,13 +84,13 @@ export class E2ECoordinator {
         run = await this.transition(owner, run, "repairing", `Author run failed; starting bounded repair ${repair + 1}`);
         let exploration = "";
         if (isLocatorFailure(authorResult) && repair === this.options.maxRepairs - 1 && this.options.cua) {
-          const observed = await this.options.cua.observe(author, run.id, "Observe the failing UI flow and suggest deterministic Playwright/Maestro steps. Do not judge pass/fail.");
+          const observed = await this.options.cua.observe(author, run.id, "观察失败的 UI 流程，并提出确定性的 Playwright/Maestro 步骤。不要判断通过或失败。");
           run = await this.appendArtifacts(owner, run, await this.artifacts.persist(owner, run.id, "author", observed.artifacts));
           exploration = `\nCua observation (advisory only):\n${observed.summary}`;
         }
         await this.harness.author({
           runId: run.id, framework: run.framework, sourceCaseIds: run.sourceCaseIds,
-          instruction: `Repair only the test implementation. Do not weaken assertions. Runner output:\n${authorResult.summary}${exploration}`,
+          instruction: `只修复测试实现。不要弱化断言。运行器输出：\n${authorResult.summary}${exploration}`,
         }, author);
       }
       if (!authorResult?.passed) throw new Error("Author run did not pass");

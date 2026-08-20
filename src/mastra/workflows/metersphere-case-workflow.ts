@@ -10,16 +10,16 @@ import {
   extractCaseRecordsFromResult,
   IncompleteOutcomeError,
   validateMeterSphereCasePlan,
-} from "../../packages/domain/src/index.ts";
+} from "../../../packages/domain/src/index.ts";
 import type {
   EvidenceCompletionReceipt,
   EvidenceManifestEntry,
   MeterSphereCasePlan,
-} from "../../packages/domain/src/index.ts";
-import { config, getRuntimeContext, mcpCatalog, mcpSubject } from "./runtime.ts";
-import { PlatformRequestContextSchema } from "../platform/context/schema.ts";
-import { ownerScopeFromRequestContext } from "../platform/context/owner-scope.ts";
-import { externalWriteIdempotencyKey } from "../platform/workflows/durability.ts";
+} from "../../../packages/domain/src/index.ts";
+import { config, getRuntimeContext, mcpCatalog, mcpSubject } from "../runtime.ts";
+import { PlatformRequestContextSchema } from "../../platform/context/schema.ts";
+import { ownerScopeFromRequestContext } from "../../platform/context/owner-scope.ts";
+import { externalWriteIdempotencyKey } from "../../platform/workflows/durability.ts";
 
 const ManifestSchema = z.object({
   sourceKey: z.string(),
@@ -101,7 +101,7 @@ export type MeterSphereCaseWorkflowToolExecutor = (
 
 const freezeDryRunPlan = createStep({
   id: "freeze-dry-run-plan",
-  description: "Validate the successful dry-run output and freeze its immutable ordered CasePlan.",
+  description: "验证成功的 dry-run 输出，并冻结不可变且有序的 CasePlan。",
   inputSchema: WorkflowInputSchema,
   outputSchema: WorkflowInputSchema,
   requestContextSchema: PlatformRequestContextSchema,
@@ -117,7 +117,7 @@ const freezeDryRunPlan = createStep({
 
 const writeFrozenPlan = createStep({
   id: "write-frozen-plan",
-  description: "Write the exact frozen CasePlan payload; the agent cannot invoke this mutation step.",
+  description: "写入完全匹配的冻结 CasePlan payload；Agent 无法调用此变更步骤。",
   inputSchema: WorkflowInputSchema,
   outputSchema: WriteOutputSchema,
   requestContextSchema: PlatformRequestContextSchema,
@@ -149,7 +149,7 @@ const writeFrozenPlan = createStep({
 
 const verifyFreshReadBack = createStep({
   id: "verify-fresh-read-back",
-  description: "Read every written case back through fresh detail calls and compare identity, module, name, and priority.",
+  description: "通过全新的详情读取调用回读每条已写入用例，并比较标识、模块、名称和优先级。",
   inputSchema: WriteOutputSchema,
   outputSchema: VerificationOutputSchema,
   requestContextSchema: PlatformRequestContextSchema,
@@ -206,7 +206,7 @@ const verifyFreshReadBack = createStep({
 
 const checkpointCompletion = createStep({
   id: "checkpoint-completion",
-  description: "Persist the serializable verified completion receipt as the workflow result.",
+  description: "将可序列化且已验证的完成回执持久化为 Workflow 结果。",
   inputSchema: VerificationOutputSchema,
   outputSchema: WorkflowOutputSchema,
   requestContextSchema: PlatformRequestContextSchema,
@@ -215,7 +215,7 @@ const checkpointCompletion = createStep({
 
 export const meterSphereCaseOperationWorkflow = createWorkflow({
   id: "qasey-metersphere-case-operation",
-  description: "Deterministic MeterSphere CasePlan write, independent read-back, and durable completion checkpoint.",
+  description: "确定性的 MeterSphere CasePlan 写入、独立回查和持久化完成检查点。",
   inputSchema: WorkflowInputSchema,
   outputSchema: WorkflowOutputSchema,
   requestContextSchema: PlatformRequestContextSchema,

@@ -35,7 +35,10 @@ export interface ApplicationUiManifest {
 export interface AgentApplicationBundle {
   id: string;
   ui?: ApplicationUiManifest;
+  /** Agents constructed and registered directly through the Mastra config. */
   agents: Record<string, Agent<any, any, any, any, any>>;
+  /** Agent registry keys supplied later by Mastra's `dev`/`build` file discovery. */
+  filesystemAgents?: readonly string[];
   workflows: Record<string, AnyWorkflow>;
   scorers?: Record<string, MastraScorer<any, any, any, any>>;
   access: {

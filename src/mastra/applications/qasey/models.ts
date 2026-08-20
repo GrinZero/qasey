@@ -1,4 +1,4 @@
-import "../load-env.ts";
+import "../../../load-env.ts";
 import { createOpenAI } from "@ai-sdk/openai";
 
 const openai = createOpenAI({

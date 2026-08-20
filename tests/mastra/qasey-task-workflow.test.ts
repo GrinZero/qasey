@@ -2,8 +2,8 @@ import type { Mastra } from "@mastra/core/mastra";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY, RequestContext } from "@mastra/core/request-context";
 import { describe, expect, it, vi } from "vitest";
 import type { QaseyRequestContext } from "../../packages/contracts/src/index.ts";
-import { qaseyTaskWorkflow, runQaseyTaskWorkflow } from "../../src/mastra/qasey-task-workflow.ts";
-import { prepareQaseyRequestContext } from "../../src/mastra/service.ts";
+import { qaseyTaskWorkflow, runQaseyTaskWorkflow } from "../../src/mastra/workflows/qasey-task-workflow.ts";
+import { prepareQaseyRequestContext } from "../../src/mastra/applications/qasey/service.ts";
 
 const context: QaseyRequestContext = {
   requestId: "request-1",

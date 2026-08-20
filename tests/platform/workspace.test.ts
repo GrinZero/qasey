@@ -1,10 +1,12 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { mergeWorkspaceSkills, resolveAgentSkills } from "@mastra/core/skills";
 import { afterAll, describe, expect, it } from "vitest";
 import { createTrustedRequestContext } from "../../src/platform/context/identity-resolver.ts";
 import { createScopedWorkspace } from "../../src/platform/workspace/create-workspace.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../../src/platform/context/schema.ts";
+import { GLOBAL_SKILLS_PATH, QASEY_MAIN_SKILLS_PATH } from "../../src/mastra/skill-paths.ts";
 
 const root = mkdtempSync(join(tmpdir(), "shared-mastra-workspace-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -26,6 +28,30 @@ describe("native scoped workspace", () => {
     const workspace = createScopedWorkspace({ root, production: true, enableCodeExecution: true });
     expect(workspace.hasSandboxConfig()).toBe(false);
     await expect(workspace.resolveSandbox({ requestContext: context("alpha", "tenant", "task", "run", "author") })).resolves.toBeUndefined();
+    await workspace.close();
+  });
+
+  it("loads and merges global Workspace skills with qasey-main agent skills", async () => {
+    const workspace = createScopedWorkspace({
+      root,
+      production: false,
+      enableCodeExecution: false,
+      skills: [GLOBAL_SKILLS_PATH],
+    });
+    const workspaceSkills = workspace.skills;
+    expect(workspaceSkills).toBeDefined();
+
+    const agentSkills = resolveAgentSkills([QASEY_MAIN_SKILLS_PATH]);
+    expect((await workspaceSkills!.list()).map(skill => skill.name)).toContain("global-skill-smoke-test");
+    expect((await agentSkills.list()).map(skill => skill.name)).toContain("qasey-main-skill-smoke-test");
+
+    const { merged } = await mergeWorkspaceSkills(agentSkills, workspaceSkills!);
+    expect((await merged.list()).map(skill => skill.name)).toEqual(expect.arrayContaining([
+      "global-skill-smoke-test",
+      "qasey-main-skill-smoke-test",
+    ]));
+    expect((await merged.get("global-skill-smoke-test"))?.instructions).toContain("GLOBAL_WORKSPACE_SKILL_OK");
+    expect((await merged.get("qasey-main-skill-smoke-test"))?.instructions).toContain("QASEY_MAIN_AGENT_SKILL_OK");
     await workspace.close();
   });
 });

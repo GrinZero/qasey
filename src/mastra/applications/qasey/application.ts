@@ -1,13 +1,11 @@
-import type { AgentApplicationBundle } from "../../runtime/application.ts";
+import type { AgentApplicationBundle } from "../../../runtime/application.ts";
 
 export interface QaseyApplicationModules {
-  agentModule: Pick<typeof import("../../mastra/qasey-agent.ts"), "qaseyAgent">;
-  intentModule: Pick<typeof import("../../mastra/intent-agent.ts"), "intentRouterAgent">;
-  taskWorkflowModule: Pick<typeof import("../../mastra/qasey-task-workflow.ts"), "qaseyTaskWorkflow">;
-  e2eModule: Pick<typeof import("../../mastra/e2e-workflow.ts"), "e2eLifecycleWorkflow">;
-  scorerModule: Pick<typeof import("../../mastra/eval-scorers.ts"), "qaseyEvalScorers">;
-  caseWorkflowModule: Pick<typeof import("../../mastra/metersphere-case-workflow.ts"), "meterSphereCaseOperationWorkflow">;
-  routeModule: Pick<typeof import("../../mastra/routes.ts"), "qaseyOwnedApiRoutes">;
+  taskWorkflowModule: Pick<typeof import("../../workflows/qasey-task-workflow.ts"), "qaseyTaskWorkflow">;
+  e2eModule: Pick<typeof import("../../workflows/e2e-workflow.ts"), "e2eLifecycleWorkflow">;
+  scorerModule: Pick<typeof import("../../scorers/eval-scorers.ts"), "qaseyEvalScorers">;
+  caseWorkflowModule: Pick<typeof import("../../workflows/metersphere-case-workflow.ts"), "meterSphereCaseOperationWorkflow">;
+  routeModule: Pick<typeof import("./routes.ts"), "qaseyOwnedApiRoutes">;
 }
 
 /**
@@ -15,15 +13,12 @@ export interface QaseyApplicationModules {
  * MeterSphere workflow is registered only because durable snapshots require
  * the runtime lifecycle, and its service-only policy blocks public callers.
  *
- * Primitive modules are intentionally loaded only when the composition root
- * invokes this factory. Importing an Application definition must not construct
- * storage, MCP clients, workspaces, or domain repositories.
+ * The composition root supplies code-registered primitives. File-discovered
+ * Agents remain catalog metadata here and are instantiated once by the Mastra
+ * generated entry. Importing this definition must not construct infrastructure.
  */
-export async function createQaseyApplication(
-  provided?: QaseyApplicationModules,
-): Promise<AgentApplicationBundle> {
-  const modules = provided ?? await loadQaseyApplicationModules();
-  const { agentModule, intentModule, taskWorkflowModule, e2eModule, scorerModule, caseWorkflowModule, routeModule } = modules;
+export function createQaseyApplication(modules: QaseyApplicationModules): AgentApplicationBundle {
+  const { taskWorkflowModule, e2eModule, scorerModule, caseWorkflowModule, routeModule } = modules;
   const qaseyEvalScorers = scorerModule.qaseyEvalScorers;
   return {
     id: "qasey",
@@ -35,10 +30,8 @@ export async function createQaseyApplication(
       homePath: "/admin#apps/qasey",
       accent: "indigo",
     },
-    agents: {
-      "qasey-main": agentModule.qaseyAgent,
-      "qasey-intent-router": intentModule.intentRouterAgent,
-    },
+    agents: {},
+    filesystemAgents: ["qasey-main", "qasey-intent-router"],
     workflows: {
       "qasey-task": taskWorkflowModule.qaseyTaskWorkflow,
       "qasey-e2e-lifecycle": e2eModule.e2eLifecycleWorkflow,
@@ -71,17 +64,4 @@ export async function createQaseyApplication(
     },
     routes: routeModule.qaseyOwnedApiRoutes,
   };
-}
-
-async function loadQaseyApplicationModules(): Promise<QaseyApplicationModules> {
-  const [agentModule, intentModule, taskWorkflowModule, e2eModule, scorerModule, caseWorkflowModule, routeModule] = await Promise.all([
-    import("../../mastra/qasey-agent.ts"),
-    import("../../mastra/intent-agent.ts"),
-    import("../../mastra/qasey-task-workflow.ts"),
-    import("../../mastra/e2e-workflow.ts"),
-    import("../../mastra/eval-scorers.ts"),
-    import("../../mastra/metersphere-case-workflow.ts"),
-    import("../../mastra/routes.ts"),
-  ]);
-  return { agentModule, intentModule, taskWorkflowModule, e2eModule, scorerModule, caseWorkflowModule, routeModule };
 }

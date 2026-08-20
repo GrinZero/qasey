@@ -5,7 +5,7 @@ import {
   showSlackStatus,
   slackPhaseStatus,
   slackToolStatus,
-} from "../../src/agent-apps/qasey/slack-progress.ts";
+} from "../../src/mastra/applications/qasey/slack-progress.ts";
 
 describe("Qasey Slack progress", () => {
   it("acknowledges work without posting internal phase messages", async () => {

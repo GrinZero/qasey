@@ -22,7 +22,7 @@ export class AcpCodingHarness implements CodingHarness {
     const agent = new AcpAgent({
       id: `qasey-code-${request.runId}`,
       name: "Qasey E2E Author",
-      description: "Writes Playwright or Maestro E2E code inside an isolated repository workspace",
+      description: "在隔离的仓库工作区中编写 Playwright 或 Maestro E2E 代码",
       command: this.command,
       args: this.args,
       cwd: workspace.root,
@@ -35,10 +35,10 @@ export class AcpCodingHarness implements CodingHarness {
       },
     });
     const output = await agent.generate([
-      `Framework: ${request.framework}`,
-      `QA case IDs: ${request.sourceCaseIds.join(", ")}`,
-      `Allowed paths: ${workspace.repository.allowedPaths.join(", ")}`,
-      "Read repository Skills before editing. Do not change application behavior or QA expectations.",
+      `框架：${request.framework}`,
+      `QA 用例 ID：${request.sourceCaseIds.join(", ")}`,
+      `允许修改的路径：${workspace.repository.allowedPaths.join(", ")}`,
+      "编辑前先读取仓库中的 Skills。不要改变应用行为或 QA 预期。",
       request.instruction,
     ].join("\n"));
     return { summary: output.text };
@@ -47,6 +47,6 @@ export class AcpCodingHarness implements CodingHarness {
 
 export class NoopCodingHarness implements CodingHarness {
   async author(): Promise<AuthoringResult> {
-    return { summary: "Authoring disabled. Set QASEY_ENABLE_EXECUTION=true and configure an ACP command." };
+    return { summary: "代码编写已禁用。请设置 QASEY_ENABLE_EXECUTION=true 并配置 ACP 命令。" };
   }
 }

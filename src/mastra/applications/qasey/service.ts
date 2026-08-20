@@ -1,13 +1,13 @@
 import { RequestContext } from "@mastra/core/request-context";
 import type { Agent } from "@mastra/core/agent";
 import type { Mastra } from "@mastra/core/mastra";
-import type { AgentProgressReport, IntentRoute, QaseyRequestContext } from "../../packages/contracts/src/index.ts";
-import { loadModelAttachments } from "../../packages/adapters/src/index.ts";
-import { AgentProgressSession, completeCaseOperationAgainstPlan, EvidenceLedger, IncompleteOutcomeError } from "../../packages/domain/src/index.ts";
-import type { EvidenceCompletionReceipt } from "../../packages/domain/src/index.ts";
-import type { EvidenceLedgerStats } from "../../packages/domain/src/index.ts";
-import type { MeterSphereCasePlan } from "../../packages/domain/src/index.ts";
-import { routeIntent } from "./intent-agent.ts";
+import type { AgentProgressReport, IntentRoute, QaseyRequestContext } from "../../../../packages/contracts/src/index.ts";
+import { loadModelAttachments } from "../../../../packages/adapters/src/index.ts";
+import { AgentProgressSession, completeCaseOperationAgainstPlan, EvidenceLedger, IncompleteOutcomeError } from "../../../../packages/domain/src/index.ts";
+import type { EvidenceCompletionReceipt } from "../../../../packages/domain/src/index.ts";
+import type { EvidenceLedgerStats } from "../../../../packages/domain/src/index.ts";
+import type { MeterSphereCasePlan } from "../../../../packages/domain/src/index.ts";
+import { routeIntent } from "./intent-routing.ts";
 import {
   addRouteToTraceRequestContext,
   initializeQaseyTraceRequestContext,
@@ -17,11 +17,10 @@ import {
   updateQaseyRequestSpanForRoute,
 } from "./observability.ts";
 import type { QaseyTraceContext } from "./observability.ts";
-import { config } from "./runtime.ts";
-import { meterSphereCaseWorkflowRunId, runMeterSphereCaseOperationWorkflow } from "./metersphere-case-workflow.ts";
-import { intentRouterAgent } from "./intent-agent.ts";
-import { conversationScope } from "../platform/context/conversation-scope.ts";
-import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../platform/context/schema.ts";
+import { config } from "../../runtime.ts";
+import { meterSphereCaseWorkflowRunId, runMeterSphereCaseOperationWorkflow } from "../../workflows/metersphere-case-workflow.ts";
+import { conversationScope } from "../../../platform/context/conversation-scope.ts";
+import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../../../platform/context/schema.ts";
 
 export interface QaseyResponse {
   text: string;
@@ -105,7 +104,7 @@ export async function executeQasey(mastra: Mastra, context: QaseyRequestContext,
   let route: IntentRoute | undefined;
   try {
     if (!options.route) await options.events?.onPhase?.({ runId, phase: "routing" });
-    route = options.route ?? await routeIntent(context, [], abortSignal, options.intentAgent ?? intentRouterAgent, {
+    route = options.route ?? await routeIntent(context, [], abortSignal, options.intentAgent ?? mastra.getAgent("qasey-intent-router"), {
       requestContext,
       ...(requestTrace.tracingContext ? { tracingContext: requestTrace.tracingContext } : {}),
     });

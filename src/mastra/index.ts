@@ -7,16 +7,14 @@ import { MastraStorageExporter, Observability } from "@mastra/observability";
 import { RedisServerCache } from "@mastra/redis";
 import { RedisStreamsPubSub } from "@mastra/redis-streams";
 import Redis from "ioredis";
-import { QASEY_TRACE_REQUEST_CONTEXT_KEYS } from "./observability.ts";
+import { QASEY_TRACE_REQUEST_CONTEXT_KEYS } from "./applications/qasey/observability.ts";
 import { closeQaseyInfrastructure, config, createMastraRuntimeStorage, initializeQaseyInfrastructure, sandboxPoolClient, studioEditorEnabled } from "./runtime.ts";
-import { createQaseyApplication } from "../agent-apps/qasey/application.ts";
-import * as qaseyAgentModule from "./qasey-agent.ts";
-import * as intentModule from "./intent-agent.ts";
-import * as taskWorkflowModule from "./qasey-task-workflow.ts";
-import * as e2eModule from "./e2e-workflow.ts";
-import * as scorerModule from "./eval-scorers.ts";
-import * as caseWorkflowModule from "./metersphere-case-workflow.ts";
-import * as routeModule from "./routes.ts";
+import { createQaseyApplication } from "./applications/qasey/application.ts";
+import * as taskWorkflowModule from "./workflows/qasey-task-workflow.ts";
+import * as e2eModule from "./workflows/e2e-workflow.ts";
+import * as scorerModule from "./scorers/eval-scorers.ts";
+import * as caseWorkflowModule from "./workflows/metersphere-case-workflow.ts";
+import * as routeModule from "./applications/qasey/routes.ts";
 import { createSharedMastraConfig } from "../runtime/create-runtime.ts";
 import { createAuthorizationMiddleware, isMastraStudioRequest, resolveRequestUser } from "../platform/auth/authorization-middleware.ts";
 import { InMemoryAuditLog, PostgresAuditLog } from "../platform/auth/audit-log.ts";
@@ -35,6 +33,7 @@ import { applyStudioNetworkPolicy } from "../platform/http/studio-network-policy
 import { seedServiceRolePermissions } from "../platform/auth/service-role-permissions.ts";
 import { runtimeReadiness } from "../platform/storage/readiness.ts";
 import { resolveDevelopmentPrincipal } from "../platform/auth/development-principal.ts";
+import { GLOBAL_SKILLS_PATH } from "./skill-paths.ts";
 
 const googleOidc = new GoogleOidcService({
   ...(config.GOOGLE_CLIENT_ID ? { clientId: config.GOOGLE_CLIENT_ID } : {}),
@@ -99,9 +98,7 @@ await seedServiceRolePermissions(permissionService, config.JIRA_BASE_URL);
 runtimeReadiness.markInitializationComplete();
 const bootstrapAdmins = new Set((process.env.PLATFORM_BOOTSTRAP_ADMIN_EMAILS ?? "")
   .split(",").map(value => value.trim().toLowerCase()).filter(Boolean));
-const qaseyApplication = await createQaseyApplication({
-  agentModule: qaseyAgentModule,
-  intentModule,
+const qaseyApplication = createQaseyApplication({
   taskWorkflowModule,
   e2eModule,
   scorerModule,
@@ -125,6 +122,7 @@ const workspace = lifecycle.own(createScopedWorkspace({
   root: config.QASEY_WORKSPACE_DIR,
   production: config.NODE_ENV === "production",
   enableCodeExecution: config.QASEY_ENABLE_LOCAL_CODE_MODE || config.QASEY_SANDBOX_ENABLED,
+  skills: [GLOBAL_SKILLS_PATH],
   ...(remoteSandboxPool ? {
     remoteFilesystem: scope => remoteSandboxPool.filesystem(scope),
     remoteSandbox: scope => remoteSandboxPool.sandbox(scope),

@@ -4,6 +4,8 @@
 
 `src/mastra/index.ts` is the official Mastra entry point and contains the only production `new Mastra(...)`. `src/runtime/create-runtime.ts` only flattens and validates Application bundles into Mastra configuration; the bundles are ownership/DI metadata, not execution primitives.
 
+Application bundles catalog both code-registered and file-discovered Agent IDs so authorization is complete before the server starts. Only code-registered Agents enter `MastraConfig.agents`; `mastra dev` and `mastra build` own the single runtime registration of file-discovered Agents.
+
 ```mermaid
 flowchart TD
   Client["Admin UI / API / Slack / Jira"] --> Auth["OAuth or signed ingress"]

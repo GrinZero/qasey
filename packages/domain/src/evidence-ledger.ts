@@ -319,20 +319,20 @@ export class EvidenceLedger {
 
   manifestText(): string {
     const entries = this.snapshot();
-    if (entries.length === 0) return "Evidence ledger: no tools have completed yet.";
+    if (entries.length === 0) return "证据账本：目前还没有工具完成。";
     const lines = entries.slice(-30).map(entry => {
       if (entry.status === "acquired") {
-        return `- acquired ${entry.sourceKey} -> ${entry.artifactId} (${entry.totalChars ?? 0} chars)`;
+        return `- 已获取 ${entry.sourceKey} -> ${entry.artifactId}（${entry.totalChars ?? 0} 个字符）`;
       }
       if (entry.status === "failed") {
-        return `- failed ${entry.sourceKey} (${entry.errorCode}, retryable=${String(entry.retryable)}, attempts=${entry.attempts})`;
+        return `- 失败 ${entry.sourceKey}（${entry.errorCode}，可重试=${String(entry.retryable)}，尝试次数=${entry.attempts}）`;
       }
-      return `- in-flight ${entry.sourceKey}`;
+      return `- 进行中 ${entry.sourceKey}`;
     });
     return [
-      "Evidence ledger (authoritative for this run):",
+      "证据账本（本轮运行的权威清单）：",
       ...lines,
-      "Do not fetch acquired sources again. Use qasey_read_evidence_artifact with the artifact id for a bounded missing slice.",
+      "不要再次获取已经 acquired 的来源。若缺少细节，使用 qasey_read_evidence_artifact 搭配 artifact id 读取有限片段。",
     ].join("\n");
   }
 
@@ -546,7 +546,7 @@ function artifactReceipt(
     totalChars: artifact.serialized.length,
     ...(preview ? { preview } : {}),
     truncated: artifact.serialized.length > previewChars,
-    instruction: "Do not call the source tool again. Use qasey_read_evidence_artifact with this artifactId and a bounded offset if more detail is required.",
+    instruction: "不要再次调用来源工具。若需要更多细节，使用 qasey_read_evidence_artifact 搭配此 artifactId 和有限 offset 读取。",
   };
 }
 

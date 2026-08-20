@@ -329,6 +329,6 @@ workflow 已有 63 个节点但没有 node groups。`Search for messages in Slac
 - Evidence Ledger：[`packages/domain/src/evidence-ledger.ts`](../packages/domain/src/evidence-ledger.ts)
 - Prompt v9 与意图合同：[`packages/domain/src/prompt.ts`](../packages/domain/src/prompt.ts)
 - Prompt 组装测试：[`tests/domain/prompt.test.ts`](../tests/domain/prompt.test.ts)
-- Agent 完成判定：[`src/mastra/service.ts`](../src/mastra/service.ts)
-- E2E lifecycle：[`src/mastra/e2e-workflow.ts`](../src/mastra/e2e-workflow.ts)
+- Agent 完成判定：[`src/mastra/applications/qasey/service.ts`](../src/mastra/applications/qasey/service.ts)
+- E2E lifecycle：[`src/mastra/workflows/e2e-workflow.ts`](../src/mastra/workflows/e2e-workflow.ts)
 - n8n baseline manifest：[`n8n/fixtures/qasey-live-v6.manifest.json`](../n8n/fixtures/qasey-live-v6.manifest.json)

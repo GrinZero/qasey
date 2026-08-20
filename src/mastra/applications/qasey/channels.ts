@@ -1,13 +1,13 @@
 import { createSlackAdapter } from "@chat-adapter/slack";
 import type { ChannelConfig, ChannelHandler } from "@mastra/core/channels";
 import { EntityType, SpanType } from "@mastra/core/observability";
-import { resolveSlackChannelMode } from "../../../packages/adapters/src/config.ts";
-import { conversationScope } from "../../platform/context/conversation-scope.ts";
-import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../../platform/context/schema.ts";
-import { config } from "../../mastra/runtime.ts";
-import { traceQaseyOperation } from "../../mastra/observability.ts";
-import { runQaseyTaskWorkflow } from "../../mastra/qasey-task-workflow.ts";
-import { logError, logInfo } from "../../../packages/adapters/src/index.ts";
+import { resolveSlackChannelMode } from "../../../../packages/adapters/src/config.ts";
+import { conversationScope } from "../../../platform/context/conversation-scope.ts";
+import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../../../platform/context/schema.ts";
+import { config } from "../../runtime.ts";
+import { traceQaseyOperation } from "./observability.ts";
+import { runQaseyTaskWorkflow } from "../../workflows/qasey-task-workflow.ts";
+import { logError, logInfo } from "../../../../packages/adapters/src/index.ts";
 import { slackCaseCompletionCards } from "./slack-case-delivery.ts";
 import {
   markSlackRequestFinished,

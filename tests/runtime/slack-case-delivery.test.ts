@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { EvidenceCompletionReceipt } from "../../packages/domain/src/index.ts";
-import { slackCaseCompletionCards } from "../../src/agent-apps/qasey/slack-case-delivery.ts";
+import { slackCaseCompletionCards } from "../../src/mastra/applications/qasey/slack-case-delivery.ts";
 
 describe("Slack MeterSphere case delivery", () => {
   it("renders trusted read-back cases as a native table card", () => {

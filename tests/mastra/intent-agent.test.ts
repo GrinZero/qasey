@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { QaseyRequestContext } from "../../packages/contracts/src/index.ts";
-import { routeIntent } from "../../src/mastra/intent-agent.ts";
+import { routeIntent } from "../../src/mastra/applications/qasey/intent-routing.ts";
 
 const context: QaseyRequestContext = {
   requestId: "request-route",

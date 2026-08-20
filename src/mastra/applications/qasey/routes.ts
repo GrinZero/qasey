@@ -3,22 +3,22 @@ import { readFile, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { CreateE2ERunSchema, QaVerdictInputSchema } from "../../packages/contracts/src/index.ts";
-import { normalizeJiraWebhook } from "../../packages/domain/src/index.ts";
-import { config, channelDeliveryInbox, jiraClient, runRepository, sandboxPoolClient } from "./runtime.ts";
-import { cancelE2ERun, createAndStartE2ERun, rerunE2E, resumeE2EWithVerdict } from "./e2e-workflow.ts";
-import { ownerScopeFromRequestContext } from "../platform/context/owner-scope.ts";
-import type { OwnedApiRoute, PrimitiveAccessPolicy } from "../runtime/application.ts";
-import { conversationScope } from "../platform/context/conversation-scope.ts";
-import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../platform/context/schema.ts";
-import { OAuthPrincipalSchema } from "../platform/auth/oauth-principal.ts";
-import type { PlatformGoogleUser } from "../platform/auth/google-oidc.ts";
-import { runQaseyTaskWorkflow } from "./qasey-task-workflow.ts";
-import { runtimeReadiness } from "../platform/storage/readiness.ts";
+import { CreateE2ERunSchema, QaVerdictInputSchema } from "../../../../packages/contracts/src/index.ts";
+import { normalizeJiraWebhook } from "../../../../packages/domain/src/index.ts";
+import { config, channelDeliveryInbox, jiraClient, runRepository, sandboxPoolClient } from "../../runtime.ts";
+import { cancelE2ERun, createAndStartE2ERun, rerunE2E, resumeE2EWithVerdict } from "../../workflows/e2e-workflow.ts";
+import { ownerScopeFromRequestContext } from "../../../platform/context/owner-scope.ts";
+import type { OwnedApiRoute, PrimitiveAccessPolicy } from "../../../runtime/application.ts";
+import { conversationScope } from "../../../platform/context/conversation-scope.ts";
+import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../../../platform/context/schema.ts";
+import { OAuthPrincipalSchema } from "../../../platform/auth/oauth-principal.ts";
+import type { PlatformGoogleUser } from "../../../platform/auth/google-oidc.ts";
+import { runQaseyTaskWorkflow } from "../../workflows/qasey-task-workflow.ts";
+import { runtimeReadiness } from "../../../platform/storage/readiness.ts";
 import {
   SandboxBrowserActionSchema, SandboxBrowserStartSchema, SandboxDesktopActionSchema,
   SandboxDesktopApplicationSchema, SandboxDesktopStartSchema, SandboxDesktopToolSchema,
-} from "../platform/workspace/sandbox-protocol.ts";
+} from "../../../platform/workspace/sandbox-protocol.ts";
 
 const QaseyTaskRequestSchema = z.object({
   prompt: z.string().trim().min(1).max(100_000),

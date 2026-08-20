@@ -25,10 +25,24 @@ describe("shared runtime architecture boundaries", () => {
   });
 
   it("keeps the Application definition import-pure", async () => {
-    const source = await readFile(join(projectRoot, "src/agent-apps/qasey/application.ts"), "utf8");
+    const source = await readFile(join(projectRoot, "src/mastra/applications/qasey/application.ts"), "utf8");
     expect(source).not.toMatch(/^import\s+(?!type).*\.\.\/\.\.\/mastra\//mu);
-    await expect(import("../../src/agent-apps/qasey/application.ts"))
+    await expect(import("../../src/mastra/applications/qasey/application.ts"))
       .resolves.toMatchObject({ createQaseyApplication: expect.any(Function) });
+  });
+
+  it("uses Mastra file discovery as the only Qasey Agent registration source", async () => {
+    const [applicationSource, runtimeSource, serviceSource, routingSource] = await Promise.all([
+      readFile(join(projectRoot, "src/mastra/applications/qasey/application.ts"), "utf8"),
+      readFile(join(projectRoot, "src/mastra/index.ts"), "utf8"),
+      readFile(join(projectRoot, "src/mastra/applications/qasey/service.ts"), "utf8"),
+      readFile(join(projectRoot, "src/mastra/applications/qasey/intent-routing.ts"), "utf8"),
+    ]);
+    expect(applicationSource).toContain('filesystemAgents: ["qasey-main", "qasey-intent-router"]');
+    expect(runtimeSource).not.toMatch(/agents\/qasey-(?:main|intent-router)\/agent/u);
+    expect(serviceSource).toContain('mastra.getAgent("qasey-main")');
+    expect(serviceSource).toContain('mastra.getAgent("qasey-intent-router")');
+    expect(routingSource).not.toMatch(/agents\/qasey-intent-router/u);
   });
 
   it("does not retain legacy execution and queue entrypoints", async () => {
@@ -44,8 +58,8 @@ describe("shared runtime architecture boundaries", () => {
 
   it("routes public Qasey tasks through the native workflow before the main agent", async () => {
     const [workflowSource, routeSource, adminApiSource] = await Promise.all([
-      readFile(join(projectRoot, "src/mastra/qasey-task-workflow.ts"), "utf8"),
-      readFile(join(projectRoot, "src/mastra/routes.ts"), "utf8"),
+      readFile(join(projectRoot, "src/mastra/workflows/qasey-task-workflow.ts"), "utf8"),
+      readFile(join(projectRoot, "src/mastra/applications/qasey/routes.ts"), "utf8"),
       readFile(join(projectRoot, "apps/admin-ui/src/api.ts"), "utf8"),
     ]);
     expect(workflowSource.indexOf('id: "classify-intent"')).toBeLessThan(workflowSource.indexOf('id: "execute-routed-qasey"'));

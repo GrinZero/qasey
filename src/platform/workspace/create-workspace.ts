@@ -1,6 +1,13 @@
 import { mkdirSync } from "node:fs";
 import { resolve, sep } from "node:path";
-import { LocalFilesystem, LocalSandbox, Workspace, type WorkspaceFilesystem, type WorkspaceSandbox } from "@mastra/core/workspace";
+import {
+  LocalFilesystem,
+  LocalSandbox,
+  Workspace,
+  type SkillsResolver,
+  type WorkspaceFilesystem,
+  type WorkspaceSandbox,
+} from "@mastra/core/workspace";
 import type { RequestContext } from "@mastra/core/request-context";
 import { PlatformRequestContextSchema } from "../context/schema.ts";
 import { SubjectSandboxCache } from "./sandbox-lifecycle.ts";
@@ -9,6 +16,7 @@ export interface ScopedWorkspaceOptions {
   root: string;
   production: boolean;
   enableCodeExecution: boolean;
+  skills?: SkillsResolver;
   remoteFilesystem?: (scope: WorkspaceScope, requestContext: RequestContext) => WorkspaceFilesystem | Promise<WorkspaceFilesystem>;
   remoteSandbox?: (scope: WorkspaceScope, requestContext: RequestContext) => WorkspaceSandbox | Promise<WorkspaceSandbox>;
 }
@@ -47,6 +55,10 @@ export function createScopedWorkspace(options: ScopedWorkspaceOptions): ManagedW
     filesystem: ({ requestContext }) => options.remoteFilesystem
       ? options.remoteFilesystem(scopeFor(requestContext), requestContext)
       : localFilesystem(root, scopeFor(requestContext)),
+    ...(options.skills ? {
+      skills: options.skills,
+      checkSkillFileMtime: !options.production,
+    } : {}),
     ...(sandbox ? {
       sandbox,
       sandboxCacheKey: ({ requestContext }: { requestContext: RequestContext }) => scopeKey(scopeFor(requestContext)),
