@@ -15,6 +15,13 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - run: sh ci/install.sh
+        env:
+          NPM_PUBLISHER_USR: ${{ vars.NPM_PUBLISHER_USR }}
+          NPM_PUBLISHER_PSW: ${{ secrets.NPM_PUBLISHER_PSW }}
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm check
+        env:
+          GITHUB_APP_ID: ''
+          GITHUB_APP_INSTALLATION_ID: ''
+          GITHUB_APP_PRIVATE_KEY: ''
