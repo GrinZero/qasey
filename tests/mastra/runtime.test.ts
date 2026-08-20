@@ -4,7 +4,7 @@ import { z } from "zod";
 import { describe, expect, it, vi } from "vitest";
 import type { IntentRoute, QaseyRequestContext } from "../../packages/contracts/src/index.ts";
 import { AgentProgressSession, EvidenceLedger } from "../../packages/domain/src/index.ts";
-import { createAgentProgressTool, getRuntimeContext, guardCaseMutationsForWorkflow, guardToolsWithEvidence, mcpCatalog, studioMcpPreviewEnabled, toolsForRequest } from "../../src/mastra/runtime.ts";
+import { buildQaseyAgentTooling, createAgentProgressTool, getRuntimeContext, guardCaseMutationsForWorkflow, guardToolsWithEvidence, mcpCatalog, partitionQaseyCodeModeTools, studioMcpPreviewEnabled, toolsForRequest } from "../../src/mastra/runtime.ts";
 
 describe("Qasey runtime context", () => {
   it("keeps missing context strict for production callers", () => {
@@ -100,6 +100,94 @@ describe("Qasey runtime context", () => {
     await expect(guardedExecute({ value: "one" }, {})).resolves.toEqual({ value: "one" });
     await expect(guardedExecute({ value: "one" }, {})).resolves.toMatchObject({ status: "already_acquired" });
     expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("places only read tools behind Code Mode and keeps side effects direct", async () => {
+    const readTool = createTool({
+      id: "github_get_file",
+      description: "Read a repository file",
+      inputSchema: z.object({ path: z.string() }),
+      outputSchema: z.object({ path: z.string() }),
+      execute: async ({ path }) => ({ path }),
+    });
+    const writeTool = createTool({
+      id: "metersphere_ms_bulk_upsert_test_cases",
+      description: "Write test cases",
+      inputSchema: z.object({ items: z.array(z.string()) }),
+      execute: async ({ items }) => ({ count: items.length }),
+    });
+    const progressTool = createTool({
+      id: "qasey_report_progress",
+      description: "Report progress",
+      inputSchema: z.object({ title: z.string() }),
+      execute: async () => ({ accepted: true }),
+    });
+
+    const partitioned = partitionQaseyCodeModeTools({
+      github_get_file: readTool,
+      metersphere_ms_bulk_upsert_test_cases: writeTool,
+      qasey_report_progress: progressTool,
+    });
+    expect(Object.keys(partitioned.codeModeTools)).toEqual(["github_get_file"]);
+    expect(Object.keys(partitioned.directTools)).toEqual([
+      "metersphere_ms_bulk_upsert_test_cases",
+      "qasey_report_progress",
+    ]);
+
+    const tooling = await buildQaseyAgentTooling({
+      github_get_file: readTool,
+      metersphere_ms_bulk_upsert_test_cases: writeTool,
+      qasey_report_progress: progressTool,
+    });
+    expect(tooling.codeModeToolNames).toEqual(["github_get_file"]);
+    expect(Object.keys(tooling.tools)).toEqual([
+      "metersphere_ms_bulk_upsert_test_cases",
+      "qasey_report_progress",
+      "execute_typescript",
+    ]);
+    expect(tooling.codeModeInstructions).toContain("external_github_get_file");
+    expect(tooling.codeModeInstructions).not.toContain("external_metersphere_ms_bulk_upsert_test_cases");
+    expect(tooling.codeModeInstructions).not.toContain("external_qasey_report_progress");
+  });
+
+  it("runs parallel read tools through the isolated QuickJS Code Mode transport", async () => {
+    const seen: string[] = [];
+    const requestContext = new RequestContext();
+    const tooling = await buildQaseyAgentTooling({
+      github_get_file: createTool({
+        id: "github_get_file",
+        description: "Read a repository file",
+        inputSchema: z.object({ path: z.string() }),
+        outputSchema: z.object({ path: z.string(), contextForwarded: z.boolean() }),
+        execute: async ({ path }, context) => {
+          seen.push(path);
+          return { path, contextForwarded: context.requestContext === requestContext };
+        },
+      }),
+    });
+    const execute = (tooling.tools.execute_typescript as {
+      execute: (input: unknown, context: unknown) => Promise<unknown>;
+    }).execute;
+
+    await expect(execute({
+      code: `const paths = ["a.ts", "b.ts"];
+const files = await Promise.all(paths.map(path => external_github_get_file({ path })));
+return files;`,
+    }, {
+      requestContext,
+      observe: {
+        span: async (_name: string, operation: () => Promise<unknown>) => operation(),
+        log: () => undefined,
+      },
+    })).resolves.toEqual({
+      success: true,
+      result: [
+        { path: "a.ts", contextForwarded: true },
+        { path: "b.ts", contextForwarded: true },
+      ],
+      logs: [],
+    });
+    expect(seen.sort()).toEqual(["a.ts", "b.ts"]);
   });
 
   it("lets the agent dry-run a CasePlan but reserves real case mutations for the workflow", async () => {

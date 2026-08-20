@@ -2,7 +2,7 @@ import type { IntentRoute, QaseyRequestContext } from "../../contracts/src/index
 import { agentProgressPolicy } from "./agent-progress.ts";
 
 export interface PromptBuildResult {
-  version: 9;
+  version: 10;
   modules: string[];
   text: string;
 }
@@ -250,7 +250,6 @@ export function buildSystemPrompt(context: QaseyRequestContext, route: IntentRou
 
   modules.push(
     ["evidence:ledger", "每轮都会收到本次运行的 Evidence Ledger。它是已获取资料的权威清单：不得重新调用已 acquired 的来源；上下文压缩后需要原始细节时，使用 qasey_read_evidence_artifact 按 artifactId 和 offset 小段读取。连续调用工具却没有新增证据会被运行时熔断。"],
-    ["tools:code_mode", "复杂多工具查询使用 Code Mode 做分页、过滤、去重和汇总；不确定工具签名时先发现，不得猜测。具体工具的选择、参数和限制以工具描述为准。"],
   );
 
   if (["qa_quick_query", "qa_review", "case_create_full", "case_maintain_fast"].includes(route.intent)) {
@@ -273,5 +272,5 @@ export function buildSystemPrompt(context: QaseyRequestContext, route: IntentRou
 
   modules.push([`intent:${route.intent}`, renderIntentPrompt(route.intent, intentPromptSpecs[route.intent])]);
 
-  return { version: 9, modules: modules.map(([key]) => key), text: modules.map(([, text]) => text).join("\n\n") };
+  return { version: 10, modules: modules.map(([key]) => key), text: modules.map(([, text]) => text).join("\n\n") };
 }

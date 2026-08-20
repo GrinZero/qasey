@@ -275,6 +275,9 @@ export const mastra = new Mastra({
       "@datadog/native-appsec",
       "@datadog/native-iast-taint-tracking",
       "@datadog/pprof",
+      // QuickJS Code Mode erases model-authored TypeScript with this pure-JS
+      // package. Mastra's Worker bundler cannot inline it reliably.
+      "ts-blank-space",
     ],
   },
 });

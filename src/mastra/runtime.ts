@@ -3,8 +3,9 @@ import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DuckDBStore } from "@mastra/duckdb";
 import { FilesystemStore, MastraCompositeStore } from "@mastra/core/storage";
-import { createTool } from "@mastra/core/tools";
+import { createCodeMode, createTool } from "@mastra/core/tools";
 import type { RequestContext } from "@mastra/core/request-context";
+import { QuickJsCodeModeTransport } from "@mastra/quickjs";
 import { ObservabilityStoragePostgresVNext, PostgresStore } from "@mastra/pg";
 import { z } from "zod";
 import { AgentProgressInputSchema, CreateE2ERunSchema, IntentRouteSchema, QaseyRequestContextSchema } from "../../packages/contracts/src/index.ts";
@@ -160,6 +161,19 @@ export interface QaseyRequestContextMap {
   "case-operation-phase"?: "planning" | "execution";
   native?: boolean;
 }
+
+export interface QaseyAgentTooling {
+  /** Tools visible directly to the model. Read tools move behind Code Mode. */
+  tools: ToolsInput;
+  /** Generated declarations for the exact read-tool allow-list in `tools`. */
+  codeModeInstructions?: string;
+  codeModeToolNames: string[];
+}
+
+const qaseyToolingByRequest = new WeakMap<object, Promise<QaseyAgentTooling>>();
+const quickJsCodeModeTransport = new QuickJsCodeModeTransport({
+  memoryLimitMb: config.QASEY_CODE_MODE_MEMORY_LIMIT_MB,
+});
 
 const studioPreviewRuntime: QaseyRequestContextMap = {
   "qasey-context": {
@@ -351,6 +365,68 @@ export async function toolsForRequest(requestContext?: RequestContext<any>) {
     }),
   } : {};
   return { ...guardedUtilityTools, ...progressTool, ...guardedReadTools, ...guardedExternal, ...guardedExecutionTools, ...evidenceReader };
+}
+
+/**
+ * Resolve one request-scoped tool bundle so the Agent receives a Code Mode tool
+ * and the matching generated declarations from the same allow-list. Only
+ * explicitly read-only capabilities are composable; side effects stay visible
+ * as ordinary tools so their workflow/approval boundaries remain first-class.
+ */
+export function resolveQaseyAgentTooling(requestContext?: RequestContext<any>): Promise<QaseyAgentTooling> {
+  if (!requestContext) return buildQaseyAgentTooling(toolsForRequest(requestContext));
+  const cached = qaseyToolingByRequest.get(requestContext);
+  if (cached) return cached;
+  const pending = buildQaseyAgentTooling(toolsForRequest(requestContext));
+  qaseyToolingByRequest.set(requestContext, pending);
+  pending.catch(() => qaseyToolingByRequest.delete(requestContext));
+  return pending;
+}
+
+export async function buildQaseyAgentTooling(toolInput: ToolsInput | Promise<ToolsInput>): Promise<QaseyAgentTooling> {
+  const allTools = await toolInput;
+  if (!config.QASEY_ENABLE_CODE_MODE) {
+    return { tools: allTools, codeModeToolNames: [] };
+  }
+  const { codeModeTools, directTools } = partitionQaseyCodeModeTools(allTools);
+  const codeModeToolNames = Object.keys(codeModeTools).sort();
+  if (codeModeToolNames.length === 0) {
+    return { tools: directTools, codeModeToolNames };
+  }
+  const codeMode = createCodeMode({
+    id: "execute_typescript",
+    tools: codeModeTools,
+    timeout: config.QASEY_CODE_MODE_TIMEOUT_MS,
+  }, quickJsCodeModeTransport);
+  return {
+    tools: { ...directTools, execute_typescript: codeMode.tool },
+    codeModeInstructions: `${codeMode.instructions}\n\nQasey-specific rules:\n- Code Mode contains read-only tools. Side-effecting tools, approvals, progress reporting, and durable workflows remain separate direct tools.\n- Use Code Mode when multiple reads can be parallelized, paginated, filtered, deduplicated, joined, or aggregated. Return a compact result that preserves the source identifiers needed as evidence.\n- Do not repeat an external call whose result says it was already acquired; use the returned artifact receipt or the dedicated evidence reader instead.`,
+    codeModeToolNames,
+  };
+}
+
+export function partitionQaseyCodeModeTools(tools: ToolsInput): {
+  codeModeTools: ToolsInput;
+  directTools: ToolsInput;
+} {
+  const entries = Object.entries(tools);
+  return {
+    codeModeTools: Object.fromEntries(entries.filter(([toolName]) => isQaseyCodeModeReadTool(toolName))),
+    directTools: Object.fromEntries(entries.filter(([toolName]) => !isQaseyCodeModeReadTool(toolName))),
+  };
+}
+
+function isQaseyCodeModeReadTool(toolName: string): boolean {
+  const normalized = toolName.toLowerCase();
+  return normalized === "getcurrenttime"
+    || normalized === "qasey_read_evidence_artifact"
+    || normalized === "e2egetrun"
+    || /^(?:slack_(?:search|get)|github_(?:get|list|search)|jira_(?:get|search))/.test(normalized)
+    || /^metersphere_ms_(?:get|list)/.test(normalized)
+    || /^figma_(?:get|list|export)/.test(normalized)
+    || /^qaexperience_(?:qa_context_get|qa_experience_(?:list|read))/.test(normalized)
+    || normalized === "rag_answer"
+    || /^lark_doc_(?:search|read)/.test(normalized);
 }
 
 function nativeChannel(value: unknown): QaseyRequestContext["channel"] {

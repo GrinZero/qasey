@@ -26,3 +26,5 @@ minimumReleaseAgeExclude:
   - '@trycua/cua-driver-win32-arm64-msvc@0.21.0'
   - '@trycua/cua-driver-win32-x64-msvc@0.21.0'
   - '@trycua/cua-driver@0.21.0'
+patchedDependencies:
+  '@mastra/core@1.59.0': patches/@mastra__core@1.59.0.patch

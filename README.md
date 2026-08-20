@@ -39,7 +39,8 @@ pnpm dev
 - `GITHUB_APP_ID`、`GITHUB_APP_INSTALLATION_ID`、`GITHUB_APP_PRIVATE_KEY`：GitHub App installation authentication
 - `QASEY_MCP_CONFIG_FILE`、`QASEY_MCP_OAUTH_DIR`
 - `MASTRA_ENCRYPTION_KEY`：仅在生产启用 OAuth MCP token 持久化时需要
-- `QASEY_ENABLE_LOCAL_CODE_MODE`：仅开发 LocalSandbox；生产未配置 remote sandbox 时 fail closed
+- `QASEY_ENABLE_CODE_MODE`：启用基于 QuickJS 隔离运行时的只读工具编排（默认开启）；可用 `QASEY_CODE_MODE_TIMEOUT_MS` 和 `QASEY_CODE_MODE_MEMORY_LIMIT_MB` 限制单次执行
+- `QASEY_ENABLE_LOCAL_CODE_MODE`：仅为开发 Workspace 开启 LocalSandbox；Code Mode 自身不依赖宿主机或远程 sandbox
 - `QASEY_ENABLE_STUDIO_EDITOR`、`QASEY_ENABLE_STUDIO_MCP_PREVIEW`：生产默认关闭
 - `QASEY_ENABLE_DATADOG`、`DD_LLMOBS_ML_APP`
 

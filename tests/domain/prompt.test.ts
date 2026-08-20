@@ -62,7 +62,7 @@ describe("intent-aware system prompt", () => {
     "builds the %s objective, protocol, completion condition, and output contract",
     (intent, expectedText) => {
       const result = buildSystemPrompt(context(), route(intent));
-      expect(result.version).toBe(9);
+      expect(result.version).toBe(10);
       expect(result.modules).toContain(`intent:${intent}`);
       expect(result.text).toContain(`## 当前意图：${intent}`);
       expect(result.text).toContain("### 目标");

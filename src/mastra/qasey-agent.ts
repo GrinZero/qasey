@@ -3,7 +3,7 @@ import { TokenLimiter } from "@mastra/core/processors";
 import { Memory } from "@mastra/memory";
 import { buildSystemPrompt, tryCasePlanSummary } from "../../packages/domain/src/index.ts";
 import { logError, logInfo } from "../../packages/adapters/src/index.ts";
-import { config, getRuntimeContext, mastraStorage, toolsForRequest } from "./runtime.ts";
+import { config, getRuntimeContext, mastraStorage, resolveQaseyAgentTooling } from "./runtime.ts";
 import { createResponsesModel, qaseyResponsesModel } from "./models.ts";
 import { PlatformRequestContextSchema } from "../platform/context/schema.ts";
 import { qaseyChannels } from "../agent-apps/qasey/channels.ts";
@@ -119,10 +119,12 @@ export const qaseyAgent = new Agent({
   ...(qaseyChannels ? { channels: qaseyChannels } : {}),
   instructions: async ({ requestContext }) => {
     const runtime = getRuntimeContext(requestContext, { allowNativeContext: true, allowStudioPreview: config.NODE_ENV === "development" });
-    if (runtime.native) return nativeQaseyInstructions;
-    const prompt = buildSystemPrompt(runtime["qasey-context"], runtime["intent-route"]).text;
-    const casePlan = tryCasePlanSummary(requestContext?.get("case-plan"));
-    return casePlan ? `${prompt}\n\n${casePlan}` : prompt;
+    const baseInstructions = runtime.native
+      ? nativeQaseyInstructions
+      : buildSystemPrompt(runtime["qasey-context"], runtime["intent-route"]).text;
+    const casePlan = runtime.native ? undefined : tryCasePlanSummary(requestContext?.get("case-plan"));
+    const tooling = await resolveQaseyAgentTooling(requestContext);
+    return [baseInstructions, casePlan, tooling.codeModeInstructions].filter(Boolean).join("\n\n");
   },
   ...(qaseyMemory ? { memory: qaseyMemory } : {}),
   inputProcessors: [new TokenLimiter({ limit: config.QASEY_MEMORY_INPUT_TOKEN_LIMIT })],
@@ -133,13 +135,15 @@ export const qaseyAgent = new Agent({
       depth: route?.depth,
     });
     try {
-      const tools = await toolsForRequest(requestContext);
+      const tooling = await resolveQaseyAgentTooling(requestContext);
+      const tools = tooling.tools;
       span?.end({
         metadata: {
           intent: route?.intent,
           depth: route?.depth,
           toolCount: Object.keys(tools).length,
           toolNames: Object.keys(tools).sort(),
+          codeModeToolNames: tooling.codeModeToolNames,
         },
       });
       return tools;
