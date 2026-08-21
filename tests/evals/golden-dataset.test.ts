@@ -20,6 +20,10 @@ describe("golden QA workflow dataset", () => {
     expect(datadogRecords).toHaveLength(32);
     expect(new Set(mastraItems.map((item: { externalId: string }) => item.externalId)).size).toBe(32);
     expect(manifest.rawSourceRequired).toBe(false);
+    for (const item of mastraItems) {
+      expect(item.requestContext).toHaveProperty("qasey-context");
+      expect(item.requestContext).not.toHaveProperty("intent-route");
+    }
   });
 
   it("keeps reads live and mocks every classified side-effect tool", () => {

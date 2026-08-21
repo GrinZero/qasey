@@ -10,8 +10,8 @@ import type { CodeModeTransport, ToolObserve } from "@mastra/core/tools";
 import { QuickJsCodeModeTransport } from "@mastra/quickjs";
 import { ObservabilityStoragePostgresVNext, PostgresStore } from "@mastra/pg";
 import { z } from "zod";
-import { AgentProgressInputSchema, CreateE2ERunSchema, IntentRouteSchema, QaseyRequestContextSchema } from "../../packages/contracts/src/index.ts";
-import type { E2ERun, IntentRoute, QaseyRequestContext } from "../../packages/contracts/src/index.ts";
+import { AgentProgressInputSchema, CreateE2ERunSchema, QaseyRequestContextSchema } from "../../packages/contracts/src/index.ts";
+import type { E2ERun, QaseyRequestContext } from "../../packages/contracts/src/index.ts";
 import { AgentProgressSession, EvidenceLedger } from "../../packages/domain/src/index.ts";
 import type { ToolsInput } from "@mastra/core/agent";
 import {
@@ -156,7 +156,6 @@ export async function closeQaseyInfrastructure(): Promise<void> {
 
 export interface QaseyRequestContextMap {
   "qasey-context": QaseyRequestContext;
-  "intent-route": IntentRoute;
   "case-plan"?: import("../../packages/domain/src/index.ts").MeterSphereCasePlan;
   "evidence-ledger"?: EvidenceLedger;
   "agent-progress-session"?: AgentProgressSession;
@@ -247,16 +246,6 @@ const studioPreviewRuntime: QaseyRequestContextMap = {
     source: {},
     attachments: [],
   },
-  "intent-route": {
-    version: 2,
-    intent: "unknown",
-    relation: "new",
-    writeTarget: "none",
-    depth: "standard",
-    confidence: 0,
-    reason: "Mastra Studio did not provide Qasey request context; using read-only preview mode.",
-    routerStatus: "fallback",
-  },
 };
 
 export function getRuntimeContext(
@@ -264,8 +253,7 @@ export function getRuntimeContext(
   options: { allowStudioPreview?: boolean; allowNativeContext?: boolean } = {},
 ): QaseyRequestContextMap {
   const context = QaseyRequestContextSchema.safeParse(requestContext?.get("qasey-context"));
-  const route = IntentRouteSchema.safeParse(requestContext?.get("intent-route"));
-  if ((!context.success || !route.success) && options.allowNativeContext) {
+  if (!context.success && options.allowNativeContext) {
     const identity = requestContext?.get("identity");
     const userId = identity && typeof identity === "object" && "userId" in identity
       ? String((identity as { userId: unknown }).userId) : "";
@@ -281,13 +269,12 @@ export function getRuntimeContext(
         source: {},
         attachments: [],
       },
-      "intent-route": studioPreviewRuntime["intent-route"],
       native: true,
     };
   }
-  if ((!context.success || !route.success) && options.allowStudioPreview) return studioPreviewRuntime;
-  if (!context.success || !route.success) throw new Error("Qasey request context has not been initialized");
-  return { "qasey-context": context.data, "intent-route": route.data };
+  if (!context.success && options.allowStudioPreview) return studioPreviewRuntime;
+  if (!context.success) throw new Error("Qasey request context has not been initialized");
+  return { "qasey-context": context.data };
 }
 
 const getCurrentTime = createTool({
@@ -316,8 +303,8 @@ export function createAgentProgressTool(progressSession: AgentProgressSession) {
   });
 }
 
-function e2eTools(route: IntentRoute) {
-  if (route.intent === "e2e_generate") return {
+function e2eTools() {
+  return {
     e2eCreateRun: createTool({
       id: "e2e_create_run",
       description: "创建一个隔离的 Playwright（Web）或 Maestro（App）代码生成与验证运行。",
@@ -335,8 +322,6 @@ function e2eTools(route: IntentRoute) {
         return created;
       },
     }),
-  };
-  if (route.intent === "e2e_status") return {
     e2eGetRun: createTool({
       id: "e2e_get_run", description: "获取 E2E 运行状态和证据引用。只读。",
       inputSchema: z.object({ runId: z.string().min(1) }),
@@ -346,8 +331,6 @@ function e2eTools(route: IntentRoute) {
         return { run: await runRepository.get(owner, runId), events: await runRepository.events(owner, runId) };
       },
     }),
-  };
-  if (route.intent === "e2e_rerun") return {
     e2eRerun: createTool({
       id: "e2e_rerun", description: "基于已有 E2E 运行创建新的执行，不修改旧证据。",
       inputSchema: z.object({ runId: z.string().min(1) }),
@@ -365,21 +348,20 @@ function e2eTools(route: IntentRoute) {
       },
     }),
   };
-  return {};
 }
 
 export async function toolsForRequest(requestContext?: RequestContext<any>) {
   const contextProvided = QaseyRequestContextSchema.safeParse(
     requestContext?.get("qasey-context"),
-  ).success && IntentRouteSchema.safeParse(requestContext?.get("intent-route")).success;
+  ).success;
   const runtimeContext = getRuntimeContext(requestContext, {
     allowNativeContext: true,
     allowStudioPreview: config.NODE_ENV === "development",
   });
-  const { "qasey-context": context, "intent-route": route } = runtimeContext;
+  const { "qasey-context": context } = runtimeContext;
   // Agent detail/chat requests from Studio do not carry Qasey's ingress
-  // context. Development Studio may discover MCP tools, but the fallback route
-  // is deliberately read-only so write-capable MCP tools remain filtered out.
+  // context. Development Studio may discover MCP tools, but previews are
+  // deliberately read-only so write-capable MCP tools remain filtered out.
   if (!contextProvided) {
     const subject = mcpSubject(requestContext);
     const studioRequest = requestContext?.get("ingressSource") === "mastra-studio";
@@ -387,16 +369,19 @@ export async function toolsForRequest(requestContext?: RequestContext<any>) {
       ? config.NODE_ENV === "development" && studioMcpPreviewEnabled
       : runtimeContext.native;
     const external = discoverExternal
-      ? await mcpCatalog.toolsFor(route, context.channel, subject)
+      ? await mcpCatalog.toolsForDiscovery(context.channel, subject, {
+          readOnly: true,
+        })
       : {};
     return { getCurrentTime, ...readConnectorCatalog.tools(), ...external };
   }
-  const effectiveRoute = config.QASEY_SHADOW_MODE && route.writeTarget !== "none"
-    ? { ...route, intent: "qa_review" as const, writeTarget: "none" as const }
-    : route;
-  const external = await mcpCatalog.toolsFor(effectiveRoute, context.channel, mcpSubject(requestContext));
+  const external = await mcpCatalog.toolsForDiscovery(
+    context.channel,
+    mcpSubject(requestContext),
+    { readOnly: config.QASEY_SHADOW_MODE },
+  );
   const readTools = readConnectorCatalog.tools();
-  const executionTools = config.QASEY_SHADOW_MODE ? {} : e2eTools(route);
+  const executionTools = config.QASEY_SHADOW_MODE ? {} : e2eTools();
   const ledger = requestContext?.get("evidence-ledger") instanceof EvidenceLedger
     ? requestContext.get("evidence-ledger") as EvidenceLedger
     : undefined;
@@ -406,10 +391,9 @@ export async function toolsForRequest(requestContext?: RequestContext<any>) {
   const progressTool = progressSession?.enabled ? {
     qasey_report_progress: createAgentProgressTool(progressSession),
   } : {};
-  const phase = requestContext?.get("case-operation-phase");
-  const ownershipScopedExternal = phase === "planning"
-    ? guardCaseMutationsForWorkflow(external)
-    : external;
+  // qasey-main may discover case mutation tools for dry-run planning, but the
+  // deterministic MeterSphere workflow is the only owner of real writes.
+  const ownershipScopedExternal = guardCaseMutationsForWorkflow(external);
   const guardedExternal = guardToolsWithEvidence(ownershipScopedExternal, ledger);
   const guardedReadTools = guardToolsWithEvidence(readTools, ledger);
   const guardedExecutionTools = guardToolsWithEvidence(executionTools, ledger);

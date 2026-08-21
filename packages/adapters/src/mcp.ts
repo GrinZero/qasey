@@ -3,8 +3,8 @@ import { resolve } from "node:path";
 import { MCPClient, MCPOAuthClientProvider } from "@mastra/mcp";
 import type { MastraMCPServerDefinition, OAuthStorage } from "@mastra/mcp";
 import type { ToolsInput } from "@mastra/core/agent";
-import type { IntentRoute, QaseyChannel } from "../../contracts/src/index.ts";
-import { authorizeToolAccess, TOOL_POLICIES } from "../../domain/src/index.ts";
+import type { QaseyChannel } from "../../contracts/src/index.ts";
+import { authorizeDiscoveredToolAccess, TOOL_POLICIES } from "../../domain/src/index.ts";
 import type { QaseyConfig } from "./config.ts";
 import { logError, logInfo } from "./logging.ts";
 import { loadMcpServerConfigs, type McpServerConfig, type McpServerConfigs, type McpServerName } from "./mcp-config.ts";
@@ -317,7 +317,34 @@ export class QaseyMcpCatalog {
     this.toolDiscovery.delete(client);
   }
 
-  async toolsFor(route: IntentRoute, channel: QaseyChannel, subject?: McpCredentialSubject): Promise<ToolsInput> {
+  /**
+   * Caller-bound catalog for qasey-main Tool Discovery. Semantic intent does
+   * not prune this catalog. Real case mutation is still blocked by the Agent
+   * wrapper and owned by the deterministic MeterSphere workflow.
+   */
+  async toolsForDiscovery(
+    channel: QaseyChannel,
+    subject?: McpCredentialSubject,
+    options: { readOnly?: boolean } = {},
+  ): Promise<ToolsInput> {
+    const tools = await this.discoveredTools(subject);
+    return this.selectTools(tools, channel, {
+      canWriteCases: !options.readOnly,
+      canWriteExperience: !options.readOnly && channel === "slack",
+      ...(options.readOnly === undefined ? {} : { readOnly: options.readOnly }),
+    });
+  }
+
+  /** Write-capable tools are exposed only inside the owned case Workflow. */
+  async toolsForCaseWorkflow(channel: QaseyChannel, subject?: McpCredentialSubject): Promise<ToolsInput> {
+    const tools = await this.discoveredTools(subject);
+    return this.selectTools(tools, channel, {
+      canWriteCases: true,
+      canWriteExperience: false,
+    });
+  }
+
+  private async discoveredTools(subject?: McpCredentialSubject): Promise<ToolsInput> {
     const clients: MCPClient[] = [];
     const shared = this.getSharedClient();
     if (shared) clients.push(shared);
@@ -328,18 +355,29 @@ export class QaseyMcpCatalog {
     for (const result of discovered) for (const [server, message] of Object.entries(result.errors)) {
       logError("mcp.tools.discovery_failed", new Error(message), { server, subjectBound: Boolean(subject) });
     }
-    const canWriteCases = route.intent === "case_create_full" || route.intent === "case_maintain_fast";
-    const canWriteExperience = route.intent === "experience_write" && channel === "slack";
+    return tools;
+  }
+
+  private selectTools(
+    tools: ToolsInput,
+    channel: QaseyChannel,
+    access: {
+      canWriteCases: boolean;
+      canWriteExperience: boolean;
+      readOnly?: boolean;
+    },
+  ): ToolsInput {
     const selected = Object.entries(tools).filter(([qualified]) => {
       const [server = "", ...parts] = qualified.split("_");
       const tool = parts.join("_");
       const allowlist = allowedTools[server as keyof typeof allowedTools];
       if (!allowlist?.has(tool as never)) return false;
-      if (server === "metersphere" && /create|edit|upsert|delete/.test(tool)) return canWriteCases && !tool.includes("delete");
-      if (server === "qaExperience" && tool === "qa_experience_upsert") return canWriteExperience;
+      if (server === "metersphere" && /create|edit|upsert|delete/.test(tool)) return access.canWriteCases && !tool.includes("delete");
+      if (server === "qaExperience" && tool === "qa_experience_upsert") return access.canWriteExperience;
       return true;
     });
-    return Object.fromEntries(selected.map(([qualified, tool]) => {
+    const output: ToolsInput = {};
+    for (const [qualified, tool] of selected) {
       const [server = "", ...parts] = qualified.split("_");
       const name = parts.join("_");
       const policyId = server === "metersphere"
@@ -348,18 +386,20 @@ export class QaseyMcpCatalog {
           ? "qa_experience_write"
           : "external_read";
       const policy = TOOL_POLICIES[policyId]!;
+      if (access.readOnly && policy.effect !== "read") continue;
       const execute = "execute" in tool ? tool.execute : undefined;
-      return [qualified, {
+      output[qualified] = {
         ...tool,
         requireApproval: policy.requiresApproval,
         execute: async (input: unknown, executionContext: Parameters<NonNullable<typeof execute>>[1]) => {
-          authorizeToolAccess(qualified, policy, { channel, route });
+          authorizeDiscoveredToolAccess(qualified, policy, { channel });
           if (server === "figma") validateFigmaToolInput(qualified, input);
           if (!execute) throw new Error(`MCP tool ${qualified} has no executor`);
           return execute(input as never, executionContext);
         },
-      }];
-    }));
+      } as ToolsInput[string];
+    }
+    return output;
   }
 
   async close(): Promise<void> {

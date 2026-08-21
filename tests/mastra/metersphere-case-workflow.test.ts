@@ -1,7 +1,7 @@
 import { Mastra } from "@mastra/core/mastra";
 import { RequestContext } from "@mastra/core/request-context";
 import { describe, expect, it, vi } from "vitest";
-import type { QaseyRequestContext, IntentRoute } from "../../packages/contracts/src/index.ts";
+import type { QaseyRequestContext } from "../../packages/contracts/src/index.ts";
 import { buildMeterSphereCasePlan } from "../../packages/domain/src/index.ts";
 import {
   meterSphereCaseOperationWorkflow,
@@ -141,12 +141,7 @@ function testRequestContext(): RequestContext<any> {
     requestId: "request-1", channel: "api", sessionId: "session-1", chatInput: "create cases",
     actor: { id: "actor-1" }, source: {}, attachments: [],
   };
-  const route: IntentRoute = {
-    version: 2, intent: "case_create_full", relation: "new", writeTarget: "metersphere",
-    depth: "standard", confidence: 1, reason: "test", routerStatus: "ok",
-  };
   requestContext.set("qasey-context", context);
-  requestContext.set("intent-route", route);
   requestContext.set("case-operation-phase", "execution");
   requestContext.set("requestId", context.requestId);
   requestContext.set("applicationId", "qasey");

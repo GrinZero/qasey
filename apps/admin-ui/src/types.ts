@@ -11,6 +11,8 @@ export interface CatalogEntry {
   resourceType: "agent" | "workflow" | "scorer" | "channel" | "route";
   resourceId: string;
   permission: string;
+  routePath?: string;
+  routeMethod?: string;
 }
 
 export interface AgentApplication {

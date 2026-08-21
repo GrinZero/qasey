@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import type { IntentRoute, QaseyRequestContext } from "../../packages/contracts/src/index.ts";
+import type { QaseyRequestContext } from "../../packages/contracts/src/index.ts";
 import { buildSystemPrompt } from "../../packages/domain/src/index.ts";
 
 interface PromptCapability {
@@ -26,19 +26,11 @@ const context: QaseyRequestContext = {
   attachments: [],
 };
 
-const route: IntentRoute = {
-  version: 2,
-  intent: "case_create_full",
-  relation: "new",
-  writeTarget: "metersphere",
-  depth: "deep",
-  confidence: 1,
-  reason: "parity fixture",
-  routerStatus: "ok",
-};
-
 describe(`n8n prompt parity (${baseline.activeVersionId})`, () => {
-  const prompt = buildSystemPrompt(context, route).text;
+  const prompt = [
+    buildSystemPrompt(context).text,
+    readFileSync(new URL("../../src/mastra/agents/qasey-main/skills/metersphere-case-management/SKILL.md", import.meta.url), "utf8"),
+  ].join("\n\n");
 
   it.each(baseline.requiredCodePromptCapabilities)("keeps $id", ({ expectedText }) => {
     expect(prompt).toContain(expectedText);

@@ -41,6 +41,7 @@ export const ConfigSchema = z.object({
     value => value === "" ? undefined : value,
     z.string().min(32).optional(),
   ),
+  QASEY_USE_REDIS_DURABILITY: optionalBoolean,
   REDIS_HOST: optionalString,
   REDIS_PORT: optionalPositiveInteger,
   REDIS_USERNAME: optionalString,
@@ -86,6 +87,7 @@ export const ConfigSchema = z.object({
   QASEY_ENABLE_CUA_FALLBACK: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
   QASEY_MAX_REPAIRS: z.coerce.number().int().min(0).max(5).default(2),
   QASEY_SHADOW_MODE: z.enum(["true", "false"]).default("true").transform(value => value === "true"),
+  QASEY_INTENT_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(300_000).default(60_000),
   QASEY_AGENT_TIMEOUT_MS: z.coerce.number().int().min(10_000).default(1_800_000),
   QASEY_MEMORY_MODEL: z.string().min(1).default("gpt-5.6-luna"),
   QASEY_MEMORY_MESSAGE_TOKENS: z.coerce.number().int().min(5_000).default(30_000),
@@ -130,6 +132,13 @@ export const ConfigSchema = z.object({
       code: "custom",
       path: ["REDIS_TLS"],
       message: "REDIS_TLS=true is required by the production multi-pod Mastra runtime",
+    });
+  }
+  if (value.QASEY_USE_REDIS_DURABILITY && !value.REDIS_HOST) {
+    context.addIssue({
+      code: "custom",
+      path: ["QASEY_USE_REDIS_DURABILITY"],
+      message: "QASEY_USE_REDIS_DURABILITY=true requires REDIS_HOST",
     });
   }
   if (value.WORKER_TOKEN && value.PLATFORM_SERVICE_TOKEN && value.WORKER_TOKEN === value.PLATFORM_SERVICE_TOKEN) {
@@ -190,6 +199,13 @@ export const ConfigSchema = z.object({
 });
 
 export type QaseyConfig = z.infer<typeof ConfigSchema>;
+
+/** Use the distributed durable transport in production, or when a developer explicitly opts in. */
+export function resolveRedisDurabilityEnabled(
+  config: Pick<QaseyConfig, "NODE_ENV" | "QASEY_USE_REDIS_DURABILITY">,
+): boolean {
+  return config.NODE_ENV === "production" || config.QASEY_USE_REDIS_DURABILITY === true;
+}
 
 export function resolveSlackChannelMode(
   config: Pick<QaseyConfig, "NODE_ENV" | "SLACK_CHANNEL_MODE" | "SLACK_SIGNING_SECRET" | "SLACK_SOCKET_MODE_APP_TOKEN">,

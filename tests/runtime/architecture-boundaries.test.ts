@@ -32,17 +32,15 @@ describe("shared runtime architecture boundaries", () => {
   });
 
   it("uses Mastra file discovery as the only Qasey Agent registration source", async () => {
-    const [applicationSource, runtimeSource, serviceSource, routingSource] = await Promise.all([
+    const [applicationSource, runtimeSource, serviceSource] = await Promise.all([
       readFile(join(projectRoot, "src/mastra/applications/qasey/application.ts"), "utf8"),
       readFile(join(projectRoot, "src/mastra/index.ts"), "utf8"),
       readFile(join(projectRoot, "src/mastra/applications/qasey/service.ts"), "utf8"),
-      readFile(join(projectRoot, "src/mastra/applications/qasey/intent-routing.ts"), "utf8"),
     ]);
-    expect(applicationSource).toContain('filesystemAgents: ["qasey-main", "qasey-intent-router"]');
+    expect(applicationSource).toContain('filesystemAgents: ["qasey-main"]');
     expect(runtimeSource).not.toMatch(/agents\/qasey-(?:main|intent-router)\/agent/u);
     expect(serviceSource).toContain('mastra.getAgent("qasey-main")');
-    expect(serviceSource).toContain('mastra.getAgent("qasey-intent-router")');
-    expect(routingSource).not.toMatch(/agents\/qasey-intent-router/u);
+    expect(serviceSource).not.toContain('mastra.getAgent("qasey-intent-router")');
   });
 
   it("does not retain legacy execution and queue entrypoints", async () => {
@@ -62,7 +60,9 @@ describe("shared runtime architecture boundaries", () => {
       readFile(join(projectRoot, "src/mastra/applications/qasey/routes.ts"), "utf8"),
       readFile(join(projectRoot, "apps/admin-ui/src/api.ts"), "utf8"),
     ]);
-    expect(workflowSource.indexOf('id: "classify-intent"')).toBeLessThan(workflowSource.indexOf('id: "execute-routed-qasey"'));
+    expect(workflowSource.indexOf('id: "run-skill-driven-agent"')).toBeLessThan(workflowSource.indexOf('id: "determine-finalization"'));
+    expect(workflowSource).not.toContain('id: "classify-intent"');
+    expect(workflowSource).toContain(".then(meterSphereCaseOperationWorkflow");
     expect(routeSource).not.toContain('getAgent("qasey-main").generate');
     expect(routeSource).toContain("runQaseyTaskWorkflow");
     expect(adminApiSource).toContain('"/v1/qasey/tasks"');

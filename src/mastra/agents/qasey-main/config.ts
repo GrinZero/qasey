@@ -1,11 +1,8 @@
 import { agentConfig } from "@mastra/core/agent";
-import { TokenLimiter } from "@mastra/core/processors";
-import { config } from "../../runtime.ts";
 import { qaseyResponsesModel } from "../../applications/qasey/models.ts";
 import { PlatformRequestContextSchema } from "../../../platform/context/schema.ts";
 import { qaseyChannels } from "../../applications/qasey/channels.ts";
-import { resolveQaseyMainTools } from "./tools.ts";
-import { QASEY_MAIN_SKILLS_PATH } from "../../skill-paths.ts";
+import { createQaseyStreamBatcher, resolveQaseyMainInputProcessors } from "./processors.ts";
 
 export default agentConfig({
   id: "qasey-main",
@@ -28,7 +25,9 @@ export default agentConfig({
   }],
   requestContextSchema: PlatformRequestContextSchema,
   ...(qaseyChannels ? { channels: qaseyChannels } : {}),
-  inputProcessors: [new TokenLimiter({ limit: config.QASEY_MEMORY_INPUT_TOKEN_LIMIT })],
-  skills: [QASEY_MAIN_SKILLS_PATH],
-  tools: resolveQaseyMainTools,
+  inputProcessors: resolveQaseyMainInputProcessors,
+  outputProcessors: [createQaseyStreamBatcher()],
+  // Disable Mastra's static file-based default workspace. Once registered,
+  // Qasey inherits the global request-scoped workspace from the Mastra runtime.
+  workspace: undefined,
 });

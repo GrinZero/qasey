@@ -58,7 +58,7 @@ const CaseOperationSchema = z.object({
   verificationMode: z.enum(["internal_read_back", "separate_read_back"]),
 });
 
-const CasePlanSchema = z.object({
+export const MeterSphereCasePlanSchema = z.object({
   version: z.literal(1),
   planHash: z.string(),
   evidenceSnapshotHash: z.string(),
@@ -77,21 +77,21 @@ const CasePlanSchema = z.object({
   writeItems: z.array(z.record(z.string(), z.unknown())),
 });
 
-const WorkflowInputSchema = z.object({ plan: CasePlanSchema });
+export const MeterSphereCaseWorkflowInputSchema = z.object({ plan: MeterSphereCasePlanSchema });
 const WriteOutputSchema = z.object({
-  plan: CasePlanSchema,
+  plan: MeterSphereCasePlanSchema,
   operation: CaseOperationSchema,
   write: ManifestSchema,
 });
-const ReceiptSchema = z.object({
+export const EvidenceCompletionReceiptSchema = z.object({
   casePlanHash: z.string(),
   write: ManifestSchema,
   verification: ManifestSchema,
   verificationMode: z.enum(["internal_read_back", "separate_read_back"]),
   caseOperation: CaseOperationSchema.optional(),
 });
-const VerificationOutputSchema = z.object({ receipt: ReceiptSchema });
-const WorkflowOutputSchema = z.object({ receipt: ReceiptSchema });
+const VerificationOutputSchema = z.object({ receipt: EvidenceCompletionReceiptSchema });
+export const MeterSphereCaseWorkflowOutputSchema = z.object({ receipt: EvidenceCompletionReceiptSchema });
 
 export type MeterSphereCaseWorkflowToolExecutor = (
   toolName: string,
@@ -102,8 +102,8 @@ export type MeterSphereCaseWorkflowToolExecutor = (
 const freezeDryRunPlan = createStep({
   id: "freeze-dry-run-plan",
   description: "验证成功的 dry-run 输出，并冻结不可变且有序的 CasePlan。",
-  inputSchema: WorkflowInputSchema,
-  outputSchema: WorkflowInputSchema,
+  inputSchema: MeterSphereCaseWorkflowInputSchema,
+  outputSchema: MeterSphereCaseWorkflowInputSchema,
   requestContextSchema: PlatformRequestContextSchema,
   execute: async ({ inputData, requestContext }) => {
     const plan = validateMeterSphereCasePlan(inputData.plan);
@@ -118,7 +118,7 @@ const freezeDryRunPlan = createStep({
 const writeFrozenPlan = createStep({
   id: "write-frozen-plan",
   description: "写入完全匹配的冻结 CasePlan payload；Agent 无法调用此变更步骤。",
-  inputSchema: WorkflowInputSchema,
+  inputSchema: MeterSphereCaseWorkflowInputSchema,
   outputSchema: WriteOutputSchema,
   requestContextSchema: PlatformRequestContextSchema,
   execute: async ({ inputData, mastra, requestContext, abortSignal }) => {
@@ -208,7 +208,7 @@ const checkpointCompletion = createStep({
   id: "checkpoint-completion",
   description: "将可序列化且已验证的完成回执持久化为 Workflow 结果。",
   inputSchema: VerificationOutputSchema,
-  outputSchema: WorkflowOutputSchema,
+  outputSchema: MeterSphereCaseWorkflowOutputSchema,
   requestContextSchema: PlatformRequestContextSchema,
   execute: async ({ inputData }) => ({ receipt: inputData.receipt }),
 });
@@ -216,8 +216,8 @@ const checkpointCompletion = createStep({
 export const meterSphereCaseOperationWorkflow = createWorkflow({
   id: "qasey-metersphere-case-operation",
   description: "确定性的 MeterSphere CasePlan 写入、独立回查和持久化完成检查点。",
-  inputSchema: WorkflowInputSchema,
-  outputSchema: WorkflowOutputSchema,
+  inputSchema: MeterSphereCaseWorkflowInputSchema,
+  outputSchema: MeterSphereCaseWorkflowOutputSchema,
   requestContextSchema: PlatformRequestContextSchema,
 })
   .then(freezeDryRunPlan)
@@ -232,13 +232,7 @@ export async function runMeterSphereCaseOperationWorkflow(
   plan: MeterSphereCasePlan,
   runId: string,
 ): Promise<EvidenceCompletionReceipt> {
-  const owner = ownerScopeFromRequestContext(requestContext);
-  requestContext.set("externalWriteIdempotencyKey", externalWriteIdempotencyKey({
-    ...owner,
-    workflowId: "qasey-metersphere-case-operation",
-    runId,
-    effect: "metersphere-case-write",
-  }));
+  prepareMeterSphereCaseOperationRequestContext(requestContext, runId);
   const workflow = mastra.getWorkflow("qasey-metersphere-case-operation");
   const persisted = await workflow.getWorkflowRunById(runId, { fields: ["result", "error"] });
   if (persisted?.status === "success") return persistedReceipt(persisted.result);
@@ -254,7 +248,21 @@ export async function runMeterSphereCaseOperationWorkflow(
     const detail = result.status === "failed" ? result.error.message : result.status;
     throw new IncompleteOutcomeError(`MeterSphere case workflow did not complete: ${detail}`);
   }
-  return ReceiptSchema.parse(result.result.receipt) as EvidenceCompletionReceipt;
+  return EvidenceCompletionReceiptSchema.parse(result.result.receipt) as EvidenceCompletionReceipt;
+}
+
+/** Applies the same stable external-write boundary for standalone and nested runs. */
+export function prepareMeterSphereCaseOperationRequestContext(
+  requestContext: RequestContext<any>,
+  workflowRunId: string,
+): void {
+  const owner = ownerScopeFromRequestContext(requestContext);
+  requestContext.set("externalWriteIdempotencyKey", externalWriteIdempotencyKey({
+    ...owner,
+    workflowId: "qasey-metersphere-case-operation",
+    runId: workflowRunId,
+    effect: "metersphere-case-write",
+  }));
 }
 
 export function meterSphereCaseWorkflowRunId(stableRequestId: string, planHash: string): string {
@@ -274,7 +282,10 @@ async function executeWorkflowTool(
     return (injected as MeterSphereCaseWorkflowToolExecutor)(toolName, input, context);
   }
   const runtime = getRuntimeContext(context.requestContext);
-  const tools = await mcpCatalog.toolsFor(runtime["intent-route"], runtime["qasey-context"].channel, mcpSubject(context.requestContext));
+  const tools = await mcpCatalog.toolsForCaseWorkflow(
+    runtime["qasey-context"].channel,
+    mcpSubject(context.requestContext),
+  );
   const tool = tools[toolName] as { execute?: (input: unknown, context: unknown) => Promise<unknown> } | undefined;
   if (!tool?.execute) throw new Error(`Required MeterSphere workflow tool is unavailable: ${toolName}`);
   return tool.execute(input, context);
@@ -285,7 +296,7 @@ function acquiredManifest(toolName: string, sourceKey: string): EvidenceManifest
 }
 
 function persistedReceipt(result: Record<string, unknown> | undefined): EvidenceCompletionReceipt {
-  const parsed = WorkflowOutputSchema.safeParse(result);
+  const parsed = MeterSphereCaseWorkflowOutputSchema.safeParse(result);
   if (!parsed.success) throw new IncompleteOutcomeError("Persisted MeterSphere workflow result is invalid");
   return parsed.data.receipt as EvidenceCompletionReceipt;
 }

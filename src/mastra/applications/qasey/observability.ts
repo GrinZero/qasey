@@ -2,7 +2,7 @@ import type { Mastra } from "@mastra/core/mastra";
 import { EntityType, SpanType } from "@mastra/core/observability";
 import type { Span, TracingContext } from "@mastra/core/observability";
 import type { RequestContext } from "@mastra/core/request-context";
-import type { IntentRoute, QaseyRequestContext } from "../../../../packages/contracts/src/index.ts";
+import type { QaseyRequestContext } from "../../../../packages/contracts/src/index.ts";
 
 const QASEY_TRACE_ID_KEY = "qasey__traceId";
 const QASEY_REQUEST_SPAN_ID_KEY = "qasey__requestSpanId";
@@ -12,11 +12,6 @@ export const QASEY_TRACE_REQUEST_CONTEXT_KEYS = [
   "channel",
   "sessionId",
   "actorId",
-  "intent",
-  "relation",
-  "writeTarget",
-  "depth",
-  "routerStatus",
   "jobId",
   "eventId",
   "attempt",
@@ -52,14 +47,6 @@ export function initializeQaseyTraceRequestContext(
   }
 }
 
-export function addRouteToTraceRequestContext(requestContext: RequestContext, route: IntentRoute): void {
-  requestContext.set("intent", route.intent);
-  requestContext.set("relation", route.relation);
-  requestContext.set("writeTarget", route.writeTarget);
-  requestContext.set("depth", route.depth);
-  requestContext.set("routerStatus", route.routerStatus);
-}
-
 export function startQaseyRequestSpan(
   mastra: Mastra,
   requestContext: RequestContext,
@@ -68,7 +55,7 @@ export function startQaseyRequestSpan(
   trace: QaseyTraceContext = {},
   parentTracingContext?: TracingContext,
 ): { span?: QaseyRequestSpan; tracingContext?: TracingContext } {
-  const instance = mastra.observability.getDefaultInstance();
+  const instance = mastra.observability?.getDefaultInstance();
   if (!instance) return {};
   const details = {
     type: SpanType.GENERIC,
@@ -121,7 +108,7 @@ export function startQaseyCorrelatedSpan(
   name: string,
   input?: unknown,
 ): QaseyRequestSpan | undefined {
-  const instance = mastra?.observability.getDefaultInstance();
+  const instance = mastra?.observability?.getDefaultInstance();
   const traceId = requestContext.get(QASEY_TRACE_ID_KEY);
   const parentSpanId = requestContext.get(QASEY_REQUEST_SPAN_ID_KEY);
   if (!instance || typeof traceId !== "string" || typeof parentSpanId !== "string") return undefined;
@@ -178,19 +165,6 @@ export function recordQaseyEvent(
     entityId: "qasey",
     entityName: "Qasey",
     metadata,
-  });
-}
-
-export function updateQaseyRequestSpanForRoute(span: QaseyRequestSpan | undefined, route: IntentRoute): void {
-  span?.update({
-    name: `qasey request: ${route.intent}`,
-    metadata: {
-      intent: route.intent,
-      relation: route.relation,
-      writeTarget: route.writeTarget,
-      depth: route.depth,
-      routerStatus: route.routerStatus,
-    },
   });
 }
 

@@ -1,6 +1,6 @@
 import type { Mastra } from "@mastra/core/mastra";
 import { describe, expect, it, vi } from "vitest";
-import type { IntentRoute, QaseyRequestContext } from "../../packages/contracts/src/index.ts";
+import type { QaseyRequestContext } from "../../packages/contracts/src/index.ts";
 import type { EvidenceCompletionReceipt } from "../../packages/domain/src/evidence-ledger.ts";
 import { buildMeterSphereCasePlan } from "../../packages/domain/src/index.ts";
 import { assertNormalCompletion, completionReceiptText, executeQasey, selectFinalText } from "../../src/mastra/applications/qasey/service.ts";
@@ -64,16 +64,6 @@ describe("Qasey service completion", () => {
   });
 
   it("records one business trace and parents both agents under it", async () => {
-    const route: IntentRoute = {
-      version: 2,
-      intent: "qa_review",
-      relation: "new",
-      writeTarget: "none",
-      depth: "standard",
-      confidence: 1,
-      reason: "test",
-      routerStatus: "ok",
-    };
     const context: QaseyRequestContext = {
       requestId: "request-1",
       channel: "slack",
@@ -89,7 +79,6 @@ describe("Qasey service completion", () => {
       error: vi.fn(),
     };
     const startSpan = vi.fn(() => rootSpan);
-    const routerGenerate = vi.fn(async (..._args: unknown[]) => ({ object: route }));
     const qaseyGenerate = vi.fn(async (..._args: unknown[]) => ({
       finishReason: "stop",
       text: "review complete",
@@ -97,9 +86,7 @@ describe("Qasey service completion", () => {
     }));
     const mastra = {
       observability: { getDefaultInstance: () => ({ startSpan }) },
-      getAgent: (id: string) => id === "qasey-intent-router"
-        ? { generate: routerGenerate }
-        : { generate: qaseyGenerate },
+      getAgent: () => ({ generate: qaseyGenerate }),
     } as unknown as Mastra;
 
     const response = await executeQasey(mastra, context, {
@@ -126,51 +113,32 @@ describe("Qasey service completion", () => {
       }),
       tags: ["qasey", "channel:slack"],
     }));
-    const routerOptions = routerGenerate.mock.calls[0]?.[1] as {
-      tracingContext?: { currentSpan?: unknown };
-    } | undefined;
     const agentOptions = qaseyGenerate.mock.calls[0]?.[1] as {
       tracingContext?: { currentSpan?: unknown };
       requestContext: { get: (key: string) => unknown };
     } | undefined;
-    expect(routerOptions?.tracingContext?.currentSpan).toBe(rootSpan);
     expect(agentOptions?.tracingContext?.currentSpan).toBe(rootSpan);
     expect(agentOptions?.requestContext.get("requestId")).toBe("request-1");
-    expect(agentOptions?.requestContext.get("intent")).toBe("qa_review");
+    expect(agentOptions?.requestContext.get("intent")).toBeUndefined();
     expect(agentOptions?.requestContext.get("jobId")).toBe("job-1");
-    expect(rootSpan.update).toHaveBeenCalledWith(expect.objectContaining({
-      name: "qasey request: qa_review",
-      metadata: expect.objectContaining({ intent: "qa_review", writeTarget: "none" }),
-    }));
+    expect(rootSpan.update).not.toHaveBeenCalled();
     expect(rootSpan.end).toHaveBeenCalledWith(expect.objectContaining({
       output: expect.objectContaining({
         text: "review complete",
-        route,
         outcome: "success",
       }),
-      metadata: expect.objectContaining({ outcome: "success", intent: "qa_review" }),
+      metadata: { outcome: "success", finalization: "agent" },
     }));
     expect(rootSpan.error).not.toHaveBeenCalled();
-    expect(response).toMatchObject({ text: "review complete", route, outcome: "success" });
+    expect(response).toMatchObject({ text: "review complete", outcome: "success" });
+    expect(response).not.toHaveProperty("route");
   });
 
   it("ends the business trace with an error when the main agent fails", async () => {
-    const route: IntentRoute = {
-      version: 2,
-      intent: "qa_review",
-      relation: "new",
-      writeTarget: "none",
-      depth: "quick",
-      confidence: 1,
-      reason: "test",
-      routerStatus: "ok",
-    };
     const rootSpan = { update: vi.fn(), end: vi.fn(), error: vi.fn() };
     const mastra = {
       observability: { getDefaultInstance: () => ({ startSpan: () => rootSpan }) },
-      getAgent: (id: string) => id === "intentRouterAgent"
-        ? { generate: async () => ({ object: route }) }
-        : { generate: async () => { throw new Error("model unavailable"); } },
+      getAgent: () => ({ generate: async () => { throw new Error("model unavailable"); } }),
     } as unknown as Mastra;
     const context: QaseyRequestContext = {
       requestId: "request-error",
@@ -182,26 +150,16 @@ describe("Qasey service completion", () => {
       attachments: [],
     };
 
-    await expect(executeQasey(mastra, context, { intentAgent: mastra.getAgent("intentRouterAgent") })).rejects.toThrow("model unavailable");
+    await expect(executeQasey(mastra, context)).rejects.toThrow("model unavailable");
     expect(rootSpan.end).not.toHaveBeenCalled();
     expect(rootSpan.error).toHaveBeenCalledWith(expect.objectContaining({
       error: expect.objectContaining({ message: "model unavailable" }),
       endSpan: true,
-      metadata: { outcome: "error", intent: "qa_review", writeTarget: "none" },
+      metadata: { outcome: "error" },
     }));
   });
 
   it("accepts only an independently verified completion checkpoint and ignores model prose", async () => {
-    const route: IntentRoute = {
-      version: 2,
-      intent: "case_create_full",
-      relation: "new",
-      writeTarget: "metersphere",
-      depth: "quick",
-      confidence: 1,
-      reason: "test",
-      routerStatus: "ok",
-    };
     const plan = buildMeterSphereCasePlan({
       dryRunInput: { dry_run: true, items: JSON.stringify([{
         operation: "create", name: "Case", priority: "P1", node_id: "module", node_path: "/AI Draft/Feature",
@@ -232,16 +190,14 @@ describe("Qasey service completion", () => {
     const rootSpan = { update: vi.fn(), end: vi.fn(), error: vi.fn() };
     const mastra = {
       observability: { getDefaultInstance: () => ({ startSpan: () => rootSpan }) },
-      getAgent: (id: string) => id === "intentRouterAgent"
-        ? { generate: async () => ({ object: route }) }
-        : { generate: qaseyGenerate },
+      getAgent: () => ({ generate: qaseyGenerate }),
     } as unknown as Mastra;
     const context: QaseyRequestContext = {
       requestId: "request-retry", channel: "slack", sessionId: "thread-retry", chatInput: "create cases",
       actor: { id: "actor" }, source: {}, attachments: [],
     };
 
-    const response = await executeQasey(mastra, context, { intentAgent: mastra.getAgent("intentRouterAgent"), resumeCasePlan: plan, resumeReceipt: receipt });
+    const response = await executeQasey(mastra, context, { resumeCasePlan: plan, resumeReceipt: receipt });
     const agentOptions = qaseyGenerate.mock.calls[0]?.[1] as { prepareStep?: () => unknown } | undefined;
     expect(agentOptions?.prepareStep?.()).toEqual({ activeTools: [], toolChoice: "none" });
     expect(response.completionReceipt).toEqual(receipt);
@@ -252,16 +208,6 @@ describe("Qasey service completion", () => {
   });
 
   it("forces a text-only finalization turn and falls back to the durable receipt", async () => {
-    const route: IntentRoute = {
-      version: 2,
-      intent: "case_create_full",
-      relation: "new",
-      writeTarget: "metersphere",
-      depth: "quick",
-      confidence: 1,
-      reason: "test",
-      routerStatus: "ok",
-    };
     const plan = buildMeterSphereCasePlan({
       dryRunInput: { dry_run: true, items: JSON.stringify([{
         operation: "create", name: "Case", priority: "P1", node_id: "module", node_path: "/AI Draft/Feature",
@@ -318,16 +264,14 @@ describe("Qasey service completion", () => {
     const rootSpan = { update: vi.fn(), end: vi.fn(), error: vi.fn() };
     const mastra = {
       observability: { getDefaultInstance: () => ({ startSpan: () => rootSpan }) },
-      getAgent: (id: string) => id === "intentRouterAgent"
-        ? { generate: async () => ({ object: route }) }
-        : { generate: qaseyGenerate },
+      getAgent: () => ({ generate: qaseyGenerate }),
     } as unknown as Mastra;
     const context: QaseyRequestContext = {
       requestId: "request-receipt-finalization", channel: "slack", sessionId: "thread-receipt-finalization",
       chatInput: "create cases", actor: { id: "actor" }, source: {}, attachments: [],
     };
 
-    const response = await executeQasey(mastra, context, { intentAgent: mastra.getAgent("intentRouterAgent"), resumeCasePlan: plan, resumeReceipt: receipt });
+    const response = await executeQasey(mastra, context, { resumeCasePlan: plan, resumeReceipt: receipt });
 
     expect(iterationDirective).toEqual({ continue: true });
     expect(response).toMatchObject({
@@ -342,9 +286,7 @@ describe("Qasey service completion", () => {
     const pendingRootSpan = { update: vi.fn(), end: vi.fn(), error: vi.fn() };
     const pendingMastra = {
       observability: { getDefaultInstance: () => ({ startSpan: () => pendingRootSpan }) },
-      getAgent: (id: string) => id === "intentRouterAgent"
-        ? { generate: async () => ({ object: route }) }
-        : { generate: async () => ({
+      getAgent: () => ({ generate: async () => ({
           finishReason: "tool-calls",
           text: "",
           steps: [{
@@ -353,10 +295,9 @@ describe("Qasey service completion", () => {
             toolCalls: [{ payload: { toolCallId: "call-pending" } }],
             toolResults: [],
           }],
-        }) },
+        }) }),
     } as unknown as Mastra;
     await expect(executeQasey(pendingMastra, context, {
-      intentAgent: pendingMastra.getAgent("intentRouterAgent"),
       resumeCasePlan: plan,
       resumeReceipt: receipt,
     })).rejects.toThrow(/unfinished tool call/i);
@@ -365,16 +306,6 @@ describe("Qasey service completion", () => {
   });
 
   it("hands a frozen dry-run CasePlan to the deterministic workflow instead of letting the agent write", async () => {
-    const route: IntentRoute = {
-      version: 2,
-      intent: "case_create_full",
-      relation: "new",
-      writeTarget: "metersphere",
-      depth: "standard",
-      confidence: 1,
-      reason: "test",
-      routerStatus: "ok",
-    };
     const item = {
       operation: "create", name: "Case", priority: "P1",
       node_id: "module", node_path: "/AI Draft/Feature",
@@ -442,9 +373,7 @@ describe("Qasey service completion", () => {
     const rootSpan = { update: vi.fn(), end: vi.fn(), error: vi.fn() };
     const mastra = {
       observability: { getDefaultInstance: () => ({ startSpan: () => rootSpan }) },
-      getAgent: (id: string) => id === "intentRouterAgent"
-        ? { generate: async () => ({ object: route }) }
-        : { generate: qaseyGenerate },
+      getAgent: () => ({ generate: qaseyGenerate }),
     } as unknown as Mastra;
     const context: QaseyRequestContext = {
       requestId: "request-workflow-handoff", channel: "slack", sessionId: "thread-workflow-handoff",
@@ -452,7 +381,6 @@ describe("Qasey service completion", () => {
     };
 
     const response = await executeQasey(mastra, context, {
-      intentAgent: mastra.getAgent("intentRouterAgent"),
       caseOperationRunner,
       events: {
         onPhase: event => { phases.push(event.phase); },
@@ -469,7 +397,7 @@ describe("Qasey service completion", () => {
       finalization: "workflow",
       text: expect.stringContaining("独立回查通过 1/1"),
     });
-    expect(phases).toEqual(["routing", "agent", "workflow", "finalizing"]);
+    expect(phases).toEqual(["agent", "workflow", "finalizing"]);
     expect(plans).toHaveLength(1);
     expect(receipts).toEqual(plans);
     expect(rootSpan.error).not.toHaveBeenCalled();

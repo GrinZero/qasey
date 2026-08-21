@@ -287,16 +287,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_create_full",
-        "relation": "new",
-        "writeTarget": "metersphere",
-        "depth": "deep",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-001",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -610,16 +600,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_create_full",
-        "relation": "new",
-        "writeTarget": "metersphere",
-        "depth": "deep",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-002",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -931,16 +911,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_create_full",
-        "relation": "new",
-        "writeTarget": "metersphere",
-        "depth": "deep",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-003",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -1258,16 +1228,6 @@
             "source": "api"
           }
         ]
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_create_full",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "deep",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-004",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -1606,16 +1566,6 @@
             "source": "api"
           }
         ]
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "new",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-005",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -1936,16 +1886,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-006",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -2256,16 +2196,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-007",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -2583,16 +2513,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-008",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -2899,16 +2819,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-009",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -3216,16 +3126,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-010",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -3532,16 +3432,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-011",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -3849,16 +3739,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-012",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -4166,16 +4046,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-013",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -4487,16 +4357,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-014",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -4807,16 +4667,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-015",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -5130,16 +4980,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-016",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -5450,16 +5290,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-017",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -5770,16 +5600,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-018",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -6102,16 +5922,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-019",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -6420,16 +6230,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-020",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -6738,16 +6538,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-021",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -7058,16 +6848,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-022",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -7377,16 +7157,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "unknown",
-        "relation": "follow_up",
-        "writeTarget": "none",
-        "depth": "quick",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-023",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -7713,16 +7483,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_create_full",
-        "relation": "new",
-        "writeTarget": "metersphere",
-        "depth": "deep",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-024",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -8041,16 +7801,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-025",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -8359,16 +8109,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-026",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -8678,16 +8418,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "qa_review",
-        "relation": "new",
-        "writeTarget": "none",
-        "depth": "deep",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-027",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -8999,16 +8729,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "qa_quick_query",
-        "relation": "new",
-        "writeTarget": "none",
-        "depth": "quick",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-028",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -9333,16 +9053,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-029",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -9657,16 +9367,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-030",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -9981,16 +9681,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-031",
-        "routerStatus": "ok"
       }
     },
     "metadata": {
@@ -10307,16 +9997,6 @@
         },
         "source": {},
         "attachments": []
-      },
-      "intent-route": {
-        "version": 2,
-        "intent": "case_maintain_fast",
-        "relation": "follow_up",
-        "writeTarget": "metersphere",
-        "depth": "standard",
-        "confidence": 1,
-        "reason": "Golden route for qasey-gw-032",
-        "routerStatus": "ok"
       }
     },
     "metadata": {

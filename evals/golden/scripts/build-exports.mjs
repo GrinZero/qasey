@@ -240,13 +240,6 @@ function buildMastraRequestContext(record) {
       source: {},
       attachments,
     },
-    "intent-route": {
-      version: 2,
-      ...record.groundTruth.route,
-      confidence: 1,
-      reason: `Golden route for ${record.id}`,
-      routerStatus: "ok",
-    },
   };
 }
 

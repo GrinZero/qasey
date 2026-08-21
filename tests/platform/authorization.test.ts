@@ -2,7 +2,7 @@ import { RequestContext, MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "@m
 import { describe, expect, it, vi } from "vitest";
 import manifest from "../fixtures/mastra-route-permissions.json";
 import type { CatalogEntry } from "../../src/runtime/application.ts";
-import { classifyMastraStudioRoute, classifyRuntimeRoute, createAuthorizationMiddleware, isMastraStudioRequest, isPublicRuntimePath, resolveRequestUser } from "../../src/platform/auth/authorization-middleware.ts";
+import { classifyMastraStudioRoute, classifyRuntimeRoute, createAuthorizationMiddleware, isMastraStudioRequest, isPublicRuntimePath, resolveRequestUser, studioLoginRedirect } from "../../src/platform/auth/authorization-middleware.ts";
 import { InMemoryPermissionStore, PermissionService } from "../../src/platform/auth/permission-store.ts";
 import { createServicePrincipal, OAuthPrincipalSchema } from "../../src/platform/auth/oauth-principal.ts";
 
@@ -42,6 +42,53 @@ describe("permission route coverage", () => {
       method: "GET",
       header: name => name === "referer" ? "http://localhost:4111/admin" : undefined,
     })).toBe(false);
+  });
+
+  it("redirects anonymous Studio document navigations through Admin while preserving the original URL", async () => {
+    const middleware = createAuthorizationMiddleware({
+      catalog: [],
+      permissions: new PermissionService(new InMemoryPermissionStore()),
+      audit: { write: vi.fn(async () => undefined) },
+      studioUiEnabled: true,
+      resolvePrincipal: () => undefined,
+    });
+    const raw = new Request("http://localhost:4111/studio/agents/qasey-main/chat/new?thread=thread-1", {
+      headers: { accept: "text/html,application/xhtml+xml" },
+    });
+    const redirect = vi.fn();
+    const json = vi.fn();
+
+    await (middleware as Exclude<typeof middleware, { path: string }>)({
+      req: {
+        path: new URL(raw.url).pathname,
+        method: raw.method,
+        raw,
+        header: (name: string) => raw.headers.get(name) ?? undefined,
+      },
+      get: (key: string) => key === "requestContext" ? new RequestContext() : undefined,
+      redirect,
+      json,
+    } as never, vi.fn());
+
+    expect(redirect).toHaveBeenCalledWith(
+      "/admin?redirect_uri=%2Fstudio%2Fagents%2Fqasey-main%2Fchat%2Fnew%3Fthread%3Dthread-1",
+      302,
+    );
+    expect(json).not.toHaveBeenCalled();
+  });
+
+  it("keeps Studio API and asset failures as 401 responses instead of HTML redirects", () => {
+    const api = new Request("http://localhost:4111/studio/api/agents", { headers: { accept: "application/json" } });
+    const asset = new Request("http://localhost:4111/studio/assets/main.js", { headers: { accept: "*/*" } });
+    const request = (raw: Request) => ({
+      raw,
+      path: new URL(raw.url).pathname,
+      method: raw.method,
+      header: (name: string) => raw.headers.get(name) ?? undefined,
+    });
+
+    expect(studioLoginRedirect(request(api))).toBeUndefined();
+    expect(studioLoginRedirect(request(asset))).toBeUndefined();
   });
 
   it("hydrates a verified session user before Mastra core auth populates request context", async () => {
@@ -164,6 +211,89 @@ describe("permission route coverage", () => {
 
     expect(next).toHaveBeenCalledOnce();
     expect(requestContext.get("applicationId")).toBe("alpha");
+    expect(requestContext.get(MASTRA_RESOURCE_ID_KEY)).toBe("alpha:tenant-1:user-1");
+  });
+
+  it.each([
+    { method: "GET", url: "/studio/api/workflows/alpha-job/runs?limit=20&offset=0" },
+    { method: "GET", url: "/studio/api/workflows/alpha-job/runs/run-1?fields=payload,error" },
+    { method: "POST", url: "/studio/api/workflows/alpha-job/runs/run-1/cancel" },
+  ])("lets platform admins inspect or cancel Studio workflow runs across resource owners: $method $url", async ({ method, url }) => {
+    const middleware = createAuthorizationMiddleware({
+      catalog: [{ ...entries[1]!, audiences: ["admin-ui"] }],
+      permissions: new PermissionService(new InMemoryPermissionStore()),
+      audit: { write: vi.fn(async () => undefined) },
+      studioUiEnabled: true,
+      resolvePrincipal: () => OAuthPrincipalSchema.parse({
+        subjectId: "admin-1", tenantId: "tenant-1", roles: ["platform-admin"], audience: "admin-ui",
+      }),
+    });
+    const raw = new Request(`http://localhost:4111${url}`, { method });
+    const requestContext = new RequestContext();
+    requestContext.set(MASTRA_RESOURCE_ID_KEY, "client-supplied-owner");
+    const next = vi.fn(async () => undefined);
+
+    await (middleware as Exclude<typeof middleware, { path: string }>)({
+      req: {
+        path: new URL(raw.url).pathname,
+        method: raw.method,
+        raw,
+        header: (name: string) => name.toLowerCase() === "x-mastra-client-type" ? "studio" : undefined,
+      },
+      get: (key: string) => key === "requestContext" ? requestContext : undefined,
+      json: vi.fn(),
+    } as never, next);
+
+    expect(next).toHaveBeenCalledOnce();
+    expect(requestContext.get(MASTRA_RESOURCE_ID_KEY)).toBeUndefined();
+    expect(requestContext.get("sessionId")).toBe("alpha:tenant-1:private:admin-1");
+  });
+
+  it.each([
+    {
+      name: "non-admin Studio readers",
+      method: "GET",
+      roles: ["user"],
+      url: "/studio/api/workflows/alpha-job/runs",
+    },
+    {
+      name: "platform-admin workflow execution",
+      method: "POST",
+      roles: ["platform-admin"],
+      url: "/studio/api/workflows/alpha-job/start-async",
+    },
+    {
+      name: "non-admin workflow cancellation",
+      method: "POST",
+      roles: ["user"],
+      url: "/studio/api/workflows/alpha-job/runs/run-1/cancel",
+    },
+  ])("keeps workflow ownership scoped for $name", async ({ method, roles, url }) => {
+    const middleware = createAuthorizationMiddleware({
+      catalog: [{ ...entries[1]!, audiences: ["admin-ui"] }],
+      permissions: { authorize: vi.fn(async () => true) } as unknown as PermissionService,
+      audit: { write: vi.fn(async () => undefined) },
+      studioUiEnabled: true,
+      resolvePrincipal: () => OAuthPrincipalSchema.parse({
+        subjectId: "user-1", tenantId: "tenant-1", roles, audience: "admin-ui",
+      }),
+    });
+    const raw = new Request(`http://localhost:4111${url}`, { method });
+    const requestContext = new RequestContext();
+    const next = vi.fn(async () => undefined);
+
+    await (middleware as Exclude<typeof middleware, { path: string }>)({
+      req: {
+        path: new URL(raw.url).pathname,
+        method: raw.method,
+        raw,
+        header: (name: string) => name.toLowerCase() === "x-mastra-client-type" ? "studio" : undefined,
+      },
+      get: (key: string) => key === "requestContext" ? requestContext : undefined,
+      json: vi.fn(),
+    } as never, next);
+
+    expect(next).toHaveBeenCalledOnce();
     expect(requestContext.get(MASTRA_RESOURCE_ID_KEY)).toBe("alpha:tenant-1:user-1");
   });
 

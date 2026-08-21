@@ -1,0 +1,162 @@
+diff --git a/dist/services-BRF1RRXB.js b/dist/services-BRF1RRXB.js
+index 98a6326a44a4cc5bdba746341f6f601570cff2a1..0ee0287696d67c1871486c1c08e97c744b2264bb 100644
+--- a/dist/services-BRF1RRXB.js
++++ b/dist/services-BRF1RRXB.js
+@@ -140,9 +140,63 @@ function copyPnpmWorkspaceSettings(source, options = {}) {
+ 		blocks.push(architectureBlock.join("\n"));
+ 	}
+ 	if (options.pnpmOverrides && Object.keys(options.pnpmOverrides).length > 0) blocks.push(["overrides:", ...Object.entries(options.pnpmOverrides).map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)}`)].join("\n"));
++	if (options.patchedDependencies && Object.keys(options.patchedDependencies).length > 0) {
++		blocks.push(["patchedDependencies:", ...Object.entries(options.patchedDependencies).map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)}`)].join("\n"));
++		// The generated bundle usually contains only a subset of the source
++		// application's dependencies. Keep pnpm from rejecting source patches
++		// that are intentionally unused by this isolated runtime install.
++		blocks.push("allowUnusedPatches: true");
++	}
+ 	if (options.pnpmNodeLinker) blocks.push(`nodeLinker: ${options.pnpmNodeLinker}`);
+ 	return ["packages:\n  - '.'", ...blocks].join("\n\n") + "\n";
+ }
++function readPnpmPatchedDependencies(source) {
++	if (!source.trim()) return {};
++	let config;
++	try {
++		config = parse(source);
++	} catch (error) {
++		throw new MastraError({
++			id: "DEPLOYER_INVALID_PNPM_PATCH_CONFIG",
++			domain: ErrorDomain.DEPLOYER,
++			category: ErrorCategory.USER,
++			text: "Invalid pnpm patchedDependencies configuration"
++		}, error);
++	}
++	const patchedDependencies = config?.patchedDependencies;
++	if (patchedDependencies == null) return {};
++	if (typeof patchedDependencies !== "object" || Array.isArray(patchedDependencies)) throw new MastraError({
++		id: "DEPLOYER_INVALID_PNPM_PATCH_CONFIG",
++		domain: ErrorDomain.DEPLOYER,
++		category: ErrorCategory.USER,
++		text: "pnpm patchedDependencies must be a dependency-to-patch-path mapping"
++	});
++	for (const [dependency, patchPath] of Object.entries(patchedDependencies)) if (!dependency.trim() || typeof patchPath !== "string" || !patchPath.trim()) throw new MastraError({
++		id: "DEPLOYER_INVALID_PNPM_PATCH_CONFIG",
++		domain: ErrorDomain.DEPLOYER,
++		category: ErrorCategory.USER,
++		details: { dependency },
++		text: `Invalid pnpm patch path for ${dependency || "<empty dependency>"}`
++	});
++	return patchedDependencies;
++}
++async function copyPnpmPatchFiles(source, sourceWorkspaceYamlPath, outputDir) {
++	const configuredPatches = readPnpmPatchedDependencies(source);
++	const entries = Object.entries(configuredPatches);
++	if (entries.length === 0) return {};
++	const sourceRoot = dirname(sourceWorkspaceYamlPath);
++	const outputPatchDir = path.join(outputDir, ".mastra-patches");
++	await fsPromises.mkdir(outputPatchDir, { recursive: true });
++	const copiedPatches = {};
++	for (const [index, [dependency, configuredPath]] of entries.entries()) {
++		const sourcePatchPath = path.isAbsolute(configuredPath) ? configuredPath : path.resolve(sourceRoot, configuredPath);
++		const safeBasename = path.basename(configuredPath).replace(/[^a-zA-Z0-9._-]/g, "_") || "dependency.patch";
++		const outputBasename = `${index}-${safeBasename}`;
++		await fsPromises.copyFile(sourcePatchPath, path.join(outputPatchDir, outputBasename));
++		copiedPatches[dependency] = `.mastra-patches/${outputBasename}`;
++	}
++	return copiedPatches;
++}
+ var Deps = class extends MastraBase {
+ 	packageManager;
+ 	rootDir;
+@@ -205,7 +259,11 @@ var Deps = class extends MastraBase {
+ 	async writePnpmConfig(dir, options = {}) {
+ 		const sourceWorkspaceYamlPath = this.findPnpmWorkspaceFile(this.rootDir);
+ 		const sourceWorkspaceYaml = sourceWorkspaceYamlPath ? await fsPromises.readFile(sourceWorkspaceYamlPath, "utf-8") : "";
+-		await fsPromises.writeFile(path.join(dir, "pnpm-workspace.yaml"), copyPnpmWorkspaceSettings(sourceWorkspaceYaml, options), "utf-8");
++		const patchedDependencies = sourceWorkspaceYamlPath ? await copyPnpmPatchFiles(sourceWorkspaceYaml, sourceWorkspaceYamlPath, dir) : {};
++		await fsPromises.writeFile(path.join(dir, "pnpm-workspace.yaml"), copyPnpmWorkspaceSettings(sourceWorkspaceYaml, {
++			...options,
++			patchedDependencies
++		}), "utf-8");
+ 	}
+ 	async writeYarnConfig(dir, options) {
+ 		const yarnrcPath = path.join(dir, ".yarnrc.yml");
+diff --git a/dist/services-_ksvysL5.cjs b/dist/services-_ksvysL5.cjs
+index 706ee2325e2c4adc5b229bde1a9b7531116f3336..bec9c37901be2a299b7efa5cb7f821969e6a6592 100644
+--- a/dist/services-_ksvysL5.cjs
++++ b/dist/services-_ksvysL5.cjs
+@@ -144,9 +144,63 @@ function copyPnpmWorkspaceSettings(source, options = {}) {
+ 		blocks.push(architectureBlock.join("\n"));
+ 	}
+ 	if (options.pnpmOverrides && Object.keys(options.pnpmOverrides).length > 0) blocks.push(["overrides:", ...Object.entries(options.pnpmOverrides).map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)}`)].join("\n"));
++	if (options.patchedDependencies && Object.keys(options.patchedDependencies).length > 0) {
++		blocks.push(["patchedDependencies:", ...Object.entries(options.patchedDependencies).map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)}`)].join("\n"));
++		// The generated bundle usually contains only a subset of the source
++		// application's dependencies. Keep pnpm from rejecting source patches
++		// that are intentionally unused by this isolated runtime install.
++		blocks.push("allowUnusedPatches: true");
++	}
+ 	if (options.pnpmNodeLinker) blocks.push(`nodeLinker: ${options.pnpmNodeLinker}`);
+ 	return ["packages:\n  - '.'", ...blocks].join("\n\n") + "\n";
+ }
++function readPnpmPatchedDependencies(source) {
++	if (!source.trim()) return {};
++	let config;
++	try {
++		config = (0, yaml.parse)(source);
++	} catch (error) {
++		throw new _mastra_core_error.MastraError({
++			id: "DEPLOYER_INVALID_PNPM_PATCH_CONFIG",
++			domain: _mastra_core_error.ErrorDomain.DEPLOYER,
++			category: _mastra_core_error.ErrorCategory.USER,
++			text: "Invalid pnpm patchedDependencies configuration"
++		}, error);
++	}
++	const patchedDependencies = config?.patchedDependencies;
++	if (patchedDependencies == null) return {};
++	if (typeof patchedDependencies !== "object" || Array.isArray(patchedDependencies)) throw new _mastra_core_error.MastraError({
++		id: "DEPLOYER_INVALID_PNPM_PATCH_CONFIG",
++		domain: _mastra_core_error.ErrorDomain.DEPLOYER,
++		category: _mastra_core_error.ErrorCategory.USER,
++		text: "pnpm patchedDependencies must be a dependency-to-patch-path mapping"
++	});
++	for (const [dependency, patchPath] of Object.entries(patchedDependencies)) if (!dependency.trim() || typeof patchPath !== "string" || !patchPath.trim()) throw new _mastra_core_error.MastraError({
++		id: "DEPLOYER_INVALID_PNPM_PATCH_CONFIG",
++		domain: _mastra_core_error.ErrorDomain.DEPLOYER,
++		category: _mastra_core_error.ErrorCategory.USER,
++		details: { dependency },
++		text: `Invalid pnpm patch path for ${dependency || "<empty dependency>"}`
++	});
++	return patchedDependencies;
++}
++async function copyPnpmPatchFiles(source, sourceWorkspaceYamlPath, outputDir) {
++	const configuredPatches = readPnpmPatchedDependencies(source);
++	const entries = Object.entries(configuredPatches);
++	if (entries.length === 0) return {};
++	const sourceRoot = path.default.dirname(sourceWorkspaceYamlPath);
++	const outputPatchDir = path.default.join(outputDir, ".mastra-patches");
++	await fs_promises.default.mkdir(outputPatchDir, { recursive: true });
++	const copiedPatches = {};
++	for (const [index, [dependency, configuredPath]] of entries.entries()) {
++		const sourcePatchPath = path.default.isAbsolute(configuredPath) ? configuredPath : path.default.resolve(sourceRoot, configuredPath);
++		const safeBasename = path.default.basename(configuredPath).replace(/[^a-zA-Z0-9._-]/g, "_") || "dependency.patch";
++		const outputBasename = `${index}-${safeBasename}`;
++		await fs_promises.default.copyFile(sourcePatchPath, path.default.join(outputPatchDir, outputBasename));
++		copiedPatches[dependency] = `.mastra-patches/${outputBasename}`;
++	}
++	return copiedPatches;
++}
+ var Deps = class extends _mastra_core_base.MastraBase {
+ 	packageManager;
+ 	rootDir;
+@@ -209,7 +263,11 @@ var Deps = class extends _mastra_core_base.MastraBase {
+ 	async writePnpmConfig(dir, options = {}) {
+ 		const sourceWorkspaceYamlPath = this.findPnpmWorkspaceFile(this.rootDir);
+ 		const sourceWorkspaceYaml = sourceWorkspaceYamlPath ? await fs_promises.default.readFile(sourceWorkspaceYamlPath, "utf-8") : "";
+-		await fs_promises.default.writeFile(path.default.join(dir, "pnpm-workspace.yaml"), copyPnpmWorkspaceSettings(sourceWorkspaceYaml, options), "utf-8");
++		const patchedDependencies = sourceWorkspaceYamlPath ? await copyPnpmPatchFiles(sourceWorkspaceYaml, sourceWorkspaceYamlPath, dir) : {};
++		await fs_promises.default.writeFile(path.default.join(dir, "pnpm-workspace.yaml"), copyPnpmWorkspaceSettings(sourceWorkspaceYaml, {
++			...options,
++			patchedDependencies
++		}), "utf-8");
+ 	}
+ 	async writeYarnConfig(dir, options) {
+ 		const yarnrcPath = path.default.join(dir, ".yarnrc.yml");

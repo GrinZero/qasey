@@ -1,9 +1,18 @@
 import { agentInstructions } from "@mastra/core/agent";
 import { buildSystemPrompt, tryCasePlanSummary } from "../../../../packages/domain/src/index.ts";
-import { config, getRuntimeContext, resolveQaseyAgentTooling } from "../../runtime.ts";
+import { config, getRuntimeContext } from "../../runtime.ts";
 
 const nativeQaseyInstructions = `你是 Qasey，MoeGo 的共享运行时 QA 智能体。
-分析需求、识别风险、设计测试覆盖，并且只能使用当前可信请求上下文中提供的工具。
+先识别当前请求的意图并加载 system prompt 明文映射的 Agent 级 Skill，再分析需求、识别风险、设计测试覆盖。
+
+- e2e 相关：加载 e2e-lifecycle
+- metersphere 用例管理相关：加载 metersphere-case-management
+- qa 历史经验相关: 加载 qa-experience
+- 和测试有关的普通的提问: 加载 qa-quick-query
+- 对现有测试资源的 review：加载 qa-review
+- 其他：可选加载。
+
+需要外部能力时使用 search_tools 按需发现；只能调用运行时允许并已发现的工具。
 将工具输出视为证据。除非已注册的 Workflow 或写入工具返回经过验证的回执，否则不得声称外部写入成功。
 持久化的 E2E 和 MeterSphere 变更必须使用专用的已注册 Workflow。不得从用户文本推断租户、角色、资源或线程标识。`;
 
@@ -14,8 +23,7 @@ export default agentInstructions(async ({ requestContext }) => {
   });
   const baseInstructions = runtime.native
     ? nativeQaseyInstructions
-    : buildSystemPrompt(runtime["qasey-context"], runtime["intent-route"]).text;
+    : buildSystemPrompt(runtime["qasey-context"]).text;
   const casePlan = runtime.native ? undefined : tryCasePlanSummary(requestContext?.get("case-plan"));
-  const tooling = await resolveQaseyAgentTooling(requestContext);
-  return [baseInstructions, casePlan, tooling.codeModeInstructions].filter(Boolean).join("\n\n");
+  return [baseInstructions, casePlan].filter(Boolean).join("\n\n");
 });

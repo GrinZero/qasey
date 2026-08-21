@@ -41,6 +41,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, errorMessage } from "./api";
+import { canRunQaseyTask } from "./catalog";
 import type { AgentApplication, AuditRecord, CatalogEntry, QaseyRun, RunStatus, SandboxSessionState, Session } from "./types";
 
 type View = "platform-home" | "inbox" | "activity" | "qasey-overview" | "qasey-runs" | "qasey-review" | "qasey-cua" | "access";
@@ -67,6 +68,7 @@ const evidenceStages = [
 
 export function App() {
   const [auth, setAuth] = useState<AuthState>({ kind: "loading" });
+  const [loginRedirect] = useState(() => new URLSearchParams(window.location.search).get("redirect_uri") ?? "/admin");
   const [view, setView] = useState<View>(() => window.location.hash === "#apps/qasey" ? "qasey-overview" : "platform-home");
   const [menuOpen, setMenuOpen] = useState(false);
   const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
@@ -122,7 +124,7 @@ export function App() {
   }, [auth.kind, loadWorkspace, runs]);
 
   if (auth.kind === "loading") return <BootScreen />;
-  if (auth.kind === "anonymous") return <LoginScreen message={auth.message} />;
+  if (auth.kind === "anonymous") return <LoginScreen message={auth.message} redirectUri={loginRedirect} />;
 
   const activeCount = runs.filter(run => activeStatuses.includes(run.status)).length;
   const reviewCount = runs.filter(run => run.status === "awaiting_qa").length;
@@ -213,14 +215,14 @@ function BootScreen() {
   return <div className="boot-screen"><BrandMark /><LoaderCircle className="spin" size={22} /><span>正在进入 Agent Platform…</span></div>;
 }
 
-function LoginScreen({ message }: { message: string | undefined }) {
+function LoginScreen({ message, redirectUri }: { message: string | undefined; redirectUri: string }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(message ?? "");
   const login = async () => {
     setLoading(true);
     setError("");
     try {
-      const { url } = await api.loginUrl();
+      const { url } = await api.loginUrl(redirectUri);
       window.location.assign(url);
     } catch (cause) {
       setError(errorMessage(cause));
@@ -319,7 +321,7 @@ function Overview({ catalog, runs, loading, onRefresh, onOpenRuns }: { catalog: 
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState("");
   const [error, setError] = useState("");
-  const taskEntry = catalog.find(item => item.resourceType === "route" && item.resourceId === "qasey-task");
+  const taskAvailable = canRunQaseyTask(catalog);
   const current = runs.find(run => activeStatuses.includes(run.status)) ?? runs[0];
 
   useEffect(() => { localStorage.setItem("qasey:draft", prompt); }, [prompt]);
@@ -327,7 +329,7 @@ function Overview({ catalog, runs, loading, onRefresh, onOpenRuns }: { catalog: 
   const submit = async () => {
     const value = prompt.trim();
     if (!value) { setError("先描述需要分析的需求或问题。"); return; }
-    if (!taskEntry) { setError("当前账户没有可用的 QA 助手，请联系平台管理员。"); return; }
+    if (!taskAvailable) { setError("当前账户无法运行 Qasey Task Workflow，请联系平台管理员。"); return; }
     setSubmitting(true); setError(""); setResult("");
     try {
       const response = await api.runQaseyTask(value);
@@ -343,7 +345,7 @@ function Overview({ catalog, runs, loading, onRefresh, onOpenRuns }: { catalog: 
       <PageHeading eyebrow="QA 工作台" title="把需求变成可验证的结论" description="描述测试目标，Qasey 会读取相关上下文、识别风险并组织下一步。" />
       <div className="overview-grid">
         <section className="surface composer-card">
-          <div className="section-title"><div><span className="section-icon"><MessageSquareText size={18} /></span><div><h2>开始一项 QA 任务</h2><p>可以粘贴 Jira 链接、飞书文档或直接描述问题。</p></div></div><span className="availability"><i /> Qasey 就绪</span></div>
+          <div className="section-title"><div><span className="section-icon"><MessageSquareText size={18} /></span><div><h2>开始一项 QA 任务</h2><p>可以粘贴 Jira 链接、飞书文档或直接描述问题。</p></div></div><span className={taskAvailable ? "availability" : "availability availability--unavailable"}><i /> {loading ? "正在检查 Qasey" : taskAvailable ? "Qasey Workflow 就绪" : "Qasey Workflow 不可用"}</span></div>
           <label className="sr-only" htmlFor="qa-prompt">QA 任务描述</label>
           <textarea id="qa-prompt" value={prompt} onChange={event => { setPrompt(event.target.value); setError(""); }} placeholder="例如：请分析预约改期功能的需求，重点检查跨时区、员工冲突和通知补发…" rows={7} aria-describedby={error ? "prompt-error" : undefined} />
           <div className="prompt-suggestions">

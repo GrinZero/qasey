@@ -99,7 +99,9 @@ export const api = {
     method: "POST",
     body: JSON.stringify({ subjectId, role }),
   }),
-  loginUrl: () => requestJson<{ url: string }>("/auth/google/login?redirect_uri=%2Fadmin"),
+  loginUrl: (redirectUri = "/admin") => requestJson<{ url: string }>(
+    `/auth/google/login?${new URLSearchParams({ redirect_uri: redirectUri })}`,
+  ),
   logout: () => requestJson<{ success: boolean }>("/auth/logout", { method: "POST" }),
 };
 

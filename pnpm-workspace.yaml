@@ -28,3 +28,5 @@ minimumReleaseAgeExclude:
   - '@trycua/cua-driver@0.21.0'
 patchedDependencies:
   '@mastra/core@1.59.0': patches/@mastra__core@1.59.0.patch
+  '@mastra/deployer@1.59.0': patches/@mastra__deployer@1.59.0.patch
+  mastra@1.25.0: patches/mastra@1.25.0.patch

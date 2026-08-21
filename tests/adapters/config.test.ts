@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { loadConfig, resolveSlackChannelMode } from "../../packages/adapters/src/index.ts";
+import { loadConfig, resolveRedisDurabilityEnabled, resolveSlackChannelMode } from "../../packages/adapters/src/index.ts";
 
 const productionAuth = {
   DATABASE_URL: "postgresql://qasey.example/moego_qasey",
@@ -16,6 +16,7 @@ const productionAuth = {
 describe("shared runtime configuration", () => {
   it("uses native workflow and memory defaults", () => {
     const config = loadConfig({ NODE_ENV: "test" } as NodeJS.ProcessEnv);
+    expect(config.QASEY_INTENT_TIMEOUT_MS).toBe(60_000);
     expect(config.QASEY_AGENT_TIMEOUT_MS).toBe(1_800_000);
     expect(config.QASEY_MEMORY_MODEL).toBe("gpt-5.6-luna");
     expect(config.QASEY_MEMORY_MESSAGE_TOKENS).toBe(30_000);
@@ -23,6 +24,7 @@ describe("shared runtime configuration", () => {
     expect(config.QASEY_MEMORY_INPUT_TOKEN_LIMIT).toBe(120_000);
     expect(config.QASEY_ENABLE_STUDIO_EDITOR).toBeUndefined();
     expect(config.QASEY_ENABLE_STUDIO_MCP_PREVIEW).toBeUndefined();
+    expect(config.QASEY_USE_REDIS_DURABILITY).toBeUndefined();
     expect(config.EDITOR_DATABASE_URL).toBeUndefined();
     expect(config.OBSERVABILITY_DATABASE_URL).toBeUndefined();
     expect(config.QASEY_ENABLE_DATADOG).toBe(false);
@@ -31,6 +33,26 @@ describe("shared runtime configuration", () => {
     expect(config.METERSPHERE_BASE_URL).toBe("https://metersphere.devops.moego.pet");
     expect(config.METERSPHERE_PROJECT_ID).toBe("20a78db9-19aa-11ee-a261-5a66b98c4036");
     expect(config.SLACK_CHANNEL_MODE).toBe("auto");
+  });
+
+  it("keeps Redis durability off locally unless explicitly enabled", () => {
+    const local = loadConfig({
+      NODE_ENV: "development",
+      REDIS_HOST: "remote-redis.example",
+    } as NodeJS.ProcessEnv);
+    expect(resolveRedisDurabilityEnabled(local)).toBe(false);
+
+    const optedIn = loadConfig({
+      NODE_ENV: "development",
+      QASEY_USE_REDIS_DURABILITY: "true",
+      REDIS_HOST: "localhost",
+    } as NodeJS.ProcessEnv);
+    expect(resolveRedisDurabilityEnabled(optedIn)).toBe(true);
+
+    expect(() => loadConfig({
+      NODE_ENV: "development",
+      QASEY_USE_REDIS_DURABILITY: "true",
+    } as NodeJS.ProcessEnv)).toThrow(/requires REDIS_HOST/);
   });
 
   it("uses Socket Mode locally and webhook mode in production when both are configured", () => {

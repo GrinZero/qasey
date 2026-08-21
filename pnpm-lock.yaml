@@ -205,6 +205,8 @@ settings:
 
 patchedDependencies:
   '@mastra/core@1.59.0': 0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392
+  '@mastra/deployer@1.59.0': 900951d126ab5b3e3b0bd4db2a47a3b5f6af3b076d3aaee467d5cce800f3007e
+  mastra@1.25.0: b3f856d2cd1a81e5da9d244538e025d147088a7983b157f8ff98e7ff7cad819d
 
 importers:
 
@@ -297,7 +299,7 @@ importers:
         version: 8.21.0
       mastra:
         specifier: 1.25.0
-        version: 1.25.0(@hono/node-server@1.19.17(hono@4.13.1))(@mastra/core@1.59.0(patch_hash=0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3))(supports-color@7.2.0)(typescript@5.9.3)(zod@4.4.3)
+        version: 1.25.0(patch_hash=b3f856d2cd1a81e5da9d244538e025d147088a7983b157f8ff98e7ff7cad819d)(@hono/node-server@1.19.17(hono@4.13.1))(@mastra/core@1.59.0(patch_hash=0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3))(supports-color@7.2.0)(typescript@5.9.3)(zod@4.4.3)
       tsup:
         specifier: ^8.5.0
         version: 8.5.1(postcss@8.5.26)(supports-color@7.2.0)(tsx@4.23.12)(typescript@5.9.3)(yaml@2.9.0)
@@ -309,7 +311,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: 4.1.10
-        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3)(esbuild@0.27.7)(tsx@4.23.12)(yaml@2.9.0))
+        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.2)(tsx@4.23.12)(yaml@2.9.0))
 
   apps/admin-ui:
     dependencies:
@@ -5568,7 +5570,7 @@ snapshots:
     transitivePeerDependencies:
       - zod
 
-  '@mastra/deployer@1.59.0(@hono/node-server@1.19.17(hono@4.13.1))(@mastra/core@1.59.0(patch_hash=0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3))(supports-color@7.2.0)(typescript@5.9.3)(zod@4.4.3)':
+  '@mastra/deployer@1.59.0(patch_hash=900951d126ab5b3e3b0bd4db2a47a3b5f6af3b076d3aaee467d5cce800f3007e)(@hono/node-server@1.19.17(hono@4.13.1))(@mastra/core@1.59.0(patch_hash=0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3))(supports-color@7.2.0)(typescript@5.9.3)(zod@4.4.3)':
     dependencies:
       '@babel/core': 8.0.1
       '@babel/preset-typescript': 8.0.1(@babel/core@8.0.1)
@@ -6485,13 +6487,13 @@ snapshots:
       chai: 6.2.2
       tinyrainbow: 3.1.1
 
-  '@vitest/mocker@4.1.10(vite@8.2.1(@types/node@24.13.3)(esbuild@0.27.7)(tsx@4.23.12)(yaml@2.9.0))':
+  '@vitest/mocker@4.1.10(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.2)(tsx@4.23.12)(yaml@2.9.0))':
     dependencies:
       '@vitest/spy': 4.1.10
       estree-walker: 3.0.3
       magic-string: 0.30.21
     optionalDependencies:
-      vite: 8.2.1(@types/node@24.13.3)(esbuild@0.27.7)(tsx@4.23.12)(yaml@2.9.0)
+      vite: 8.2.1(@types/node@24.13.3)(esbuild@0.28.2)(tsx@4.23.12)(yaml@2.9.0)
 
   '@vitest/pretty-format@4.1.10':
     dependencies:
@@ -7564,14 +7566,14 @@ snapshots:
 
   markdown-table@3.0.4: {}
 
-  mastra@1.25.0(@hono/node-server@1.19.17(hono@4.13.1))(@mastra/core@1.59.0(patch_hash=0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3))(supports-color@7.2.0)(typescript@5.9.3)(zod@4.4.3):
+  mastra@1.25.0(patch_hash=b3f856d2cd1a81e5da9d244538e025d147088a7983b157f8ff98e7ff7cad819d)(@hono/node-server@1.19.17(hono@4.13.1))(@mastra/core@1.59.0(patch_hash=0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3))(supports-color@7.2.0)(typescript@5.9.3)(zod@4.4.3):
     dependencies:
       '@babel/parser': 8.0.4
       '@babel/types': 8.0.4
       '@clack/prompts': 1.7.0
       '@expo/devcert': 1.2.1(supports-color@7.2.0)
       '@mastra/core': 1.59.0(patch_hash=0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3)
-      '@mastra/deployer': 1.59.0(@hono/node-server@1.19.17(hono@4.13.1))(@mastra/core@1.59.0(patch_hash=0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3))(supports-color@7.2.0)(typescript@5.9.3)(zod@4.4.3)
+      '@mastra/deployer': 1.59.0(patch_hash=900951d126ab5b3e3b0bd4db2a47a3b5f6af3b076d3aaee467d5cce800f3007e)(@hono/node-server@1.19.17(hono@4.13.1))(@mastra/core@1.59.0(patch_hash=0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3))(supports-color@7.2.0)(typescript@5.9.3)(zod@4.4.3)
       '@mastra/loggers': 1.2.0(@mastra/core@1.59.0(patch_hash=0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3))
       archiver: 8.0.0
       commander: 14.0.3
@@ -8925,7 +8927,7 @@ snapshots:
       tsx: 4.23.12
       yaml: 2.9.0
 
-  vite@8.2.1(@types/node@24.13.3)(esbuild@0.27.7)(tsx@4.23.12)(yaml@2.9.0):
+  vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.2)(tsx@4.23.12)(yaml@2.9.0):
     dependencies:
       lightningcss: 1.33.0
       picomatch: 4.0.5
@@ -8934,15 +8936,15 @@ snapshots:
       tinyglobby: 0.2.17
     optionalDependencies:
       '@types/node': 24.13.3
-      esbuild: 0.27.7
+      esbuild: 0.28.2
       fsevents: 2.3.3
       tsx: 4.23.12
       yaml: 2.9.0
 
-  vitest@4.1.10(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3)(esbuild@0.27.7)(tsx@4.23.12)(yaml@2.9.0)):
+  vitest@4.1.10(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.2)(tsx@4.23.12)(yaml@2.9.0)):
     dependencies:
       '@vitest/expect': 4.1.10
-      '@vitest/mocker': 4.1.10(vite@8.2.1(@types/node@24.13.3)(esbuild@0.27.7)(tsx@4.23.12)(yaml@2.9.0))
+      '@vitest/mocker': 4.1.10(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.2)(tsx@4.23.12)(yaml@2.9.0))
       '@vitest/pretty-format': 4.1.10
       '@vitest/runner': 4.1.10
       '@vitest/snapshot': 4.1.10
@@ -8959,7 +8961,7 @@ snapshots:
       tinyexec: 1.3.0
       tinyglobby: 0.2.17
       tinyrainbow: 3.1.1
-      vite: 8.2.1(@types/node@24.13.3)(esbuild@0.27.7)(tsx@4.23.12)(yaml@2.9.0)
+      vite: 8.2.1(@types/node@24.13.3)(esbuild@0.28.2)(tsx@4.23.12)(yaml@2.9.0)
       why-is-node-running: 2.3.0
     optionalDependencies:
       '@opentelemetry/api': 1.9.1

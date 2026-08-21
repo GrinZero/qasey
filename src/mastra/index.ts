@@ -20,7 +20,7 @@ import { createAuthorizationMiddleware, isMastraStudioRequest, resolveRequestUse
 import { InMemoryAuditLog, PostgresAuditLog } from "../platform/auth/audit-log.ts";
 import { InMemoryPermissionStore, PermissionService, PostgresPermissionStore } from "../platform/auth/permission-store.ts";
 import { OAuthPrincipalSchema, createServicePrincipal, mapOAuthPrincipal } from "../platform/auth/oauth-principal.ts";
-import { verifyWebhookToken } from "../../packages/adapters/src/index.ts";
+import { resolveRedisDurabilityEnabled, verifyWebhookToken } from "../../packages/adapters/src/index.ts";
 import { createScopedWorkspace } from "../platform/workspace/create-workspace.ts";
 import { createAdminUiApplication } from "../platform/admin-ui/application.ts";
 import { flattenApplicationRegistry } from "../runtime/registry-validator.ts";
@@ -59,8 +59,6 @@ const formatDatadogSpan: CustomSpanFormatter = span => {
     channel: span.requestContext.channel,
     threadId: span.requestContext.mastra__threadId,
     taskId: span.requestContext.taskId,
-    intent: span.requestContext.intent,
-    writeTarget: span.requestContext.writeTarget,
   } : undefined;
   return sanitizeTelemetry({
     ...span,
@@ -75,7 +73,7 @@ const datadogBridge = config.QASEY_ENABLE_DATADOG
       service: config.DD_SERVICE,
       env: config.DD_ENV ?? config.NODE_ENV,
       agentless: false,
-      requestContextKeys: ["applicationId", "requestId", "tenantId", "userId", "mastra__threadId", "taskId", "channel", "intent", "writeTarget"],
+      requestContextKeys: ["applicationId", "requestId", "tenantId", "userId", "mastra__threadId", "taskId", "channel"],
       customSpanFormatter: formatDatadogSpan,
     })
   : undefined;
@@ -129,10 +127,12 @@ const workspace = lifecycle.own(createScopedWorkspace({
   } : {}),
 }));
 const redisKeyPrefix = `qasey:${process.env.NAMESPACE?.trim() || config.NODE_ENV}`;
-const redisUrl = config.REDIS_HOST
-  ? `${config.REDIS_TLS ? "rediss" : "redis"}://${config.REDIS_HOST}:${config.REDIS_PORT ?? 6379}`
+const redisDurabilityEnabled = resolveRedisDurabilityEnabled(config);
+const redisHost = redisDurabilityEnabled ? config.REDIS_HOST : undefined;
+const redisUrl = redisHost
+  ? `${config.REDIS_TLS ? "rediss" : "redis"}://${redisHost}:${config.REDIS_PORT ?? 6379}`
   : undefined;
-const pubsub = config.REDIS_HOST
+const pubsub = redisHost
   ? new RedisStreamsPubSub({
       url: redisUrl!,
       keyPrefix: redisKeyPrefix,
@@ -140,7 +140,7 @@ const pubsub = config.REDIS_HOST
         ...(config.REDIS_USERNAME ? { username: config.REDIS_USERNAME } : {}),
         ...(config.REDIS_PASSWORD ? { password: config.REDIS_PASSWORD } : {}),
         socket: {
-          host: config.REDIS_HOST,
+          host: redisHost,
           port: config.REDIS_PORT ?? 6379,
           ...(config.REDIS_TLS ? {
             tls: true as const,
@@ -150,9 +150,9 @@ const pubsub = config.REDIS_HOST
       },
     })
   : undefined;
-const cacheClient = config.REDIS_HOST
+const cacheClient = redisHost
   ? new Redis({
-      host: config.REDIS_HOST,
+      host: redisHost,
       port: config.REDIS_PORT ?? 6379,
       ...(config.REDIS_USERNAME ? { username: config.REDIS_USERNAME } : {}),
       ...(config.REDIS_PASSWORD ? { password: config.REDIS_PASSWORD } : {}),

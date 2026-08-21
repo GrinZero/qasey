@@ -7,10 +7,29 @@ import { loadAdminUiHtml, resolveAdminUiHtmlPath } from "../../src/platform/admi
 import { InMemoryAuditLog } from "../../src/platform/auth/audit-log.ts";
 import { InMemoryPermissionStore, PermissionService } from "../../src/platform/auth/permission-store.ts";
 import { GoogleOidcService } from "../../src/platform/auth/google-oidc.ts";
+import { canRunQaseyTask } from "../../apps/admin-ui/src/catalog.ts";
 
 const googleOidc = new GoogleOidcService({ callbackUrl: "http://localhost:4111/auth/google/callback", secureCookies: false });
 
 describe("same-origin Admin UI", () => {
+  it("detects the workflow-backed Qasey task ingress without depending on its qualified route ID", () => {
+    expect(canRunQaseyTask([{
+      applicationId: "qasey",
+      resourceType: "route",
+      resourceId: "qasey-qasey-task",
+      routePath: "/v1/qasey/tasks",
+      routeMethod: "POST",
+      permission: "qasey.agent.execute",
+    }])).toBe(true);
+
+    expect(canRunQaseyTask([{
+      applicationId: "qasey",
+      resourceType: "workflow",
+      resourceId: "qasey-task",
+      permission: "qasey.task.execute",
+    }])).toBe(false);
+  });
+
   it("exposes metadata BFF routes while execution goes through domain-safe handlers", async () => {
     const app = createAdminUiApplication({ applicationCatalog: [], permissions: new PermissionService(new InMemoryPermissionStore()), audit: new InMemoryAuditLog(), googleOidc });
     expect(app.routes?.map(route => route.route.path)).toEqual([

@@ -39,37 +39,6 @@ export const QaseyRequestContextSchema = z.object({
 });
 export type QaseyRequestContext = z.infer<typeof QaseyRequestContextSchema>;
 
-export const QaIntentSchema = z.enum([
-  "qa_quick_query",
-  "qa_review",
-  "case_create_full",
-  "case_maintain_fast",
-  "experience_read",
-  "experience_write",
-  "meta_or_out_of_scope",
-  "unknown",
-]);
-export const E2EIntentSchema = z.enum([
-  "e2e_generate",
-  "e2e_rerun",
-  "e2e_repair",
-  "e2e_status",
-]);
-export const IntentSchema = z.union([QaIntentSchema, E2EIntentSchema]);
-export type Intent = z.infer<typeof IntentSchema>;
-
-export const IntentRouteSchema = z.object({
-  version: z.literal(2).default(2),
-  intent: IntentSchema,
-  relation: z.enum(["new", "follow_up", "unknown"]),
-  writeTarget: z.enum(["none", "metersphere", "qa_experience", "git"]),
-  depth: z.enum(["quick", "standard", "deep"]),
-  confidence: z.number().min(0).max(1),
-  reason: z.string().max(500),
-  routerStatus: z.enum(["ok", "fallback"]),
-});
-export type IntentRoute = z.infer<typeof IntentRouteSchema>;
-
 export const AgentProgressInputSchema = z.object({
   milestone: z.string().trim().min(2).max(64).regex(/^[a-z][a-z0-9_-]*$/u),
   title: z.string().trim().min(2).max(100),
@@ -91,7 +60,6 @@ export type ToolEffect = z.infer<typeof ToolEffectSchema>;
 export const ToolPolicySchema = z.object({
   effect: ToolEffectSchema,
   allowedChannels: z.array(QaseyChannelSchema),
-  allowedIntents: z.array(IntentSchema),
   requiresApproval: z.boolean(),
 });
 export type ToolPolicy = z.infer<typeof ToolPolicySchema>;

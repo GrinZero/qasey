@@ -13,7 +13,7 @@ export interface AuthorizationMiddlewareOptions {
   audit: AuditLog;
   studioUiEnabled?: boolean;
   resolvePrincipal(
-    requestContext: { get(key: string): unknown; set(key: string, value: unknown): void },
+    requestContext: { get(key: string): unknown; set(key: string, value: unknown): void; delete?(key: string): void },
     request: { raw: Request; path: string; method: string; header(name: string): string | undefined },
   ): OAuthPrincipal | undefined | Promise<OAuthPrincipal | undefined>;
 }
@@ -78,6 +78,33 @@ export function isMastraStudioRequest(request: {
   } catch {
     return false;
   }
+}
+
+export function studioLoginRedirect(request: {
+  raw: Request;
+  path: string;
+  method: string;
+  header(name: string): string | undefined;
+}): string | undefined {
+  if (!classifyMastraStudioRoute(request.path, request.method)) return undefined;
+  const acceptsHtml = request.header("accept")?.toLowerCase().includes("text/html") ?? false;
+  const documentNavigation = request.header("sec-fetch-dest")?.toLowerCase() === "document";
+  if (!acceptsHtml && !documentNavigation) return undefined;
+  const originalUrl = new URL(request.raw.url);
+  const redirectUri = `${request.path}${originalUrl.search}`;
+  return `/admin?${new URLSearchParams({ redirect_uri: redirectUri })}`;
+}
+
+function isPlatformAdminWorkflowRunAccess(
+  request: { path: string; method: string },
+  principal: OAuthPrincipal,
+  studioRequest: boolean,
+): boolean {
+  if (!studioRequest || principal.audience !== "admin-ui" || !principal.roles.includes("platform-admin")) return false;
+  const mastraPath = stripMastraApiPrefix(request.path);
+  if (!mastraPath) return false;
+  if (request.method === "GET") return /^\/workflows\/[^/]+\/runs(?:\/[^/]+)?\/?$/u.test(mastraPath);
+  return request.method === "POST" && /^\/workflows\/[^/]+\/runs\/[^/]+\/cancel\/?$/u.test(mastraPath);
 }
 
 async function applicationIdForRequestScope(
@@ -158,6 +185,8 @@ export function createAuthorizationMiddleware(options: AuthorizationMiddlewareOp
     }
     if (!principal) {
       await options.audit.write(auditRecord(requestId, resource, undefined, "deny", "anonymous"));
+      const loginRedirect = options.studioUiEnabled ? studioLoginRedirect(c.req) : undefined;
+      if (loginRedirect) return c.redirect(loginRedirect, 302);
       return c.json({ error: "unauthorized", requestId }, 401);
     }
     if (!resource) {
@@ -195,7 +224,20 @@ export function createAuthorizationMiddleware(options: AuthorizationMiddlewareOp
     const studioRequest = isMastraStudioRequest(c.req);
     requestContext.set("ingressSource", studioRequest ? "mastra-studio" : principal.audience);
     requestContext.set("sessionId", scope.threadId);
-    requestContext.set(MASTRA_RESOURCE_ID_KEY, scope.resourceId);
+    if (isPlatformAdminWorkflowRunAccess(c.req, principal, studioRequest)) {
+      // Mastra gives its server-derived resource id precedence over the
+      // resourceId query parameter. Leaving the authenticated user's private
+      // scope here would hide Slack/Jira runs from platform admins, reject
+      // their detail pages, and prevent canceling a run selected in Studio.
+      // Only un-scope run history/detail and the existing-run cancel action;
+      // new executions, other workflow controls, and every non-admin request
+      // retain the normal owner boundary. Mastra resolves cancel by run id,
+      // validates the persisted run, then recreates it with its stored owner.
+      if (requestContext.delete) requestContext.delete(MASTRA_RESOURCE_ID_KEY);
+      else requestContext.set(MASTRA_RESOURCE_ID_KEY, undefined);
+    } else {
+      requestContext.set(MASTRA_RESOURCE_ID_KEY, scope.resourceId);
+    }
     // Authentication owns the resource boundary, not the conversation
     // lifecycle. Ingress adapters that need a stable conversation (Slack,
     // Jira, etc.) set MASTRA_THREAD_ID_KEY themselves. Agent APIs and Studio

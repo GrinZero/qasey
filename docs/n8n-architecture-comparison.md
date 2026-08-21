@@ -38,7 +38,7 @@ n8n baseline 当前包含：
 代码版当前验证结果：
 
 - TypeScript typecheck 通过；
-- 16 个 Vitest 文件、56 个测试全部通过；
+- 51 个 Vitest 文件、212 个测试全部通过；
 - 测试覆盖 normalizer、queue、tool policy、MCP config、Evidence Ledger、完成语义、runtime guard 和 E2E coordinator 等核心边界；
 - 这些结果只证明代码级行为，不等价于 production 流量、外部系统或 runner pool 已完成验证。
 
@@ -78,8 +78,8 @@ flowchart LR
         Normalize["Normalizer + TriggerEnvelope"]
         Queue["Postgres trigger queue"]
         Worker["Worker + lease heartbeat"]
-        Router["Intent Router"]
-        Agent["Qasey Agent"]
+        Agent["Qasey Agent + Agent Skills"]
+        Discovery["Tool Discovery"]
         Ledger["Evidence Ledger"]
         Outbox["Notification outbox"]
         Memory["Mastra Memory"]
@@ -97,9 +97,10 @@ flowchart LR
     Jira --> Normalize
     API --> Normalize
     Forward --> Normalize
-    Normalize --> Queue --> Worker --> Router --> Agent
-    API -. "同步调试" .-> Router
+    Normalize --> Queue --> Worker --> Agent
+    API -. "同步调试" .-> Agent
     Agent <--> Memory
+    Agent <--> Discovery
     Agent <--> Ledger
     Ledger --> Native
     Ledger --> MCP --> N8N --> External
@@ -117,8 +118,8 @@ flowchart LR
 | 系统形态 | 63 节点的可视化单体 workflow | API、Receiver、Worker、domain、adapter、E2E workflow 分层 |
 | 执行生命周期 | 一次 n8n execution 内同步完成 | 持久队列异步执行，支持 lease、heartbeat、超时和 worker 扩容 |
 | 幂等与恢复 | 依赖 trigger 行为、n8n execution 和下游接口 | `TriggerEnvelope.idempotencyKey`、Postgres queue、任务重试和 notification outbox |
-| 工具授权 | 工具大多持续暴露，依赖 prompt 告诉 Agent 何时只读 | 按 channel、intent、effect 动态裁剪；delete 永不暴露；审批工具保留在 Mastra 层 |
-| 意图提示词 | 在主 Agent prompt 中按 intent 描述工作方式和写后回查要求 | Prompt v9 按 12 类 intent 注入“目标、执行协议、完成条件、输出合同”，并叠加 depth、relation、channel、真实进度边界和逐用例证据模块；不注入日期等易变值，保持缓存稳定 |
+| 工具发现与授权 | 工具大多持续暴露，依赖 prompt 告诉 Agent 何时只读 | Tool Discovery 按需激活能力；channel、identity、effect、approval 与 Workflow ownership 在执行边界独立校验，delete 永不暴露 |
+| 意图执行协议 | 在主 Agent prompt 中按 intent 描述工作方式和写后回查要求 | qasey-main 先按常驻 Prompt 的明文 intent→Skill 映射识别任务，再加载对应领域级 Skill；unknown/meta 等简单分支直接在常驻 Prompt 中处理 |
 | 完成判定 | Agent 输出和 prompt 约定为主 | Controller 校验 finish reason、未完成 tool call、最终答案及 MeterSphere completion receipt |
 | 证据管理 | 工具结果直接进入上下文，重复调用主要靠 Agent 避免 | run 级 single-flight、source 复用、artifact 化、错误缓存和无进展熔断 |
 | Memory | Postgres Chat Memory，加最近 6 条消息用于路由 | Working Memory + Observational Memory + Reflector；Memory 与 Evidence Ledger 分工 |
@@ -141,12 +142,13 @@ case create/maintain 只有在 MeterSphere 写入成功，并且之后发生一�
 
 ### 5.2 副作用边界更强
 
-代码版先用固定 allowlist 拒绝未登记工具，再按 route 和 channel 过滤：
+代码版先用固定 allowlist 拒绝未登记工具，再把语义选择与硬权限分开：
 
-- MeterSphere create/edit/upsert 只对 case create/maintain 开放；
-- QA Experience upsert 只对 Slack `experience_write` 开放，并要求 Mastra approval；
+- qasey-main 通过 Tool Discovery 找到相关能力，而不是依赖前置 intent 裁剪工具列表；
+- MeterSphere create/edit/upsert 在主 Agent 中只能 dry-run，真实 mutation 只归确定性 Workflow 所有；
+- QA Experience upsert 只允许 Slack 渠道，并要求 Mastra approval；
 - delete 工具永不提供给 Agent；
-- shadow mode 把带写目标的 route 降级为只读工具集；
+- shadow mode 直接把 discovery catalog 降级为只读，不依赖 Agent 的 intent 标签；
 - 缺少真实 ingress context 时，test/production fail closed。
 
 这些约束在执行边界生效，不依赖模型遵守 system prompt。
@@ -184,11 +186,11 @@ E2E 使用确定性 workflow，而不是要求 Agent 记住流程：
 
 Runner 的退出码和断言决定通过与否，模型和 Cua 都不能自行声明测试通过。
 
-### 5.6 意图不再只是路由标签
+### 5.6 意图回到 Agent，执行协议进入 Agent Skills
 
-Prompt v9 为 12 类意图分别定义了目标、执行协议、完成条件和输出合同，包括 QA 快问/评审、用例新建/维护、经验读写及 E2E generate/rerun/repair/status。`depth` 会实际控制 quick、standard、deep 的取证范围，`relation` 会控制新任务与追问如何继承历史；两者不再只是运行时上下文字段。
+常驻 system prompt 明文要求 qasey-main 先识别 intent，并把 QA 快问、QA 评审、用例新建/维护、经验读写及 E2E generate/rerun/repair/status 映射到 5 个领域级 Agent Skill；unknown 与 meta/out-of-scope 不创建专门 Skill。相近 intent 共享 Skill 内的不同执行模式，复合请求按主次顺序组合 Skill。intent 不再向 Runtime 登记；Runtime 只消费真实 Tool 结果、CasePlan、completion receipt 与 E2E run 等可验证事实。
 
-这补齐了旧代码版相对 n8n 的明显不足：过去虽然会把 intent、depth 和 relation 写入系统提示词，但 intent 只有一句宽泛策略，depth/relation 没有对应行为模块。现在 Agent 的软行为约束已经按意图细化；写权限、审批、完成判定仍由代码控制面硬约束，避免把安全性重新寄托在 prompt 上。
+Skill 决定“怎么做”，Tool Discovery 决定“用什么做”，Runtime Policy 决定“允许做什么”，Workflow 与 receipt 决定“是否真的完成”。intent 不再参与工具授权或 finalization 分支，因此模型的语义判断不会变成权限授予。
 
 ## 6. 代码版不足与未解决问题
 
@@ -218,9 +220,9 @@ MeterSphere update 有稳定 case ID 和 fresh read 证明；create 仍需要下
 
 n8n 可以直接在 UI 查看节点数据、修改表达式、切换 credential 和重新执行。代码版的行为变更通常需要开发、Review、CI、镜像构建和部署；这提高了安全性和可审计性，也降低了非开发人员自主修改流程的速度。
 
-### 6.7 Prompt v9 仍需要真实任务评测
+### 6.7 Skill 与 Tool Discovery 仍需要真实任务评测
 
-针对 12 类意图的契约测试只能证明对应模块被正确组装，不能证明模型在所有真实输入上都会选到最优证据、稳定遵循输出合同或优于 n8n。上线前仍应使用同一批代表性请求做 shadow 对比，分别评估路由准确率、无效工具调用、证据质量、任务完成率、token 和耗时，并把失败样本固化为回归集。
+针对 5 个按领域合并的 Agent Skill 的结构测试只能证明文件完整且明文映射正确，不能证明模型在所有真实输入上都会加载正确 Skill、搜索到最优工具或优于 n8n。上线前仍应使用同一批代表性请求做 shadow 对比，分别评估意图识别、Skill 选择、Tool Discovery 命中率、无效工具调用、证据质量、任务完成率、token 和耗时，并把失败样本固化为回归集。
 
 ## 7. n8n 版优势
 
@@ -288,14 +290,14 @@ workflow 已有 63 个节点但没有 node groups。`Search for messages in Slac
 
 - 为 Jira Webhook 补齐真实认证；
 - 移除 Agent 可见的 delete 工具；
-- 对 write 工具增加 intent 级硬过滤；
+- 对 write 工具增加 channel、effect、approval 与 Workflow ownership 级硬过滤；
 - 修复或删除未连接工具；
 - 补充业务级成功、失败和交付指标。
 
 ### 阶段二：代码版 shadow
 
 - 同一请求同时进入 n8n production path 和代码版只读 shadow path；
-- 对比 intent、工具集合、证据来源、最终结论、token/耗时和错误分类；
+- 对比 Skill 加载、工具集合、证据来源、最终结论、token/耗时和错误分类；
 - 写意图在 shadow 中保持只读，不发送用户通知；
 - 建立可接受差异和必须一致字段，不只比较最终自然语言。
 
@@ -325,9 +327,10 @@ workflow 已有 63 个节点但没有 node groups。`Search for messages in Slac
 - 迁移计划：[`PLAN.md`](../PLAN.md)
 - 原生 Workflow durability 与旧 queue 移除说明：[`workspace-and-durability.md`](workspace-and-durability.md)
 - Tool policy：[`packages/domain/src/tool-policy.ts`](../packages/domain/src/tool-policy.ts)
-- MCP allowlist 与 route/channel filtering：[`packages/adapters/src/mcp.ts`](../packages/adapters/src/mcp.ts)
+- MCP allowlist、Tool Discovery catalog 与 channel/effect filtering：[`packages/adapters/src/mcp.ts`](../packages/adapters/src/mcp.ts)
 - Evidence Ledger：[`packages/domain/src/evidence-ledger.ts`](../packages/domain/src/evidence-ledger.ts)
-- Prompt v9 与意图合同：[`packages/domain/src/prompt.ts`](../packages/domain/src/prompt.ts)
+- 常驻 Prompt：[`packages/domain/src/prompt.ts`](../packages/domain/src/prompt.ts)
+- Agent 级 intent Skills：[`src/mastra/agents/qasey-main/skills`](../src/mastra/agents/qasey-main/skills)
 - Prompt 组装测试：[`tests/domain/prompt.test.ts`](../tests/domain/prompt.test.ts)
 - Agent 完成判定：[`src/mastra/applications/qasey/service.ts`](../src/mastra/applications/qasey/service.ts)
 - E2E lifecycle：[`src/mastra/workflows/e2e-workflow.ts`](../src/mastra/workflows/e2e-workflow.ts)

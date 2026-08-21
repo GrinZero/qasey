@@ -51,7 +51,7 @@ pnpm evals:snapshot-sources
 
 ## Mastra
 
-当前仓库的 `@mastra/core` dataset item 支持 `externalId`、`input`、`groundTruth`、`expectedTrajectory`、`requestContext`、`metadata` 和 `source`。导出文件已经为 `qasey` agent 生成 `qasey-context` 与 `intent-route`：
+当前仓库的 `@mastra/core` dataset item 支持 `externalId`、`input`、`groundTruth`、`expectedTrajectory`、`requestContext`、`metadata` 和 `source`。导出文件只为 `qasey` agent 生成可信 `qasey-context`；`groundTruth.route` 仅作为离线评测标签，不注入生产执行上下文：
 
 ```ts
 const dataset = await mastra.datasets.create({
@@ -88,7 +88,7 @@ safe dataset 默认绑定三个无模型成本的代码评分器：可见输出�
 
 这不是“完全无外部影响”模式：真实读取仍会消耗 API 配额、留下访问日志，并受到权限和数据漂移影响。首次运行建议 concurrency 设为 `1`；确认读取凭证和结果正常后再提高。原始 `qasey-real-qa-workflows-v1` 没有写 mock，不应用于直接运行 agent experiment。
 
-这一路径评价的是已路由后的 Qasey agent。若要单测 intent router，应读取同一记录的 `groundTruth.route`，通过 `executeQasey` 或独立 router harness 做比较，不能因为 requestContext 已注入金标 route 就认为 router 通过。
+这一路径评价的是完整的 Skill-driven Qasey agent。`groundTruth.route` 可用于把样本按预期 intent、写入目标和深度分组，或对 Skill 加载轨迹进行离线评分，但 Agent 不需要生成或登记对应 route 对象。
 
 ## Datadog
 
@@ -112,7 +112,7 @@ CSV 三列都是 JSON 字符串。任务函数应解析 `input`，evaluators 解
 
 | scorer | 评分对象 | 建议 |
 |---|---|---|
-| `route_exact` | intent / relation / writeTarget / depth | 代码评分，0/1 |
+| `skill_selection` | 预期 intent 对应的 Skill 是否在 trace 中加载 | trajectory 代码评分，0/1 |
 | `required_behavior` | `mustInclude` | LLM judge，逐项覆盖率 |
 | `forbidden_behavior` | `mustNot` | gate，出现任一关键违规即 0 |
 | `trajectory` | required / forbidden capabilities | trace/tool-call 代码评分 |

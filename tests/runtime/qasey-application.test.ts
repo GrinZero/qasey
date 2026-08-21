@@ -17,19 +17,14 @@ describe("Qasey application access policy", () => {
     } as unknown as QaseyApplicationModules);
 
     expect(application.agents).toEqual({});
-    expect(application.filesystemAgents).toEqual(["qasey-main", "qasey-intent-router"]);
+    expect(application.filesystemAgents).toEqual(["qasey-main"]);
     expect(application.access.agents["qasey-main"]?.audiences).toEqual([
       "admin-ui",
       "api",
       "service",
     ]);
     expect(application.access.agents["qasey-main"]?.audiences).not.toContain("channel");
-    expect(application.access.agents["qasey-intent-router"]?.audiences).toEqual([
-      "admin-ui",
-      "api",
-      "service",
-    ]);
-    expect(application.access.agents["qasey-intent-router"]?.audiences).not.toContain("channel");
+    expect(application.access.agents).not.toHaveProperty("qasey-intent-router");
     for (const workflow of Object.values(application.access.workflows)) {
       expect(workflow.audiences).toEqual(["admin-ui", "api", "service"]);
       expect(workflow.audiences).not.toContain("channel");

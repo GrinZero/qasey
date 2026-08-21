@@ -9,8 +9,8 @@ export interface QaseyApplicationModules {
 }
 
 /**
- * Public Qasey catalog. Intent routing remains an internal Agent. The
- * MeterSphere workflow is registered only because durable snapshots require
+ * Public Qasey catalog. Intent selection lives inside qasey-main through
+ * Agent-level Skills. The MeterSphere workflow is registered because durable snapshots require
  * the runtime lifecycle, and its service-only policy blocks public callers.
  *
  * The composition root supplies code-registered primitives. File-discovered
@@ -31,7 +31,7 @@ export function createQaseyApplication(modules: QaseyApplicationModules): AgentA
       accent: "indigo",
     },
     agents: {},
-    filesystemAgents: ["qasey-main", "qasey-intent-router"],
+    filesystemAgents: ["qasey-main"],
     workflows: {
       "qasey-task": taskWorkflowModule.qaseyTaskWorkflow,
       "qasey-e2e-lifecycle": e2eModule.e2eLifecycleWorkflow,
@@ -43,7 +43,6 @@ export function createQaseyApplication(modules: QaseyApplicationModules): AgentA
         // Authenticated UI, API, and service callers share the same RBAC gate.
         // Signed channel ingress remains isolated to its dedicated adapter.
         "qasey-main": { permission: "qasey.agent.execute", audiences: ["admin-ui", "api", "service"] },
-        "qasey-intent-router": { permission: "qasey.intent.route", audiences: ["admin-ui", "api", "service"] },
       },
       workflows: {
         "qasey-task": { permission: "qasey.task.execute", audiences: ["admin-ui", "api", "service"] },
