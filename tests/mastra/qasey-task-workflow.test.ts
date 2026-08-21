@@ -23,20 +23,11 @@ const response = {
   runId: "workflow-run-1",
   outcome: "success" as const,
   finalization: "agent" as const,
-  evidenceStats: {
-    actualExecutions: 0,
-    deduplicatedCalls: 0,
-    cachedFailures: 0,
-    artifactReads: 0,
-    artifactizedResults: 0,
-    totalResultChars: 0,
-    duplicateResultCharsAvoided: 0,
-  },
   progress: [],
 };
 
 describe("qasey-task workflow", () => {
-  it("lets qasey-main select a Skill before artifact-driven finalization", () => {
+  it("lets qasey-main select a Skill before workflow finalization", () => {
     const graph = qaseyTaskWorkflow.serializedStepGraph as Array<Record<string, any>>;
     expect(graph.map(entry => entry.step?.id ?? entry.type)).toEqual([
       "run-skill-driven-agent",
@@ -47,7 +38,6 @@ describe("qasey-task workflow", () => {
     const branch = graph.find(entry => entry.type === "conditional")!;
     expect(branch.steps.map((entry: Record<string, any>) => entry.step?.id ?? entry.id)).toEqual([
       "finalize-agent-response",
-      "finalize-receipt-response",
       "qasey-metersphere-case-finalization",
     ]);
     const caseFinalization = branch.steps.find((entry: Record<string, any>) => entry.id === "qasey-metersphere-case-finalization")!;
@@ -106,7 +96,6 @@ describe("qasey-task workflow", () => {
         item_count: 1,
         creates: [{ id: "preview", name: "Case", node_id: "module", node_path: "/AI Draft/Feature", verified: true }],
       }),
-      evidenceSnapshotHash: "evidence",
     })!;
     const main = new Agent({
       id: "qasey-main",

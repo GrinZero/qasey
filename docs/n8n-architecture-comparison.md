@@ -15,7 +15,7 @@ n8n 版是一个以 Agent 为中心的可视化单体工作流：入口、上下
 - 哪些请求允许写入，哪些工具可以被 Agent 看见；
 - 任务、外部写入和用户通知分别在什么条件下算成功；
 - Worker 崩溃、超时、重复事件和通知失败时如何恢复；
-- 大结果、重复工具调用和无进展循环如何受控；
+- 大结果如何通过 Tool model output 与 Processor 控制上下文成本；
 - E2E 代码生成、执行、独立验证和人工验收如何形成状态机。
 
 因此，代码版更适合作为长期目标架构；n8n 版仍适合作为当前 production baseline、回滚路径和原子 adapter 平台。迁移阶段应保持混合架构并通过 shadow 流量逐步切换，不应一次性下线 n8n。
@@ -38,8 +38,7 @@ n8n baseline 当前包含：
 代码版当前验证结果：
 
 - TypeScript typecheck 通过；
-- 51 个 Vitest 文件、212 个测试全部通过；
-- 测试覆盖 normalizer、queue、tool policy、MCP config、Evidence Ledger、完成语义、runtime guard 和 E2E coordinator 等核心边界；
+- 测试覆盖 normalizer、tool policy、MCP config、Tool model output、完成语义、runtime guard 和 E2E coordinator 等核心边界；
 - 这些结果只证明代码级行为，不等价于 production 流量、外部系统或 runner pool 已完成验证。
 
 ## 3. 总体架构
@@ -80,7 +79,8 @@ flowchart LR
         Worker["Worker + lease heartbeat"]
         Agent["Qasey Agent + Agent Skills"]
         Discovery["Tool Discovery"]
-        Ledger["Evidence Ledger"]
+        Processors["Tool Hooks + Processors"]
+        Workflow["Owned Workflows"]
         Outbox["Notification outbox"]
         Memory["Mastra Memory"]
     end
@@ -101,10 +101,10 @@ flowchart LR
     API -. "同步调试" .-> Agent
     Agent <--> Memory
     Agent <--> Discovery
-    Agent <--> Ledger
-    Ledger --> Native
-    Ledger --> MCP --> N8N --> External
-    Ledger --> E2E
+    Agent <--> Processors
+    Processors --> Native
+    Processors --> MCP --> N8N --> External
+    Agent --> Workflow --> E2E
     Worker --> Outbox --> Slack
     Outbox --> Jira
 ```
@@ -121,8 +121,8 @@ flowchart LR
 | 工具发现与授权 | 工具大多持续暴露，依赖 prompt 告诉 Agent 何时只读 | Tool Discovery 按需激活能力；channel、identity、effect、approval 与 Workflow ownership 在执行边界独立校验，delete 永不暴露 |
 | 意图执行协议 | 在主 Agent prompt 中按 intent 描述工作方式和写后回查要求 | qasey-main 先按常驻 Prompt 的明文 intent→Skill 映射识别任务，再加载对应领域级 Skill；unknown/meta 等简单分支直接在常驻 Prompt 中处理 |
 | 完成判定 | Agent 输出和 prompt 约定为主 | Controller 校验 finish reason、未完成 tool call、最终答案及 MeterSphere completion receipt |
-| 证据管理 | 工具结果直接进入上下文，重复调用主要靠 Agent 避免 | run 级 single-flight、source 复用、artifact 化、错误缓存和无进展熔断 |
-| Memory | Postgres Chat Memory，加最近 6 条消息用于路由 | Working Memory + Observational Memory + Reflector；Memory 与 Evidence Ledger 分工 |
+| 工具结果 | 工具结果直接进入上下文 | `toModelOutput` 保留完整应用结果但限制模型载荷；`ToolCallFilter` 保留紧凑历史，`TokenLimiter` 兜底 |
+| Memory | Postgres Chat Memory，加最近 6 条消息用于路由 | Working Memory + Observational Memory + Reflector；Tool history 由原生 Processor 控制 |
 | 通知交付 | Slack/Jira 节点属于主 execution | 任务结果先写 Outbox，再独立重试通知；通知失败不重跑成功的 Agent |
 | E2E | 无完整 lifecycle | Author、bounded repair、clean verifier、Draft PR、QA verdict 状态机 |
 | 可观测性 | n8n execution、节点数据和 tracing metadata | run/job/event ID、工具 disposition、阶段日志、Mastra Observability 和可选 Datadog APM |
@@ -161,16 +161,9 @@ Postgres trigger queue 使用唯一幂等键、`FOR UPDATE SKIP LOCKED` 和可�
 
 ### 5.4 工具调用和上下文成本可控
 
-Evidence Ledger 为同一 run 提供：
+读取 Tool 的 `execute` 保留完整 typed 结果，`toModelOutput` 只生成有界的模型载荷。`ToolCallFilter({ preserveModelOutput: true })` 在后续 step 中移除原始 tool arguments/results，同时保留紧凑 model output；`TokenLimiter` 作为最终上下文上限。Tool 生命周期观测统一经过 Agent Tool Hooks，不再改写每个 Tool 的 `execute`。
 
-- 相同调用的 single-flight；
-- 同一业务来源的语义复用；
-- retryable 与 non-retryable 错误分类；
-- 大于 24,000 字符的结果 artifact 化；
-- 按 offset 有界读取 artifact；
-- 连续两次工具 iteration 没有新增证据时停止 Agent loop。
-
-因此重复抓取不会反复请求上游，也不会把同一份大结果不断塞回模型上下文。
+Code Mode 实现仍保留用于未来评估，但当前不向 qasey-main 暴露；Tool Discovery 发现的 Tool 因而统一经过 Agent Hooks。真实 MeterSphere mutation、fresh read-back 和 completion receipt 继续由原生 Workflow 独占。
 
 ### 5.5 更适合 E2E 平台化
 
@@ -204,7 +197,7 @@ MeterSphere、Figma、QA Experience 和 Lark 等能力仍有部分由 n8n 原子
 
 ### 6.3 外部 mutation 不是完整 exactly-once
 
-Trigger queue 是 at-least-once。如果下游 create 已成功，但 Worker 在完成 job 前崩溃，lease 到期后可能产生新的 Agent attempt。Outbox 能阻止重复最终通知，Evidence Ledger 只能在单个 run 内去重，不能跨进程 attempt 保证 mutation exactly-once。
+Trigger queue 是 at-least-once。如果下游 create 已成功，但 Worker 在完成 job 前崩溃，lease 到期后可能产生新的 Agent attempt。Outbox 能阻止重复最终通知；Agent Tool Hooks 和 Processor 不提供跨进程 mutation exactly-once，真实写入仍必须依赖 Workflow 的稳定幂等键。
 
 MeterSphere update 有稳定 case ID 和 fresh read 证明；create 仍需要下游支持稳定业务幂等键、可验证 upsert 或补偿策略。
 
@@ -328,7 +321,8 @@ workflow 已有 63 个节点但没有 node groups。`Search for messages in Slac
 - 原生 Workflow durability 与旧 queue 移除说明：[`workspace-and-durability.md`](workspace-and-durability.md)
 - Tool policy：[`packages/domain/src/tool-policy.ts`](../packages/domain/src/tool-policy.ts)
 - MCP allowlist、Tool Discovery catalog 与 channel/effect filtering：[`packages/adapters/src/mcp.ts`](../packages/adapters/src/mcp.ts)
-- Evidence Ledger：[`packages/domain/src/evidence-ledger.ts`](../packages/domain/src/evidence-ledger.ts)
+- Tool model output：[`packages/adapters/src/read-connectors.ts`](../packages/adapters/src/read-connectors.ts)
+- Tool history Processors：[`src/mastra/agents/qasey-main/processors.ts`](../src/mastra/agents/qasey-main/processors.ts)
 - 常驻 Prompt：[`packages/domain/src/prompt.ts`](../packages/domain/src/prompt.ts)
 - Agent 级 intent Skills：[`src/mastra/agents/qasey-main/skills`](../src/mastra/agents/qasey-main/skills)
 - Prompt 组装测试：[`tests/domain/prompt.test.ts`](../tests/domain/prompt.test.ts)

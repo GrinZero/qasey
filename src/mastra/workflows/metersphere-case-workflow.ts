@@ -6,35 +6,18 @@ import { z } from "zod";
 import {
   buildMeterSphereCaseOperationReceipt,
   completeCaseOperationAgainstPlan,
-  createSourceKey,
   extractCaseRecordsFromResult,
   IncompleteOutcomeError,
   validateMeterSphereCasePlan,
 } from "../../../packages/domain/src/index.ts";
 import type {
-  EvidenceCompletionReceipt,
-  EvidenceManifestEntry,
+  MeterSphereCaseCompletionReceipt,
   MeterSphereCasePlan,
 } from "../../../packages/domain/src/index.ts";
 import { config, getRuntimeContext, mcpCatalog, mcpSubject } from "../runtime.ts";
 import { PlatformRequestContextSchema } from "../../platform/context/schema.ts";
 import { ownerScopeFromRequestContext } from "../../platform/context/owner-scope.ts";
 import { externalWriteIdempotencyKey } from "../../platform/workflows/durability.ts";
-
-const ManifestSchema = z.object({
-  sourceKey: z.string(),
-  toolName: z.string(),
-  status: z.enum(["in_flight", "acquired", "failed"]),
-  attempts: z.number().int().nonnegative(),
-  artifactId: z.string().optional(),
-  contentHash: z.string().optional(),
-  totalChars: z.number().int().nonnegative().optional(),
-  retryable: z.boolean().optional(),
-  errorCode: z.string().optional(),
-  completedAt: z.number().optional(),
-  startedSequence: z.number().optional(),
-  completedSequence: z.number().optional(),
-});
 
 const CaseRecordSchema = z.object({
   id: z.string(),
@@ -61,7 +44,6 @@ const CaseOperationSchema = z.object({
 export const MeterSphereCasePlanSchema = z.object({
   version: z.literal(1),
   planHash: z.string(),
-  evidenceSnapshotHash: z.string(),
   payloadHash: z.string(),
   plannedCount: z.number().int().positive(),
   cases: z.array(z.object({
@@ -81,17 +63,14 @@ export const MeterSphereCaseWorkflowInputSchema = z.object({ plan: MeterSphereCa
 const WriteOutputSchema = z.object({
   plan: MeterSphereCasePlanSchema,
   operation: CaseOperationSchema,
-  write: ManifestSchema,
 });
-export const EvidenceCompletionReceiptSchema = z.object({
+export const MeterSphereCaseCompletionReceiptSchema = z.object({
   casePlanHash: z.string(),
-  write: ManifestSchema,
-  verification: ManifestSchema,
-  verificationMode: z.enum(["internal_read_back", "separate_read_back"]),
-  caseOperation: CaseOperationSchema.optional(),
+  verificationMode: z.literal("separate_read_back"),
+  caseOperation: CaseOperationSchema,
 });
-const VerificationOutputSchema = z.object({ receipt: EvidenceCompletionReceiptSchema });
-export const MeterSphereCaseWorkflowOutputSchema = z.object({ receipt: EvidenceCompletionReceiptSchema });
+const VerificationOutputSchema = z.object({ receipt: MeterSphereCaseCompletionReceiptSchema });
+export const MeterSphereCaseWorkflowOutputSchema = z.object({ receipt: MeterSphereCaseCompletionReceiptSchema });
 
 export type MeterSphereCaseWorkflowToolExecutor = (
   toolName: string,
@@ -136,14 +115,7 @@ const writeFrozenPlan = createStep({
     if (!operation) {
       throw new IncompleteOutcomeError("MeterSphere bulk write did not return a complete verified result for the frozen CasePlan");
     }
-    return {
-      plan,
-      operation,
-      write: acquiredManifest(
-        "metersphere_ms_bulk_upsert_test_cases",
-        createSourceKey("metersphere_ms_bulk_upsert_test_cases", writeInput),
-      ),
-    };
+    return { plan, operation };
   },
 });
 
@@ -155,7 +127,7 @@ const verifyFreshReadBack = createStep({
   requestContextSchema: PlatformRequestContextSchema,
   retries: 1,
   execute: async ({ inputData, mastra, requestContext, abortSignal }) => {
-    const { plan, operation: internal, write } = inputData;
+    const { plan, operation: internal } = inputData;
     const readBackCases = await mapWithConcurrency(internal.cases, 6, async (written, index) => {
       const result = await executeWorkflowTool(
         "metersphere_ms_get_test_case_detail",
@@ -188,15 +160,9 @@ const verifyFreshReadBack = createStep({
     if (!separateOperation) {
       throw new IncompleteOutcomeError("Fresh MeterSphere read-back did not cover the complete frozen CasePlan");
     }
-    const verificationKey = `metersphere-case-read-back:${plan.planHash}`;
     return {
       receipt: {
         casePlanHash: plan.planHash,
-        write,
-        verification: {
-          ...acquiredManifest("metersphere_ms_get_test_case_detail", verificationKey),
-          contentHash: createHash("sha256").update(JSON.stringify(readBackCases)).digest("hex"),
-        },
         verificationMode: "separate_read_back" as const,
         caseOperation: separateOperation,
       },
@@ -231,7 +197,7 @@ export async function runMeterSphereCaseOperationWorkflow(
   requestContext: RequestContext<any>,
   plan: MeterSphereCasePlan,
   runId: string,
-): Promise<EvidenceCompletionReceipt> {
+): Promise<MeterSphereCaseCompletionReceipt> {
   prepareMeterSphereCaseOperationRequestContext(requestContext, runId);
   const workflow = mastra.getWorkflow("qasey-metersphere-case-operation");
   const persisted = await workflow.getWorkflowRunById(runId, { fields: ["result", "error"] });
@@ -248,7 +214,7 @@ export async function runMeterSphereCaseOperationWorkflow(
     const detail = result.status === "failed" ? result.error.message : result.status;
     throw new IncompleteOutcomeError(`MeterSphere case workflow did not complete: ${detail}`);
   }
-  return EvidenceCompletionReceiptSchema.parse(result.result.receipt) as EvidenceCompletionReceipt;
+  return MeterSphereCaseCompletionReceiptSchema.parse(result.result.receipt) as MeterSphereCaseCompletionReceipt;
 }
 
 /** Applies the same stable external-write boundary for standalone and nested runs. */
@@ -291,14 +257,10 @@ async function executeWorkflowTool(
   return tool.execute(input, context);
 }
 
-function acquiredManifest(toolName: string, sourceKey: string): EvidenceManifestEntry {
-  return { sourceKey, toolName, status: "acquired", attempts: 1, completedAt: Date.now() };
-}
-
-function persistedReceipt(result: Record<string, unknown> | undefined): EvidenceCompletionReceipt {
+function persistedReceipt(result: Record<string, unknown> | undefined): MeterSphereCaseCompletionReceipt {
   const parsed = MeterSphereCaseWorkflowOutputSchema.safeParse(result);
   if (!parsed.success) throw new IncompleteOutcomeError("Persisted MeterSphere workflow result is invalid");
-  return parsed.data.receipt as EvidenceCompletionReceipt;
+  return parsed.data.receipt as MeterSphereCaseCompletionReceipt;
 }
 
 async function mapWithConcurrency<T, R>(values: T[], limit: number, mapper: (value: T, index: number) => Promise<R>): Promise<R[]> {

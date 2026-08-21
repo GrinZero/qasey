@@ -1,5 +1,5 @@
 import { Card, CardText, Table, type CardElement } from "chat";
-import type { EvidenceCompletionReceipt } from "../../../../packages/domain/src/index.ts";
+import type { MeterSphereCaseCompletionReceipt } from "../../../../packages/domain/src/index.ts";
 
 const MAX_ROWS_PER_TABLE = 100;
 
@@ -10,7 +10,7 @@ export interface MeterSphereSlackLinkConfig {
 
 /** Build deterministic Slack-native data tables from trusted read-back data. */
 export function slackCaseCompletionCards(
-  receipt: EvidenceCompletionReceipt | undefined,
+  receipt: MeterSphereCaseCompletionReceipt | undefined,
   config: MeterSphereSlackLinkConfig,
 ): CardElement[] {
   const operation = receipt?.caseOperation;

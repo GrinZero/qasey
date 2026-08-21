@@ -30,7 +30,6 @@ describe("MeterSphere CasePlan", () => {
         }],
       }]) }],
     },
-    evidenceSnapshotHash: "evidence",
   })!;
 
   it("summarizes a validated persisted plan", () => {
@@ -70,7 +69,6 @@ describe("MeterSphere CasePlan", () => {
           }],
         }]) }],
       },
-      evidenceSnapshotHash: "evidence-update",
     });
 
     expect(updatePlan).toMatchObject({

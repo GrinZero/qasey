@@ -45,8 +45,6 @@ describe("MeterSphere case operation workflow", () => {
     expect(result.result.receipt).toMatchObject({
       casePlanHash: plan.planHash,
       verificationMode: "separate_read_back",
-      write: { toolName: "metersphere_ms_bulk_upsert_test_cases", status: "acquired" },
-      verification: { toolName: "metersphere_ms_get_test_case_detail", status: "acquired" },
       caseOperation: { itemCount: 2, verifiedCount: 2, createdCount: 2 },
     });
     expect(calls.map(call => call.toolName)).toEqual([
@@ -80,8 +78,6 @@ describe("MeterSphere case operation workflow", () => {
     const plan = singleCasePlan();
     const receipt = {
       casePlanHash: plan.planHash,
-      write: { sourceKey: "write", toolName: "metersphere_ms_bulk_upsert_test_cases", status: "acquired" as const, attempts: 1 },
-      verification: { sourceKey: "verify", toolName: "metersphere_ms_get_test_case_detail", status: "acquired" as const, attempts: 1 },
       verificationMode: "separate_read_back" as const,
       caseOperation: {
         moduleId: "leaf-core", modulePath: "/AI Draft/Feature/Core", featureName: "Core",
@@ -119,7 +115,6 @@ function testPlan() {
       success: true, dry_run: true, validated: true, item_count: 2,
       creates: items.map((item, index) => ({ id: `preview-${index}`, name: item.name, node_id: item.node_id, node_path: item.node_path, verified: true })),
     }),
-    evidenceSnapshotHash: "evidence",
   })!;
 }
 
@@ -131,7 +126,6 @@ function singleCasePlan() {
       success: true, dry_run: true, validated: true, item_count: 1,
       creates: [{ id: "preview", name: item.name, node_id: item.node_id, node_path: item.node_path, verified: true }],
     }),
-    evidenceSnapshotHash: "evidence",
   })!;
 }
 

@@ -23,7 +23,6 @@ export interface MeterSphereCasePlanTargetModule {
 export interface MeterSphereCasePlan {
   version: 1;
   planHash: string;
-  evidenceSnapshotHash: string;
   payloadHash: string;
   plannedCount: number;
   cases: MeterSphereCasePlanItem[];
@@ -32,23 +31,9 @@ export interface MeterSphereCasePlan {
   writeItems: Array<Record<string, unknown>>;
 }
 
-export interface EvidenceSnapshotEntry {
-  sourceKey: string;
-  contentHash: string;
-}
-
-export function buildEvidenceSnapshotHash(entries: EvidenceSnapshotEntry[]): string {
-  const canonical = entries
-    .map(entry => ({ sourceKey: entry.sourceKey, contentHash: entry.contentHash }))
-    .sort((left, right) => left.sourceKey.localeCompare(right.sourceKey)
-      || left.contentHash.localeCompare(right.contentHash));
-  return sha256(stableStringify(canonical));
-}
-
 export function buildMeterSphereCasePlan(options: {
   dryRunInput: unknown;
   dryRunResult: unknown;
-  evidenceSnapshotHash: string;
 }): MeterSphereCasePlan | undefined {
   const operation = parseMeterSphereBulkOperation(options.dryRunInput, options.dryRunResult);
   if (!operation?.dryRun || !operation.success) return undefined;
@@ -92,7 +77,6 @@ export function buildMeterSphereCasePlan(options: {
   const payloadHash = sha256(stableStringify(writeItems));
   const planBody = {
     version: 1 as const,
-    evidenceSnapshotHash: options.evidenceSnapshotHash,
     payloadHash,
     plannedCount: plannedCases.length,
     cases: plannedCases,
@@ -106,7 +90,6 @@ export function validateMeterSphereCasePlan(plan: unknown): MeterSphereCasePlan 
   if (!isRecord(plan)
     || plan.version !== 1
     || typeof plan.planHash !== "string"
-    || typeof plan.evidenceSnapshotHash !== "string"
     || typeof plan.payloadHash !== "string"
     || !Number.isInteger(plan.plannedCount)
     || (plan.plannedCount as number) < 1
@@ -129,36 +112,6 @@ export function validateMeterSphereCasePlan(plan: unknown): MeterSphereCasePlan 
     throw new Error("Persisted MeterSphere CasePlan failed integrity validation");
   }
   return candidate;
-}
-
-export function canonicalBulkWriteInput(input: unknown, plan: MeterSphereCasePlan): unknown {
-  if (!isRecord(input)) return input;
-  return { ...input, items: JSON.stringify(plan.writeItems), dry_run: false };
-}
-
-export function canonicalSingleWriteInput(
-  toolName: string,
-  input: unknown,
-  plan: MeterSphereCasePlan,
-): unknown {
-  if (!isRecord(input)) return input;
-  const normalizedTool = toolName.toLowerCase();
-  const expectedOperation = normalizedTool.includes("create_test_case") ? "create"
-    : normalizedTool.includes("edit_test_case") ? "update"
-      : undefined;
-  if (!expectedOperation) return input;
-  const inputCaseId = stringValue(input.case_id ?? input.caseId ?? input.id);
-  const inputName = stringValue(input.name);
-  const inputModuleId = stringValue(input.node_id ?? input.nodeId);
-  const planned = plan.cases.find(item => item.operation === expectedOperation
-    && ((!inputCaseId && !item.caseId) || item.caseId === inputCaseId)
-    && (!inputName || item.name === inputName)
-    && (!inputModuleId || item.targetModuleId === inputModuleId));
-  if (!planned) throw new Error("MeterSphere write does not match the persisted immutable CasePlan");
-  const plannedInput = plan.writeItems[planned.order - 1];
-  if (!plannedInput) throw new Error(`MeterSphere CasePlan item is missing at order ${planned.order}`);
-  const { operation: _operation, ...writeFields } = plannedInput;
-  return { ...input, ...structuredClone(writeFields) };
 }
 
 export function completeCaseOperationAgainstPlan(
@@ -196,7 +149,6 @@ export function casePlanSummary(plan: MeterSphereCasePlan): string {
   return [
     "## 已持久化的不可变 CasePlan",
     `- plan_hash: ${plan.planHash}`,
-    `- evidence_snapshot_hash: ${plan.evidenceSnapshotHash}`,
     `- planned_count: ${plan.plannedCount}`,
     "- 必须继续使用这份计划，不得重新生成、增删、改名、改序或更换目标模块。",
     ...plan.cases.map(item => `${item.order}. [${item.key}] ${item.name} -> ${item.targetModulePath} (${item.targetModuleId})`),

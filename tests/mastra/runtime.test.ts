@@ -3,8 +3,8 @@ import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import { describe, expect, it, vi } from "vitest";
 import type { QaseyRequestContext } from "../../packages/contracts/src/index.ts";
-import { AgentProgressSession, EvidenceLedger } from "../../packages/domain/src/index.ts";
-import { buildQaseyAgentTooling, createAgentProgressTool, getRuntimeContext, guardCaseMutationsForWorkflow, guardToolsWithEvidence, mcpCatalog, partitionQaseyCodeModeTools, studioMcpPreviewEnabled, toolsForRequest } from "../../src/mastra/runtime.ts";
+import { AgentProgressSession } from "../../packages/domain/src/index.ts";
+import { buildQaseyAgentTooling, createAgentProgressTool, getRuntimeContext, guardCaseMutationsForWorkflow, mcpCatalog, partitionQaseyCodeModeTools, studioMcpPreviewEnabled, toolsForRequest } from "../../src/mastra/runtime.ts";
 
 describe("Qasey runtime context", () => {
   it("keeps missing context strict for production callers", () => {
@@ -68,24 +68,7 @@ describe("Qasey runtime context", () => {
     });
   });
 
-  it("guards dynamically resolved tools with the request evidence ledger", async () => {
-    const execute = vi.fn(async ({ value }: { value: string }) => ({ value }));
-    const guarded = guardToolsWithEvidence({
-      lookup: createTool({
-        id: "lookup",
-        description: "test",
-        inputSchema: z.object({ value: z.string() }),
-        execute,
-      }),
-    }, new EvidenceLedger("run-guard"));
-    const guardedExecute = (guarded.lookup as { execute: (input: unknown, context: unknown) => Promise<unknown> }).execute;
-
-    await expect(guardedExecute({ value: "one" }, {})).resolves.toEqual({ value: "one" });
-    await expect(guardedExecute({ value: "one" }, {})).resolves.toMatchObject({ status: "already_acquired" });
-    expect(execute).toHaveBeenCalledTimes(1);
-  });
-
-  it("places only read tools behind Code Mode and keeps side effects direct", async () => {
+  it("keeps Code Mode dormant while retaining its read-only partition", async () => {
     const readTool = createTool({
       id: "github_get_file",
       description: "Read a repository file",
@@ -122,15 +105,13 @@ describe("Qasey runtime context", () => {
       metersphere_ms_bulk_upsert_test_cases: writeTool,
       qasey_report_progress: progressTool,
     });
-    expect(tooling.codeModeToolNames).toEqual(["github_get_file"]);
+    expect(tooling.codeModeToolNames).toEqual([]);
     expect(Object.keys(tooling.tools)).toEqual([
+      "github_get_file",
       "metersphere_ms_bulk_upsert_test_cases",
       "qasey_report_progress",
-      "execute_typescript",
     ]);
-    expect(tooling.codeModeInstructions).toContain("external_github_get_file");
-    expect(tooling.codeModeInstructions).not.toContain("external_metersphere_ms_bulk_upsert_test_cases");
-    expect(tooling.codeModeInstructions).not.toContain("external_qasey_report_progress");
+    expect(tooling.codeModeInstructions).toBeUndefined();
   });
 
   it("runs parallel read tools through the isolated QuickJS Code Mode transport", async () => {
@@ -148,7 +129,7 @@ describe("Qasey runtime context", () => {
           return { path, contextForwarded: context.requestContext === requestContext };
         },
       }),
-    });
+    }, { codeModeActive: true });
     const execute = (tooling.tools.execute_typescript as {
       execute: (input: unknown, context: unknown) => Promise<unknown>;
     }).execute;
@@ -188,18 +169,17 @@ return files;`,
     ]));
   });
 
-  it("marks a Code Mode failure receipt on its child span without changing agent control flow", async () => {
+  it("keeps dormant Code Mode failure tracing covered for future reactivation", async () => {
     const observedSpans: Array<{ name: string; status: "success" | "error"; message?: string }> = [];
-    const logs: Array<{ level: string; message: string; data?: Record<string, unknown> }> = [];
-    const guarded = guardToolsWithEvidence({
+    const tools = {
       github_get_file: createTool({
         id: "github_get_file",
         description: "Read a repository file",
         inputSchema: z.object({ path: z.string() }),
         execute: async () => { throw new Error("upstream unavailable"); },
       }),
-    }, new EvidenceLedger("run-code-mode-failure"));
-    const tooling = await buildQaseyAgentTooling(guarded);
+    };
+    const tooling = await buildQaseyAgentTooling(tools, { codeModeActive: true });
     const execute = (tooling.tools.execute_typescript as {
       execute: (input: unknown, context: unknown) => Promise<unknown>;
     }).execute;
@@ -223,17 +203,11 @@ return files;`,
             throw error;
           }
         },
-        log: (level: string, message: string, data?: Record<string, unknown>) => {
-          logs.push({ level, message, ...(data ? { data } : {}) });
-        },
+        log: () => undefined,
       },
     })).resolves.toMatchObject({
-      success: true,
-      result: {
-        status: "failed",
-        errorCode: "TOOL_EXECUTION_ERROR",
-        message: "upstream unavailable",
-      },
+      success: false,
+      error: { message: "upstream unavailable" },
     });
     expect(observedSpans).toContainEqual({
       name: "code-mode external tool: 'github_get_file'",
@@ -241,11 +215,6 @@ return files;`,
       message: "upstream unavailable",
     });
     expect(observedSpans).toContainEqual({ name: "code-mode:execute_typescript", status: "success" });
-    expect(logs).toContainEqual(expect.objectContaining({
-      level: "error",
-      message: "code-mode external tool returned a structured failure",
-      data: expect.objectContaining({ toolId: "github_get_file", error: "upstream unavailable" }),
-    }));
   });
 
   it("lets the agent dry-run a CasePlan but reserves real case mutations for the workflow", async () => {

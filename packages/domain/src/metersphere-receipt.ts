@@ -20,6 +20,13 @@ export interface MeterSphereCaseOperationReceipt {
   verificationMode: "internal_read_back" | "separate_read_back";
 }
 
+/** Durable result produced only by the owned MeterSphere case workflow. */
+export interface MeterSphereCaseCompletionReceipt {
+  casePlanHash: string;
+  verificationMode: "separate_read_back";
+  caseOperation: MeterSphereCaseOperationReceipt;
+}
+
 export interface MeterSphereBulkOperation {
   dryRun: boolean;
   success: boolean;

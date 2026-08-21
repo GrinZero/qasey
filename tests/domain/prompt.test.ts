@@ -16,8 +16,8 @@ describe("Skill-driven system prompt", () => {
   it("routes every intent explicitly before Tool Discovery", () => {
     const result = buildSystemPrompt(context("slack"));
 
-    expect(result.version).toBe(13);
-    expect(result.modules).toEqual(["base", "runtime", "channel:slack", "evidence:ledger"]);
+    expect(result.version).toBe(14);
+    expect(result.modules).toEqual(["base", "runtime", "channel:slack"]);
     expect(result.text).toContain("意图识别与 Skill 路由（必须先执行）");
     expect(result.text).toContain("intent=qa_quick_query：加载 `qa-quick-query` Skill");
     expect(result.text).toContain("intent=qa_review：加载 `qa-review` Skill");

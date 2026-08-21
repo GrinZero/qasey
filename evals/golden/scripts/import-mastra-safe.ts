@@ -95,7 +95,6 @@ function assertPotentialToolsAreClassified() {
     "e2eGetRun",
     "e2eRerun",
     "qasey_report_progress",
-    "qasey_read_evidence_artifact",
     "code",
   ]);
   const unknown = [...potential].filter(toolName => !classified.has(toolName)).sort();

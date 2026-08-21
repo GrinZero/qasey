@@ -10,7 +10,7 @@ import {
 } from "../../../packages/contracts/src/index.ts";
 import {
   IncompleteOutcomeError,
-  type EvidenceCompletionReceipt,
+  type MeterSphereCaseCompletionReceipt,
   type MeterSphereCasePlan,
 } from "../../../packages/domain/src/index.ts";
 import {
@@ -30,7 +30,7 @@ import {
   type QaseyResponse,
 } from "../applications/qasey/service.ts";
 import {
-  EvidenceCompletionReceiptSchema,
+  MeterSphereCaseCompletionReceiptSchema,
   MeterSphereCasePlanSchema,
   MeterSphereCaseWorkflowOutputSchema,
   meterSphereCaseOperationWorkflow,
@@ -39,16 +39,6 @@ import {
 } from "./metersphere-case-workflow.ts";
 import { PlatformRequestContextSchema } from "../../platform/context/schema.ts";
 import { assertJsonSafeSnapshot } from "../../platform/workflows/durability.ts";
-
-const EvidenceStatsSchema = z.object({
-  actualExecutions: z.number().int().nonnegative(),
-  deduplicatedCalls: z.number().int().nonnegative(),
-  cachedFailures: z.number().int().nonnegative(),
-  artifactReads: z.number().int().nonnegative(),
-  artifactizedResults: z.number().int().nonnegative(),
-  totalResultChars: z.number().int().nonnegative(),
-  duplicateResultCharsAvoided: z.number().int().nonnegative(),
-});
 
 const AgentCompletionStateSchema = z.object({
   finishReason: z.string().optional(),
@@ -61,39 +51,34 @@ const QaseyAgentPhaseSchema = z.object({
   agentText: z.string(),
   completionState: AgentCompletionStateSchema,
   casePlan: MeterSphereCasePlanSchema.optional(),
-  completionReceipt: EvidenceCompletionReceiptSchema.optional(),
-  evidenceStats: EvidenceStatsSchema,
   progress: z.array(AgentProgressReportSchema),
 });
 
 const QaseyFinalizationDecisionSchema = QaseyAgentPhaseSchema.extend({
-  finalization: z.enum(["agent", "receipt", "workflow"]),
+  finalization: z.enum(["agent", "workflow"]),
 });
 
 export const QaseyTaskOutputSchema = z.object({
   text: z.string().min(1),
   runId: z.string().min(1),
   outcome: z.literal("success"),
-  finalization: z.enum(["agent", "receipt", "workflow"]),
-  completionReceipt: EvidenceCompletionReceiptSchema.optional(),
-  evidenceStats: EvidenceStatsSchema,
+  finalization: z.enum(["agent", "workflow"]),
+  completionReceipt: MeterSphereCaseCompletionReceiptSchema.optional(),
   progress: z.array(AgentProgressReportSchema),
 });
 
 const CompletedCaseBranchSchema = z.object({
   decision: QaseyFinalizationDecisionSchema,
-  receipt: EvidenceCompletionReceiptSchema,
+  receipt: MeterSphereCaseCompletionReceiptSchema,
 });
 
 const FinalizationBranchesSchema = z.object({
   "finalize-agent-response": QaseyTaskOutputSchema.optional(),
-  "finalize-receipt-response": QaseyTaskOutputSchema.optional(),
   "qasey-metersphere-case-finalization": QaseyTaskOutputSchema.optional(),
 });
 
 const QASEY_WORKFLOW_EVENTS_KEY = "qasey-workflow-events";
 const QASEY_WORKFLOW_RESUME_PLAN_KEY = "qasey-workflow-resume-plan";
-const QASEY_WORKFLOW_RESUME_RECEIPT_KEY = "qasey-workflow-resume-receipt";
 
 const runSkillDrivenAgentStep = createStep({
   id: "run-skill-driven-agent",
@@ -105,7 +90,6 @@ const runSkillDrivenAgentStep = createStep({
     prepareQaseyRequestContext(inputData, requestContext);
     const events = requestContext.get(QASEY_WORKFLOW_EVENTS_KEY) as QaseyExecutionEvents | undefined;
     const resumeCasePlan = requestContext.get(QASEY_WORKFLOW_RESUME_PLAN_KEY) as MeterSphereCasePlan | undefined;
-    const resumeReceipt = requestContext.get(QASEY_WORKFLOW_RESUME_RECEIPT_KEY) as EvidenceCompletionReceipt | undefined;
     const phase = await runQaseyAgentPhase(mastra, inputData, {
       runId,
       requestContext,
@@ -113,7 +97,6 @@ const runSkillDrivenAgentStep = createStep({
       ...(tracingContext ? { tracingContext } : {}),
       ...(events ? { events } : {}),
       ...(resumeCasePlan ? { resumeCasePlan } : {}),
-      ...(resumeReceipt ? { resumeReceipt } : {}),
     });
     assertJsonSafeSnapshot(phase);
     return phase;
@@ -122,7 +105,7 @@ const runSkillDrivenAgentStep = createStep({
 
 const determineFinalizationStep = createStep({
   id: "determine-finalization",
-  description: "验证 Agent 完成状态，并选择直接回答、复用回执或执行确定性写入 Workflow。",
+  description: "验证 Agent 完成状态，并选择直接回答或执行确定性写入 Workflow。",
   inputSchema: QaseyAgentPhaseSchema,
   outputSchema: QaseyFinalizationDecisionSchema,
   requestContextSchema: PlatformRequestContextSchema,
@@ -138,20 +121,7 @@ const finalizeAgentResponseStep = createStep({
   execute: async ({ inputData, requestContext }) => {
     if (inputData.finalization !== "agent") throw new IncompleteOutcomeError("Agent finalization branch received the wrong decision");
     const events = requestContext.get(QASEY_WORKFLOW_EVENTS_KEY) as QaseyExecutionEvents | undefined;
-    return assembleQaseyResponse(inputData as unknown as QaseyFinalizationDecision, inputData.completionReceipt as EvidenceCompletionReceipt | undefined, events);
-  },
-});
-
-const finalizeReceiptResponseStep = createStep({
-  id: "finalize-receipt-response",
-  description: "复用已独立验证的完成回执，不重复执行外部写入。",
-  inputSchema: QaseyFinalizationDecisionSchema,
-  outputSchema: QaseyTaskOutputSchema,
-  requestContextSchema: PlatformRequestContextSchema,
-  execute: async ({ inputData, requestContext }) => {
-    if (inputData.finalization !== "receipt") throw new IncompleteOutcomeError("Receipt finalization branch received the wrong decision");
-    const events = requestContext.get(QASEY_WORKFLOW_EVENTS_KEY) as QaseyExecutionEvents | undefined;
-    return assembleQaseyResponse(inputData as unknown as QaseyFinalizationDecision, inputData.completionReceipt as EvidenceCompletionReceipt | undefined, events);
+    return assembleQaseyResponse(inputData as unknown as QaseyFinalizationDecision, undefined, events);
   },
 });
 
@@ -187,7 +157,7 @@ const completeCaseOperationStep = createStep({
   requestContextSchema: PlatformRequestContextSchema,
   execute: async ({ inputData, requestContext }) => {
     const plan = inputData.decision.casePlan;
-    const receipt = validateQaseyCompletionReceipt(plan, inputData.receipt as EvidenceCompletionReceipt);
+    const receipt = validateQaseyCompletionReceipt(plan, inputData.receipt as MeterSphereCaseCompletionReceipt);
     if (!receipt) throw new IncompleteOutcomeError("MeterSphere case workflow returned an invalid completion receipt");
     const events = requestContext.get(QASEY_WORKFLOW_EVENTS_KEY) as QaseyExecutionEvents | undefined;
     await events?.onCompletionCheckpoint?.({ runId: inputData.decision.runId, receipt });
@@ -225,7 +195,6 @@ const assembleResponseStep = createStep({
   execute: async ({ inputData }) => {
     const responses = [
       inputData["finalize-agent-response"],
-      inputData["finalize-receipt-response"],
       inputData["qasey-metersphere-case-finalization"],
     ].filter((response): response is QaseyResponse => Boolean(response));
     if (responses.length !== 1) throw new Error(`Expected one finalization response, received ${responses.length}`);
@@ -244,7 +213,6 @@ export const qaseyTaskWorkflow = createWorkflow({
   .then(determineFinalizationStep)
   .branch([
     [async ({ inputData }) => inputData.finalization === "agent", finalizeAgentResponseStep],
-    [async ({ inputData }) => inputData.finalization === "receipt", finalizeReceiptResponseStep],
     [async ({ inputData }) => inputData.finalization === "workflow", qaseyMeterSphereCaseFinalizationWorkflow as any],
   ])
   .then(assembleResponseStep)
@@ -258,7 +226,6 @@ export interface RunQaseyTaskOptions {
   runId?: string;
   trace?: QaseyTraceContext;
   resumeCasePlan?: MeterSphereCasePlan;
-  resumeReceipt?: EvidenceCompletionReceipt;
 }
 
 export async function runQaseyTaskWorkflow(
@@ -270,7 +237,6 @@ export async function runQaseyTaskWorkflow(
   initializeQaseyTraceRequestContext(requestContext, context, options.trace);
   if (options.events) requestContext.set(QASEY_WORKFLOW_EVENTS_KEY, options.events);
   if (options.resumeCasePlan) requestContext.set(QASEY_WORKFLOW_RESUME_PLAN_KEY, options.resumeCasePlan);
-  if (options.resumeReceipt) requestContext.set(QASEY_WORKFLOW_RESUME_RECEIPT_KEY, options.resumeReceipt);
   const workflow = mastra.getWorkflow("qasey-task");
   const run = await workflow.createRun({
     ...(options.runId ? { runId: options.runId } : {}),
@@ -320,6 +286,5 @@ export async function runQaseyTaskWorkflow(
   } finally {
     requestContext.delete(QASEY_WORKFLOW_EVENTS_KEY);
     requestContext.delete(QASEY_WORKFLOW_RESUME_PLAN_KEY);
-    requestContext.delete(QASEY_WORKFLOW_RESUME_RECEIPT_KEY);
   }
 }

@@ -12,7 +12,7 @@ import { ObservabilityStoragePostgresVNext, PostgresStore } from "@mastra/pg";
 import { z } from "zod";
 import { AgentProgressInputSchema, CreateE2ERunSchema, QaseyRequestContextSchema } from "../../packages/contracts/src/index.ts";
 import type { E2ERun, QaseyRequestContext } from "../../packages/contracts/src/index.ts";
-import { AgentProgressSession, EvidenceLedger } from "../../packages/domain/src/index.ts";
+import { AgentProgressSession } from "../../packages/domain/src/index.ts";
 import type { ToolsInput } from "@mastra/core/agent";
 import {
   InMemoryRunRepository, PostgresRunRepository,
@@ -157,7 +157,6 @@ export async function closeQaseyInfrastructure(): Promise<void> {
 export interface QaseyRequestContextMap {
   "qasey-context": QaseyRequestContext;
   "case-plan"?: import("../../packages/domain/src/index.ts").MeterSphereCasePlan;
-  "evidence-ledger"?: EvidenceLedger;
   "agent-progress-session"?: AgentProgressSession;
   "case-operation-phase"?: "planning" | "execution";
   native?: boolean;
@@ -172,6 +171,8 @@ export interface QaseyAgentTooling {
 }
 
 const qaseyToolingByRequest = new WeakMap<object, Promise<QaseyAgentTooling>>();
+/** Code Mode is retained for future evaluation but intentionally not exposed to qasey-main. */
+export const qaseyCodeModeActive = false;
 const quickJsCodeModeTransport = new QuickJsCodeModeTransport({
   memoryLimitMb: config.QASEY_CODE_MODE_MEMORY_LIMIT_MB,
 });
@@ -382,9 +383,6 @@ export async function toolsForRequest(requestContext?: RequestContext<any>) {
   );
   const readTools = readConnectorCatalog.tools();
   const executionTools = config.QASEY_SHADOW_MODE ? {} : e2eTools();
-  const ledger = requestContext?.get("evidence-ledger") instanceof EvidenceLedger
-    ? requestContext.get("evidence-ledger") as EvidenceLedger
-    : undefined;
   const progressSession = requestContext?.get("agent-progress-session") instanceof AgentProgressSession
     ? requestContext.get("agent-progress-session") as AgentProgressSession
     : undefined;
@@ -394,23 +392,7 @@ export async function toolsForRequest(requestContext?: RequestContext<any>) {
   // qasey-main may discover case mutation tools for dry-run planning, but the
   // deterministic MeterSphere workflow is the only owner of real writes.
   const ownershipScopedExternal = guardCaseMutationsForWorkflow(external);
-  const guardedExternal = guardToolsWithEvidence(ownershipScopedExternal, ledger);
-  const guardedReadTools = guardToolsWithEvidence(readTools, ledger);
-  const guardedExecutionTools = guardToolsWithEvidence(executionTools, ledger);
-  const guardedUtilityTools = guardToolsWithEvidence({ getCurrentTime }, ledger);
-  const evidenceReader = ledger ? {
-    qasey_read_evidence_artifact: createTool({
-      id: "qasey_read_evidence_artifact",
-      description: "读取本轮运行中已获取的证据工件的有限片段。不要为了恢复被压缩的细节而重新获取原始来源。",
-      inputSchema: z.object({
-        artifactId: z.string().min(1),
-        offset: z.number().int().nonnegative().default(0),
-        maxChars: z.number().int().min(1).max(20_000).default(12_000),
-      }),
-      execute: async ({ artifactId, offset, maxChars }) => ledger.readArtifact(artifactId, offset, maxChars),
-    }),
-  } : {};
-  return { ...guardedUtilityTools, ...progressTool, ...guardedReadTools, ...guardedExternal, ...guardedExecutionTools, ...evidenceReader };
+  return { getCurrentTime, ...progressTool, ...readTools, ...ownershipScopedExternal, ...executionTools };
 }
 
 /**
@@ -429,9 +411,13 @@ export function resolveQaseyAgentTooling(requestContext?: RequestContext<any>): 
   return pending;
 }
 
-export async function buildQaseyAgentTooling(toolInput: ToolsInput | Promise<ToolsInput>): Promise<QaseyAgentTooling> {
+export async function buildQaseyAgentTooling(
+  toolInput: ToolsInput | Promise<ToolsInput>,
+  options: { codeModeActive?: boolean } = {},
+): Promise<QaseyAgentTooling> {
   const allTools = await toolInput;
-  if (!config.QASEY_ENABLE_CODE_MODE) {
+  const codeModeActive = options.codeModeActive ?? (qaseyCodeModeActive && config.QASEY_ENABLE_CODE_MODE);
+  if (!codeModeActive) {
     return { tools: allTools, codeModeToolNames: [] };
   }
   const { codeModeTools, directTools } = partitionQaseyCodeModeTools(allTools);
@@ -452,7 +438,7 @@ export async function buildQaseyAgentTooling(toolInput: ToolsInput | Promise<Too
   }
   return {
     tools: { ...directTools, execute_typescript: codeMode.tool },
-    codeModeInstructions: `${codeMode.instructions}\n\nQasey 专属规则：\n- Code Mode 只包含只读工具。会产生副作用的工具、审批、进度报告和持久化 Workflow 仍作为独立的直接工具提供。\n- 当多个读取操作可以并行、分页、过滤、去重、连接或聚合时，使用 Code Mode。返回精简结果，同时保留作为证据所需的来源标识。\n- 如果某次外部调用的结果表明来源已经获取，不要重复调用；改用返回的工件回执或专用证据读取工具。`,
+    codeModeInstructions: `${codeMode.instructions}\n\nQasey 专属规则：\n- Code Mode 只包含只读工具。会产生副作用的工具、审批、进度报告和持久化 Workflow 仍作为独立的直接工具提供。\n- 当多个读取操作可以并行、分页、过滤、去重、连接或聚合时，使用 Code Mode。返回精简结果，同时保留作为证据所需的来源标识。`,
     codeModeToolNames,
   };
 }
@@ -471,7 +457,6 @@ export function partitionQaseyCodeModeTools(tools: ToolsInput): {
 function isQaseyCodeModeReadTool(toolName: string): boolean {
   const normalized = toolName.toLowerCase();
   return normalized === "getcurrenttime"
-    || normalized === "qasey_read_evidence_artifact"
     || normalized === "e2egetrun"
     || /^(?:slack_(?:search|get)|github_(?:get|list|search)|jira_(?:get|search))/.test(normalized)
     || /^metersphere_ms_(?:get|list)/.test(normalized)
@@ -498,22 +483,6 @@ export function mcpSubject(requestContext?: RequestContext<any>) {
   const subjectId = "userId" in identity ? (identity as { userId?: unknown }).userId : undefined;
   if (typeof tenantId !== "string" || typeof subjectId !== "string") return undefined;
   return { applicationId, tenantId, subjectId };
-}
-
-export function guardToolsWithEvidence(tools: ToolsInput, ledger?: EvidenceLedger): ToolsInput {
-  if (!ledger) return tools;
-  return Object.fromEntries(Object.entries(tools).map(([toolName, tool]) => {
-    const execute = (tool as { execute?: (input: unknown, context: unknown) => Promise<unknown> }).execute;
-    if (!execute) return [toolName, tool];
-    return [toolName, {
-      ...tool,
-      execute: async (input: unknown, executionContext: Parameters<typeof execute>[1]) => ledger.execute(
-        toolName,
-        input,
-        effectiveInput => execute(effectiveInput, executionContext),
-      ),
-    }];
-  }));
 }
 
 /**

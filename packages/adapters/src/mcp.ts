@@ -388,9 +388,11 @@ export class QaseyMcpCatalog {
       const policy = TOOL_POLICIES[policyId]!;
       if (access.readOnly && policy.effect !== "read") continue;
       const execute = "execute" in tool ? tool.execute : undefined;
+      const hasModelOutput = "toModelOutput" in tool && typeof tool.toModelOutput === "function";
       output[qualified] = {
         ...tool,
         requireApproval: policy.requiresApproval,
+        ...(policy.effect === "read" && !hasModelOutput ? { toModelOutput: boundedMcpModelOutput } : {}),
         execute: async (input: unknown, executionContext: Parameters<NonNullable<typeof execute>>[1]) => {
           authorizeDiscoveredToolAccess(qualified, policy, { channel });
           if (server === "figma") validateFigmaToolInput(qualified, input);
@@ -413,6 +415,21 @@ export class QaseyMcpCatalog {
   private async discoverTools(client: MCPClient): Promise<ToolDiscoveryResult> {
     return this.toolDiscovery.get(client);
   }
+}
+
+export function boundedMcpModelOutput(output: unknown): unknown {
+  const maxChars = 32_000;
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(output);
+  } catch {
+    serialized = String(output);
+  }
+  const truncated = serialized.length > maxChars;
+  return {
+    type: "text",
+    value: `${truncated ? serialized.slice(0, maxChars) : serialized}${truncated ? `\n[model output truncated from ${serialized.length} characters; narrow or paginate the MCP query for more detail]` : ""}`,
+  };
 }
 
 function subjectKey(subject: McpCredentialSubject): string {

@@ -1,7 +1,7 @@
 import type { QaseyRequestContext } from "../../contracts/src/index.ts";
 
 export interface PromptBuildResult {
-  version: 13;
+  version: 14;
   modules: string[];
   text: string;
 }
@@ -71,11 +71,10 @@ export function buildSystemPrompt(context: QaseyRequestContext): PromptBuildResu
 - Session ID：${context.sessionId}
 - 附件：${context.attachments.length ? context.attachments.map(item => `${item.name} (${item.mimeType}, ${item.id})`).join(", ") : "无"}`],
     channelPrompt(context),
-    ["evidence:ledger", "每轮都会收到本次运行的 Evidence Ledger。不得重新获取已 acquired 的来源；上下文压缩后需要原始细节时，发现并使用 qasey_read_evidence_artifact 小段读取。连续调用工具却没有新增证据会被运行时熔断。"],
   ];
 
   return {
-    version: 13,
+    version: 14,
     modules: modules.map(([key]) => key),
     text: modules.map(([, text]) => text).join("\n\n"),
   };

@@ -1,13 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { EvidenceCompletionReceipt } from "../../packages/domain/src/index.ts";
+import type { MeterSphereCaseCompletionReceipt } from "../../packages/domain/src/index.ts";
 import { slackCaseCompletionCards } from "../../src/mastra/applications/qasey/slack-case-delivery.ts";
 
 describe("Slack MeterSphere case delivery", () => {
   it("renders trusted read-back cases as a native table card", () => {
-    const receipt: EvidenceCompletionReceipt = {
+    const receipt: MeterSphereCaseCompletionReceipt = {
       casePlanHash: "plan",
-      write: { sourceKey: "write", toolName: "write", status: "acquired", attempts: 1 },
-      verification: { sourceKey: "verify", toolName: "verify", status: "acquired", attempts: 1 },
       verificationMode: "separate_read_back",
       caseOperation: {
         moduleId: "module-1",
