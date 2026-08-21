@@ -3,10 +3,12 @@ import { describe, expect, it, vi } from "vitest";
 import type { QaseyRequestContext } from "../../packages/contracts/src/index.ts";
 import type { MeterSphereCaseCompletionReceipt } from "../../packages/domain/src/index.ts";
 import {
+  agentRuntimeEventFromChunk,
   assertNormalCompletion,
   completionReceiptText,
   executeQasey,
   extractMeterSphereCasePlan,
+  restoreProcessedAgentOutput,
   selectFinalText,
 } from "../../src/mastra/applications/qasey/service.ts";
 
@@ -41,6 +43,68 @@ describe("Qasey service completion", () => {
     expect(completionReceiptText(completionReceipt("plan"))).toContain("独立回查通过 1/1");
   });
 
+  it("preserves informative Agent lifecycle payloads for channel projection", () => {
+    expect(agentRuntimeEventFromChunk("run-1", 0, {
+      type: "step-start",
+      runId: "run-1",
+      from: "AGENT",
+      payload: { request: {}, inputMessages: [{ role: "user", content: [{ type: "text", text: "review FIN-1" }] }] },
+    } as any)).toMatchObject({ type: "step-start", step: 1 });
+    expect(agentRuntimeEventFromChunk("run-1", 1, {
+      type: "tool-call",
+      runId: "run-1",
+      from: "AGENT",
+      payload: { toolCallId: "call-1", toolName: "jira_get_issue", args: { issueKey: "FIN-1" } },
+    } as any)).toMatchObject({ type: "tool-call", step: 1, args: { issueKey: "FIN-1" } });
+    expect(agentRuntimeEventFromChunk("run-1", 1, {
+      type: "tool-result",
+      runId: "run-1",
+      from: "AGENT",
+      payload: { toolCallId: "call-1", toolName: "jira_get_issue", result: { summary: "Payment migration" } },
+    } as any)).toMatchObject({ type: "tool-result", result: { summary: "Payment migration" }, isError: false });
+    expect(agentRuntimeEventFromChunk("run-1", 1, {
+      type: "step-finish",
+      runId: "run-1",
+      from: "AGENT",
+      payload: {
+        stepResult: { reason: "tool-calls" },
+        output: { text: "已确认 Payment migration", usage: {}, toolCalls: [] },
+        metadata: {},
+      },
+    } as any)).toMatchObject({ type: "step-finish", text: "已确认 Payment migration" });
+  });
+
+  it("consumes the Agent full stream and forwards lifecycle events", async () => {
+    const runtimeEvents: string[] = [];
+    const mastra = mockMastra(async () => ({
+      finishReason: "stop",
+      text: "review complete",
+      steps: [{ finishReason: "stop", text: "review complete", toolCalls: [], toolResults: [] }],
+    }), [
+      { type: "step-start", runId: "run-1", from: "AGENT", payload: { request: {}, inputMessages: [] } },
+      { type: "tool-call", runId: "run-1", from: "AGENT", payload: { toolCallId: "call-1", toolName: "jira_get_issue", args: { issueKey: "FIN-1" } } },
+      { type: "tool-result", runId: "run-1", from: "AGENT", payload: { toolCallId: "call-1", toolName: "jira_get_issue", result: { summary: "Payment migration" } } },
+      { type: "step-finish", runId: "run-1", from: "AGENT", payload: { stepResult: { reason: "stop" }, output: { text: "review complete", usage: {}, toolCalls: [] }, metadata: {} } },
+    ]);
+
+    await executeQasey(mastra, context, {
+      events: { onAgentRuntimeEvent: event => { runtimeEvents.push(`${event.step}:${event.type}`); } },
+    });
+
+    expect(runtimeEvents).toEqual(["1:step-start", "1:tool-call", "1:tool-result", "1:step-finish"]);
+  });
+
+  it("restores aggregate fields that durable stream batching omits", () => {
+    expect(restoreProcessedAgentOutput(
+      { text: "", steps: [{ text: "", finishReason: "tool-calls" }], finishReason: "tool-calls" },
+      { text: "OK", steps: [{ text: "", finishReason: "tool-calls" }, { text: "OK", finishReason: "stop" }], finishReason: "stop" },
+    )).toMatchObject({
+      text: "OK",
+      steps: [{ finishReason: "tool-calls" }, { text: "OK", finishReason: "stop" }],
+      finishReason: "stop",
+    });
+  });
+
   it("extracts a deterministic CasePlan from native Mastra tool results", () => {
     const input = dryRunInput();
     const output = dryRunOutput();
@@ -64,7 +128,7 @@ describe("Qasey service completion", () => {
   it("does not install Ledger control and does not stop on Skill/search_tools iterations", async () => {
     const iterationNames: string[][] = [];
     const toolEvents: string[] = [];
-    const generate = vi.fn(async (_prompt: unknown, options: Record<string, any>) => {
+    const runAgent = vi.fn(async (_prompt: unknown, options: Record<string, any>) => {
       expect(options.prepareStep).toBeUndefined();
       expect(options.requestContext.get("evidence-ledger")).toBeUndefined();
       for (const [index, name] of ["skill", "search_tools", "search_tools"].entries()) {
@@ -86,7 +150,7 @@ describe("Qasey service completion", () => {
         steps: [{ finishReason: "stop", text: "review complete", toolCalls: [], toolResults: [] }],
       };
     });
-    const mastra = { getAgent: () => ({ generate }) } as unknown as Mastra;
+    const mastra = mockMastra(runAgent);
 
     const response = await executeQasey(mastra, context, {
       events: {
@@ -105,19 +169,19 @@ describe("Qasey service completion", () => {
   it("hands an extracted dry-run plan to the deterministic Workflow", async () => {
     const input = dryRunInput();
     const output = dryRunOutput();
-    const generate = vi.fn(async () => ({
-      finishReason: "stop",
-      text: "plan ready",
-      steps: [{
+    const finishedSteps = [{
         finishReason: "tool-calls",
         text: "",
         toolCalls: [{ payload: { toolCallId: "dry-run", toolName: "metersphere_ms_bulk_upsert_test_cases", args: input } }],
         toolResults: [{ payload: { toolCallId: "dry-run", toolName: "metersphere_ms_bulk_upsert_test_cases", result: output } }],
-      }, { finishReason: "stop", text: "plan ready", toolCalls: [], toolResults: [] }],
-    }));
+      }, { finishReason: "stop", text: "plan ready", toolCalls: [], toolResults: [] }];
+    const runAgent = vi.fn(async (_prompt: unknown, options: Record<string, any>) => {
+      options.onFinish({ finishReason: "stop", text: "plan ready", steps: finishedSteps });
+      return { finishReason: "stop", text: "", steps: [] };
+    });
     const caseOperationRunner = vi.fn(async ({ plan }: { plan: { planHash: string } }) => completionReceipt(plan.planHash));
     const plans: string[] = [];
-    const mastra = { getAgent: () => ({ generate }) } as unknown as Mastra;
+    const mastra = mockMastra(runAgent);
 
     const response = await executeQasey(mastra, { ...context, chatInput: "create cases" }, {
       caseOperationRunner,
@@ -133,6 +197,28 @@ describe("Qasey service completion", () => {
     });
   });
 });
+
+function mockMastra(
+  runAgent: (prompt: unknown, options: Record<string, any>) => Promise<Record<string, unknown>>,
+  chunks: any[] = [],
+): Mastra {
+  return {
+    getAgent: () => ({
+      stream: async (prompt: unknown, options: Record<string, any>) => {
+        const output = await runAgent(prompt, options);
+        return {
+          fullStream: new ReadableStream({
+            start: controller => {
+              for (const chunk of chunks) controller.enqueue(chunk);
+              controller.close();
+            },
+          }),
+          getFullOutput: async () => output,
+        };
+      },
+    }),
+  } as unknown as Mastra;
+}
 
 function dryRunInput() {
   return {

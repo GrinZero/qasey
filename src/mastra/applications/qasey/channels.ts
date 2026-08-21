@@ -13,8 +13,7 @@ import {
   markSlackRequestFinished,
   markSlackRequestStarted,
   showSlackStatus,
-  slackPhaseStatus,
-  slackToolStatus,
+  SlackAgentStatusProjector,
 } from "./slack-progress.ts";
 
 type NativeMessage = Parameters<ChannelHandler>[1];
@@ -99,6 +98,7 @@ function createQaseyChannels(): ChannelConfig | undefined {
     let firstToolAt: number | undefined;
     let firstProgressAt: number | undefined;
     let lastStatus: string | undefined;
+    const statusProjector = new SlackAgentStatusProjector();
     const updateStatus = async (status: string | undefined) => {
       if (!status || status === lastStatus) return;
       lastStatus = status;
@@ -123,7 +123,6 @@ function createQaseyChannels(): ChannelConfig | undefined {
         ...(slackRequestSpan ? { tracingContext: { currentSpan: slackRequestSpan } } : {}),
         events: {
           onPhase: async ({ runId, phase }) => {
-            await updateStatus(slackPhaseStatus(phase));
             logInfo("slack.request.phase", {
               requestId: context.requestId,
               runId,
@@ -134,13 +133,22 @@ function createQaseyChannels(): ChannelConfig | undefined {
           onToolStart: async ({ runId, toolName }) => {
             const first = firstToolAt === undefined;
             firstToolAt ??= Date.now();
-            await updateStatus(slackToolStatus(toolName));
             logInfo("slack.request.tool_started", {
               requestId: context.requestId,
               runId,
               toolName,
               elapsedMs: Date.now() - receivedAt,
               first,
+            });
+          },
+          onAgentRuntimeEvent: async event => {
+            await updateStatus(statusProjector.project(event));
+            logInfo("slack.request.agent_event", {
+              requestId: context.requestId,
+              runId: event.runId,
+              eventType: event.type,
+              step: event.step,
+              elapsedMs: Date.now() - receivedAt,
             });
           },
           onAgentProgress: async report => {

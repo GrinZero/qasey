@@ -42,7 +42,7 @@ describe("qasey-main processors", () => {
     };
     const messageList = new MessageList();
     messageList.add([message], "memory");
-    const filter = new ToolCallFilter({ preserveModelOutput: true });
+    const filter = createQaseyContextProcessors(["github_get_file"])[0] as ToolCallFilter;
 
     const filtered = await filter.processInput({
       messages: [],
@@ -59,6 +59,44 @@ describe("qasey-main processors", () => {
       type: "tool-invocation",
       toolInvocation: { result: rawResult },
     });
+  });
+
+  it("never removes Skill control results that have no model projection", async () => {
+    const messageList = new MessageList();
+    messageList.add([{
+      id: "skill-result",
+      role: "assistant",
+      createdAt: new Date(),
+      content: {
+        format: 2,
+        parts: [{
+          type: "tool-invocation",
+          toolInvocation: {
+            state: "result",
+            toolCallId: "skill-call-1",
+            toolName: "skill",
+            args: { name: "qa-quick-query" },
+            result: "activated",
+          },
+        }],
+      },
+    }], "memory");
+    const filter = createQaseyContextProcessors(["github_get_file"])[0] as ToolCallFilter;
+
+    const filtered = await filter.processInput({
+      messages: [],
+      messageList,
+      abort: reason => { throw new Error(reason); },
+    });
+
+    expect(filtered).toEqual([expect.objectContaining({
+      content: expect.objectContaining({
+        parts: [expect.objectContaining({
+          type: "tool-invocation",
+          toolInvocation: expect.objectContaining({ toolName: "skill", result: "activated" }),
+        })],
+      }),
+    })]);
   });
 
   it("forces a text-only last step using a static durable-safe processor", async () => {

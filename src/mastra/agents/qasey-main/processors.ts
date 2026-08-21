@@ -25,10 +25,15 @@ export class EnsureQaseyFinalResponseProcessor implements Processor {
   }
 }
 
-export function createQaseyContextProcessors() {
+export function createQaseyContextProcessors(modelOutputToolNames: string[] = []) {
   return [
     new ToolCallFilter({
-      filterAfterToolSteps: 2,
+      // Filter only tools that explicitly provide a safe model projection.
+      // Framework control tools such as skill/search_tools must retain their
+      // invocation/result pair. Do not filter during the active loop: the
+      // current turn keeps its complete causal chain, while a later request
+      // compacts older external reads as they are loaded from memory.
+      exclude: modelOutputToolNames,
       preserveModelOutput: true,
     }),
     new EnsureQaseyFinalResponseProcessor(),
@@ -36,11 +41,11 @@ export function createQaseyContextProcessors() {
   ];
 }
 
-/** Coalesce tiny model deltas before the thread stream and Studio transport emit them. */
+/** Coalesce model deltas before durable stream events are synchronized through Redis. */
 export function createQaseyStreamBatcher() {
   return new BatchPartsProcessor({
-    batchSize: 8,
-    maxWaitTime: 50,
+    batchSize: 10,
+    maxWaitTime: 30,
     emitOnNonText: true,
   });
 }
@@ -56,6 +61,11 @@ export async function resolveQaseyMainInputProcessors({
   requestContext: RequestContext<any>;
 }) {
   const tools = await toolsForRequest(requestContext);
+  const modelOutputToolNames = Object.entries(tools)
+    .filter(([, tool]) => {
+      return Boolean(tool && typeof tool === "object" && "toModelOutput" in tool && typeof tool.toModelOutput === "function");
+    })
+    .map(([toolName]) => toolName);
   return [
     new ToolSearchProcessor({
       tools,
@@ -65,6 +75,6 @@ export async function resolveQaseyMainInputProcessors({
         autoLoad: true,
       },
     }),
-    ...createQaseyContextProcessors(),
+    ...createQaseyContextProcessors(modelOutputToolNames),
   ];
 }

@@ -3,8 +3,7 @@ import {
   markSlackRequestFinished,
   markSlackRequestStarted,
   showSlackStatus,
-  slackPhaseStatus,
-  slackToolStatus,
+  SlackAgentStatusProjector,
 } from "../../src/mastra/applications/qasey/slack-progress.ts";
 
 describe("Qasey Slack progress", () => {
@@ -39,19 +38,73 @@ describe("Qasey Slack progress", () => {
     expect(calls).toEqual(["add:👀", "remove:👀", "add:⚠️"]);
   });
 
-  it("uses transient Slack status for internal phases and actual tool work", async () => {
-    const statuses: string[] = [];
-    const target = { startTyping: async (status?: string) => { if (status) statuses.push(status); } };
+  it("projects actual Agent event payloads instead of fixed phase labels", () => {
+    const projector = new SlackAgentStatusProjector();
 
-    await showSlackStatus(target, slackPhaseStatus("routing"));
-    await showSlackStatus(target, slackToolStatus("github_get_pull_request_diff"));
-    await showSlackStatus(target, slackToolStatus("metersphere_ms_bulk_upsert_test_cases"));
-    await showSlackStatus(target, slackToolStatus("qasey_report_progress"));
+    expect(projector.project({
+      type: "step-start",
+      runId: "run-1",
+      step: 1,
+      inputMessages: [{ role: "user", content: [{ type: "text", text: "分析 payment-service #1823" }] }],
+    })).toContain("payment-service #1823");
 
-    expect(statuses).toEqual([
-      "正在理解需求…",
-      "正在核对 PR 和代码变更…",
-      "正在准备 MeterSphere 用例变更…",
-    ]);
+    expect(projector.project({
+      type: "tool-call",
+      runId: "run-1",
+      step: 1,
+      toolCallId: "call-1",
+      toolName: "github_get_pull_request_diff",
+      args: { owner: "moego", repo: "payment-service", pullNumber: 1823 },
+    })).toContain("moego");
+
+    expect(projector.project({
+      type: "tool-result",
+      runId: "run-1",
+      step: 1,
+      toolCallId: "call-1",
+      toolName: "github_get_pull_request_diff",
+      result: { changedFiles: 18, additions: 421, summary: "影响 Pre-auth migration" },
+      isError: false,
+    })).toContain("影响 Pre-auth migration");
+
+    expect(projector.project({
+      type: "step-finish",
+      runId: "run-1",
+      step: 1,
+      finishReason: "tool-calls",
+      text: "已确认影响 Pre-auth migration 和 Payment，继续核对现有用例。",
+      toolCalls: [],
+    })).toBe("已确认影响 Pre-auth migration 和 Payment，继续核对现有用例。");
+  });
+
+  it("redacts credentials and URL query strings from projected statuses", () => {
+    const projector = new SlackAgentStatusProjector();
+    const status = projector.project({
+      type: "tool-call",
+      runId: "run-1",
+      step: 1,
+      toolCallId: "call-1",
+      toolName: "http_request",
+      args: {
+        authorization: "Bearer top-secret",
+        url: "https://example.test/items?token=secret",
+        query: "Bearer abc.def.ghi",
+      },
+    });
+
+    expect(status).toContain("https://example.test/items");
+    expect(status).not.toContain("top-secret");
+    expect(status).not.toContain("token=secret");
+    expect(status).not.toContain("abc.def.ghi");
+
+    const conclusion = projector.project({
+      type: "step-finish",
+      runId: "run-1",
+      step: 1,
+      finishReason: "stop",
+      text: "读取完成，api_key=should-not-leak",
+      toolCalls: [],
+    });
+    expect(conclusion).not.toContain("should-not-leak");
   });
 });

@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { MCPClient, MCPOAuthClientProvider } from "@mastra/mcp";
 import type { MastraMCPServerDefinition, OAuthStorage } from "@mastra/mcp";
 import type { ToolsInput } from "@mastra/core/agent";
+import { z } from "zod";
 import type { QaseyChannel } from "../../contracts/src/index.ts";
 import { authorizeDiscoveredToolAccess, TOOL_POLICIES } from "../../domain/src/index.ts";
 import type { QaseyConfig } from "./config.ts";
@@ -389,9 +390,11 @@ export class QaseyMcpCatalog {
       if (access.readOnly && policy.effect !== "read") continue;
       const execute = "execute" in tool ? tool.execute : undefined;
       const hasModelOutput = "toModelOutput" in tool && typeof tool.toModelOutput === "function";
+      const hasOutputSchema = "outputSchema" in tool && Boolean(tool.outputSchema);
       output[qualified] = {
         ...tool,
         requireApproval: policy.requiresApproval,
+        ...(policy.effect === "read" && !hasOutputSchema ? { outputSchema: z.unknown() } : {}),
         ...(policy.effect === "read" && !hasModelOutput ? { toModelOutput: boundedMcpModelOutput } : {}),
         execute: async (input: unknown, executionContext: Parameters<NonNullable<typeof execute>>[1]) => {
           authorizeDiscoveredToolAccess(qualified, policy, { channel });
@@ -421,7 +424,7 @@ export function boundedMcpModelOutput(output: unknown): unknown {
   const maxChars = 32_000;
   let serialized: string;
   try {
-    serialized = JSON.stringify(output);
+    serialized = JSON.stringify(output) ?? String(output);
   } catch {
     serialized = String(output);
   }

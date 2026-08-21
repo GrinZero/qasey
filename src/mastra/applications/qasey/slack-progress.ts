@@ -1,3 +1,5 @@
+import type { QaseyAgentRuntimeEvent } from "./service.ts";
+
 export interface SlackReactionTarget {
   addReaction(emoji: string): Promise<void>;
   removeReaction(emoji: string): Promise<void>;
@@ -7,9 +9,16 @@ export interface SlackStatusTarget {
   startTyping(status?: string): Promise<void>;
 }
 
-export type QaseyPhase = "routing" | "agent" | "workflow" | "finalizing";
-
 const WORKING_REACTION = "👀";
+const STATUS_MAX_CHARS = 100;
+const SENSITIVE_KEY = /(?:^|_)(?:access_?token|api_?key|authorization|cookie|credential|password|private_?key|secret|session)(?:$|_)/i;
+const SENSITIVE_VALUE = /\b(?:Bearer\s+[A-Za-z0-9._~+\/-]+=*|xox[a-z]-[A-Za-z0-9-]+)\b/gi;
+const INLINE_SECRET = /\b(?:access[_-]?token|api[_-]?key|authorization|cookie|password|private[_-]?key|secret|session)\s*[:=]\s*["']?[^\s,;"']+/gi;
+const IMPORTANT_KEYS = [
+  "title", "summary", "message", "name", "key", "issueKey", "issue_key", "repository", "repo", "owner",
+  "pullNumber", "pull_number", "number", "path", "url", "query", "project", "module", "status", "success",
+  "count", "total", "item_count", "changedFiles", "changed_files", "additions", "deletions",
+];
 
 /**
  * A reaction acknowledges the request without turning an internal runtime
@@ -38,29 +47,179 @@ export async function showSlackStatus(target: SlackStatusTarget, status: string 
   await ignoreReactionFailure(() => target.startTyping(status));
 }
 
-export function slackPhaseStatus(phase: QaseyPhase): string {
-  if (phase === "routing") return "正在理解需求…";
-  if (phase === "agent") return "正在收集并核对相关资料…";
-  if (phase === "workflow") return "正在写入并回查 MeterSphere…";
-  return "正在整理结果…";
+/**
+ * Projects the live Agent event stream into one concise Slack status. The
+ * status is derived from event payloads, not from Qasey's deterministic
+ * business phases. Raw reasoning and secret-looking fields are never used.
+ */
+export class SlackAgentStatusProjector {
+  private readonly calls = new Map<string, { toolName: string; args?: unknown }>();
+  private lastEvidence: string | undefined;
+
+  project(event: QaseyAgentRuntimeEvent): string | undefined {
+    if (event.type === "step-start") {
+      const input = summarizeMessages(event.inputMessages);
+      const subject = input || this.lastEvidence;
+      return subject ? statusLine(`第 ${event.step} 步 · ${subject}`) : undefined;
+    }
+
+    if (event.type === "tool-call") {
+      this.calls.set(event.toolCallId, { toolName: event.toolName, ...(event.args !== undefined ? { args: event.args } : {}) });
+      const target = summarizeValue(event.args);
+      return statusLine(`正在执行 ${toolLabel(event.toolName)}${target ? ` · ${target}` : ""}`);
+    }
+
+    if (event.type === "tool-result") {
+      const call = this.calls.get(event.toolCallId);
+      this.calls.delete(event.toolCallId);
+      const result = summarizeValue(event.result);
+      const target = summarizeValue(event.args ?? call?.args);
+      const evidence = result || target;
+      if (evidence) this.lastEvidence = evidence;
+      const label = toolLabel(event.toolName || call?.toolName || "tool");
+      return statusLine(`${label}${event.isError ? " 执行失败" : " 返回"}${evidence ? ` · ${evidence}` : ""}`);
+    }
+
+    const conclusion = summarizeText(event.text);
+    if (conclusion) {
+      this.lastEvidence = conclusion;
+      return statusLine(conclusion);
+    }
+    const tools = [...new Set(event.toolCalls.map(call => toolLabel(call.toolName)))];
+    if (tools.length > 0) {
+      const detail = this.lastEvidence ? ` · ${this.lastEvidence}` : "";
+      return statusLine(`已完成 ${tools.join("、")}${detail}`);
+    }
+    return this.lastEvidence ? statusLine(this.lastEvidence) : undefined;
+  }
 }
 
-export function slackToolStatus(toolName: string): string | undefined {
-  const name = toolName.toLowerCase();
-  if (name === "qasey_report_progress") return undefined;
-  if (name.includes("metersphere")) {
-    if (/upsert|create|edit|write/.test(name)) return "正在准备 MeterSphere 用例变更…";
-    return "正在核对 MeterSphere 模块和用例…";
+function summarizeMessages(messages: unknown): string | undefined {
+  if (!Array.isArray(messages) || messages.length === 0) return summarizeValue(messages);
+  const last = messages.at(-1);
+  if (isRecord(last) && last.content !== undefined) {
+    const content = Array.isArray(last.content) ? textFromContentParts(last.content) : undefined;
+    return content ? summarizeText(content) : summarizeValue(last.content);
   }
-  if (name.includes("github") || /pull.?request|repository|repo_/.test(name)) return "正在核对 PR 和代码变更…";
-  if (name.includes("jira")) return "正在核对 Jira 需求与讨论…";
-  if (name.includes("figma")) return "正在核对设计稿…";
-  if (name.includes("lark")) return "正在核对飞书文档…";
-  if (name.includes("slack")) return "正在核对 Slack 讨论…";
-  if (name.includes("experience") || name.includes("qa_context")) return "正在核对 QA 规范与历史经验…";
-  if (name.includes("rag") || name.includes("answer")) return "正在检索相关资料…";
-  if (name.includes("e2e") || name.includes("run")) return "正在核对自动化运行…";
-  return "正在核对相关证据…";
+  return summarizeValue(last);
+}
+
+function summarizeValue(value: unknown, depth = 0): string | undefined {
+  if (value === undefined || value === null || depth > 3) return undefined;
+  if (typeof value === "string") {
+    const parsed = parseJson(value);
+    return parsed === undefined ? summarizeText(value) : summarizeValue(parsed, depth + 1);
+  }
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "0 项";
+    const primitives = value.filter(item => ["string", "number", "boolean"].includes(typeof item)).slice(0, 3);
+    if (primitives.length > 0) {
+      const preview = primitives.map(item => summarizeValue(item, depth + 1)).filter(Boolean).join("、");
+      return statusLine(`${value.length} 项${preview ? `：${preview}` : ""}`);
+    }
+    const last = summarizeValue(value.at(-1), depth + 1);
+    return statusLine(`${value.length} 项${last ? ` · ${last}` : ""}`);
+  }
+  if (!isRecord(value)) return undefined;
+
+  const contentText = extractContentText(value);
+  if (contentText) return summarizeValue(contentText, depth + 1);
+  if (value.content !== undefined && Object.keys(value).length <= 4) return summarizeValue(value.content, depth + 1);
+
+  const entries = Object.entries(value).filter(([key, item]) => !SENSITIVE_KEY.test(key) && item !== undefined && item !== null);
+  const rank = (key: string) => {
+    const index = IMPORTANT_KEYS.indexOf(key);
+    return index === -1 ? IMPORTANT_KEYS.length : index;
+  };
+  entries.sort(([left], [right]) => rank(left) - rank(right));
+  const facts: string[] = [];
+  for (const [key, item] of entries) {
+    if (facts.length >= 3) break;
+    const label = humanizeKey(key);
+    if (Array.isArray(item)) {
+      facts.push(`${label}=${item.length} 项`);
+      continue;
+    }
+    if (isRecord(item)) {
+      const nested = summarizeValue(item, depth + 1);
+      if (nested) facts.push(`${label}=${nested}`);
+      continue;
+    }
+    const rendered = summarizeValue(item, depth + 1);
+    if (rendered) facts.push(`${label}=${rendered}`);
+  }
+  return facts.length > 0 ? statusLine(facts.join(" · ")) : undefined;
+}
+
+function extractContentText(value: Record<string, unknown>): string | undefined {
+  if (!Array.isArray(value.content)) return undefined;
+  return textFromContentParts(value.content);
+}
+
+function textFromContentParts(content: unknown[]): string | undefined {
+  const textParts = content.flatMap(part => {
+    if (!isRecord(part) || part.type !== "text" || typeof part.text !== "string") return [];
+    return [part.text];
+  });
+  return textParts.length > 0 ? textParts.join(" ") : undefined;
+}
+
+function summarizeText(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const withoutUrlSecrets = value.replace(/https?:\/\/[^\s)]+/gi, raw => {
+    try {
+      const url = new URL(raw);
+      return `${url.origin}${url.pathname}`;
+    } catch {
+      return raw.split(/[?#]/, 1)[0] ?? raw;
+    }
+  });
+  const text = withoutUrlSecrets
+    .replace(SENSITIVE_VALUE, "[已隐藏]")
+    .replace(INLINE_SECRET, "[已隐藏]")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/[*_~`>|]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text ? statusLine(text) : undefined;
+}
+
+function toolLabel(toolName: string): string {
+  const words = toolName.replace(/^qasey_/, "").split(/[_./:-]+/).filter(Boolean);
+  if (words.length === 0) return "tool";
+  const source = words[0]!;
+  const action = words.slice(1);
+  const sourceLabel = source.toLowerCase() === "github" ? "GitHub"
+    : source.toLowerCase() === "jira" ? "Jira"
+      : source.toLowerCase() === "figma" ? "Figma"
+        : source.toLowerCase() === "slack" ? "Slack"
+          : source.toLowerCase() === "metersphere" ? "MeterSphere"
+            : source;
+  return action.length > 0 ? `${sourceLabel} ${action.join(" ")}` : sourceLabel;
+}
+
+function humanizeKey(key: string): string {
+  return key.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ");
+}
+
+function parseJson(value: string): unknown | undefined {
+  const text = value.trim();
+  if (!(text.startsWith("{") && text.endsWith("}")) && !(text.startsWith("[") && text.endsWith("]"))) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+function statusLine(value: string): string {
+  const chars = [...value.trim()];
+  return chars.length <= STATUS_MAX_CHARS ? chars.join("") : `${chars.slice(0, STATUS_MAX_CHARS - 1).join("")}…`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function ignoreReactionFailure(operation: () => Promise<void>): Promise<void> {

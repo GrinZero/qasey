@@ -182,7 +182,7 @@ function boundedModelOutput(output: ReadConnectorOutput): unknown {
   const maxChars = 32_000;
   let serialized: string;
   try {
-    serialized = JSON.stringify(output.data);
+    serialized = JSON.stringify(output.data) ?? String(output.data);
   } catch {
     serialized = String(output.data);
   }

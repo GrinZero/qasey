@@ -1,5 +1,6 @@
 import { RequestContext } from "@mastra/core/request-context";
 import type { Mastra } from "@mastra/core/mastra";
+import type { ChunkType } from "@mastra/core/stream";
 import {
   type AgentProgressReport,
   type QaseyRequestContext,
@@ -56,8 +57,43 @@ export interface QaseyFinalizationDecision extends QaseyAgentPhaseResult {
   finalization: QaseyResponse["finalization"];
 }
 
+export type QaseyAgentRuntimeEvent =
+  | {
+    type: "step-start";
+    runId: string;
+    step: number;
+    inputMessages?: unknown;
+  }
+  | {
+    type: "tool-call";
+    runId: string;
+    step: number;
+    toolCallId: string;
+    toolName: string;
+    args?: unknown;
+  }
+  | {
+    type: "tool-result";
+    runId: string;
+    step: number;
+    toolCallId: string;
+    toolName: string;
+    args?: unknown;
+    result?: unknown;
+    isError: boolean;
+  }
+  | {
+    type: "step-finish";
+    runId: string;
+    step: number;
+    finishReason: string;
+    text?: string;
+    toolCalls: Array<{ toolCallId: string; toolName: string; args?: unknown }>;
+  };
+
 export interface QaseyExecutionEvents {
   onPhase?: (event: { runId: string; phase: "agent" | "workflow" | "finalizing" }) => void | Promise<void>;
+  onAgentRuntimeEvent?: (event: QaseyAgentRuntimeEvent) => void | Promise<void>;
   onAgentProgress?: (event: AgentProgressReport & { runId: string }) => void | Promise<void>;
   onCasePlanCheckpoint?: (event: { runId: string; plan: MeterSphereCasePlan }) => void | Promise<void>;
   onCompletionCheckpoint?: (event: { runId: string; receipt: MeterSphereCaseCompletionReceipt }) => void | Promise<void>;
@@ -172,8 +208,9 @@ export async function runQaseyAgentPhase(
     content: [{ type: "text" as const, text: context.chatInput }, ...files],
   }];
   const toolStarts = new Map<string, number[]>();
+  let finishSnapshot: AgentFinishSnapshot | undefined;
   await options.events?.onPhase?.({ runId, phase: "agent" });
-  const result = await mastra.getAgent("qasey-main").generate(prompt, {
+  const stream = await mastra.getAgent("qasey-main").stream(prompt, {
     requestContext,
     ...(options.tracingContext ? { tracingContext: options.tracingContext } : {}),
     runId,
@@ -218,6 +255,11 @@ export async function runQaseyAgentPhase(
       });
     },
     onFinish: ({ finishReason, text, steps }) => {
+      finishSnapshot = {
+        ...(finishReason ? { finishReason } : {}),
+        text,
+        steps: steps as unknown as Array<Record<string, unknown> & { text?: string }>,
+      };
       recordQaseyEvent(requestSpan, "qasey agent generation finished", {
         finishReason,
         textChars: text.length,
@@ -242,8 +284,21 @@ export async function runQaseyAgentPhase(
       },
     ),
   });
+  let step = 0;
+  let stepText = "";
+  for await (const chunk of stream.fullStream) {
+    if (chunk.type === "step-start") stepText = "";
+    if (chunk.type === "text-delta") stepText = `${stepText}${chunk.payload.text}`.slice(0, 2_000);
+    let event = agentRuntimeEventFromChunk(runId, step, chunk);
+    if (event?.type === "step-start") step = event.step;
+    if (event?.type === "step-finish" && !event.text && stepText.trim()) event = { ...event, text: stepText };
+    if (event) await options.events?.onAgentRuntimeEvent?.(event);
+    if (event?.type === "step-finish") stepText = "";
+  }
+  const result = await stream.getFullOutput();
   abortSignal.throwIfAborted();
-  const casePlan = options.resumeCasePlan ?? extractMeterSphereCasePlan(result);
+  const completedResult = restoreProcessedAgentOutput(result, finishSnapshot);
+  const casePlan = options.resumeCasePlan ?? extractMeterSphereCasePlan(completedResult);
   if (casePlan && casePlan.planHash !== options.resumeCasePlan?.planHash) {
     requestContext.set("case-plan", casePlan);
     await options.events?.onCasePlanCheckpoint?.({ runId, plan: casePlan });
@@ -251,8 +306,8 @@ export async function runQaseyAgentPhase(
   return {
     context,
     runId,
-    agentText: selectFinalText(result),
-    completionState: inspectAgentCompletion(result),
+    agentText: selectFinalText(completedResult as { text?: string; steps?: Array<{ text?: string }> }),
+    completionState: inspectAgentCompletion(completedResult),
     ...(casePlan ? { casePlan } : {}),
     progress: agentProgress,
   };
@@ -365,6 +420,92 @@ export function selectFinalText(result: { text?: string; steps?: Array<{ text?: 
   const steps = result.steps ?? [];
   if (steps.length > 0) return steps.at(-1)?.text?.trim() ?? "";
   return result.text?.trim() ?? "";
+}
+
+interface AgentFinishSnapshot {
+  text: string;
+  finishReason?: string;
+  steps: Array<Record<string, unknown> & { text?: string }>;
+}
+
+export function agentRuntimeEventFromChunk(
+  runId: string,
+  currentStep: number,
+  chunk: ChunkType,
+): QaseyAgentRuntimeEvent | undefined {
+  if (chunk.type === "step-start") {
+    return {
+      type: "step-start",
+      runId,
+      step: currentStep + 1,
+      ...(chunk.payload.inputMessages ? { inputMessages: chunk.payload.inputMessages } : {}),
+    };
+  }
+  if (chunk.type === "tool-call") {
+    return {
+      type: "tool-call",
+      runId,
+      step: currentStep,
+      toolCallId: chunk.payload.toolCallId,
+      toolName: chunk.payload.toolName,
+      ...(chunk.payload.args !== undefined ? { args: chunk.payload.args } : {}),
+    };
+  }
+  if (chunk.type === "tool-result") {
+    return {
+      type: "tool-result",
+      runId,
+      step: currentStep,
+      toolCallId: chunk.payload.toolCallId,
+      toolName: chunk.payload.toolName,
+      ...(chunk.payload.args !== undefined ? { args: chunk.payload.args } : {}),
+      result: chunk.payload.result,
+      isError: chunk.payload.isError === true,
+    };
+  }
+  if (chunk.type === "tool-error") {
+    return {
+      type: "tool-result",
+      runId,
+      step: currentStep,
+      toolCallId: chunk.payload.toolCallId,
+      toolName: chunk.payload.toolName,
+      ...(chunk.payload.args !== undefined ? { args: chunk.payload.args } : {}),
+      result: chunk.payload.error,
+      isError: true,
+    };
+  }
+  if (chunk.type === "step-finish") {
+    return {
+      type: "step-finish",
+      runId,
+      step: currentStep,
+      finishReason: chunk.payload.stepResult.reason,
+      ...(chunk.payload.output.text ? { text: chunk.payload.output.text } : {}),
+      toolCalls: (chunk.payload.output.toolCalls ?? []).map(call => ({
+        toolCallId: call.toolCallId,
+        toolName: call.toolName,
+        ...(call.input !== undefined ? { args: call.input } : {}),
+      })),
+    };
+  }
+  return undefined;
+}
+
+/**
+ * BatchPartsProcessor reduces Redis/pubsub writes for durable streams. Mastra
+ * 1.59 can still return an empty FullOutput after processing those chunks,
+ * while its native onFinish callback contains the complete text and steps.
+ * Use that terminal snapshot for aggregate fields; the callback is
+ * observational and its return value never controls the durable loop.
+ */
+export function restoreProcessedAgentOutput(result: unknown, finish?: AgentFinishSnapshot): unknown {
+  if (!isRecord(result) || !finish) return result;
+  const output = { ...result };
+  if (finish.text.trim()) output.text = finish.text;
+  if (finish.steps.length > 0) output.steps = finish.steps;
+  if (finish.finishReason) output.finishReason = finish.finishReason;
+  return output;
 }
 
 export function assertNormalCompletion(result: unknown): void {
