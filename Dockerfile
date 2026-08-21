@@ -77,7 +77,8 @@ RUN corepack enable \
   && python3 --version \
   && ffmpeg -version >/dev/null \
   && Xvfb -help >/dev/null 2>&1
-RUN chown pwuser:pwuser /app
+RUN chown pwuser:pwuser /app \
+  && install -d -o pwuser -g pwuser -m 0750 /app/.mastra/output/workspace
 USER 1001
 EXPOSE 8080
 CMD ["sh", "ci/start.sh", "api"]

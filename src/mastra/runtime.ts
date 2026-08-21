@@ -1,10 +1,12 @@
 import "../load-env.ts";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DuckDBStore } from "@mastra/duckdb";
 import { FilesystemStore, MastraCompositeStore } from "@mastra/core/storage";
 import { createCodeMode, createTool } from "@mastra/core/tools";
 import type { RequestContext } from "@mastra/core/request-context";
+import type { CodeModeTransport, ToolObserve } from "@mastra/core/tools";
 import { QuickJsCodeModeTransport } from "@mastra/quickjs";
 import { ObservabilityStoragePostgresVNext, PostgresStore } from "@mastra/pg";
 import { z } from "zod";
@@ -174,6 +176,66 @@ const qaseyToolingByRequest = new WeakMap<object, Promise<QaseyAgentTooling>>();
 const quickJsCodeModeTransport = new QuickJsCodeModeTransport({
   memoryLimitMb: config.QASEY_CODE_MODE_MEMORY_LIMIT_MB,
 });
+const codeModeObservationContext = new AsyncLocalStorage<ToolObserve>();
+
+const observableQuickJsCodeModeTransport: CodeModeTransport = {
+  requiresSandbox: quickJsCodeModeTransport.requiresSandbox,
+  run: options => quickJsCodeModeTransport.run({
+    ...options,
+    dispatch: async (toolId, input) => {
+      const observe = codeModeObservationContext.getStore();
+      if (!observe) return options.dispatch(toolId, input);
+      let failureResult: unknown;
+      let caughtStructuredFailure = false;
+      try {
+        return await observe.span(
+          `code-mode external tool: '${toolId}'`,
+          async () => {
+            const result = await options.dispatch(toolId, input);
+            const failure = codeModeExternalFailure(result);
+            if (failure) {
+              caughtStructuredFailure = true;
+              failureResult = result;
+              throw failure;
+            }
+            return result;
+          },
+          { toolId, codeModeExternal: true },
+        );
+      } catch (error) {
+        if (!caughtStructuredFailure) throw error;
+        observe.log("error", "code-mode external tool returned a structured failure", {
+          toolId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return failureResult;
+      }
+    },
+  }),
+};
+
+function codeModeExternalFailure(result: unknown): Error | undefined {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return undefined;
+  const record = result as Record<string, unknown>;
+  const failed = record.status === "failed" || record.status === "error"
+    || record.success === false || record.ok === false || record.isError === true;
+  if (!failed) return undefined;
+  const nestedError = record.error && typeof record.error === "object" && !Array.isArray(record.error)
+    ? record.error as Record<string, unknown>
+    : undefined;
+  const message = typeof record.message === "string"
+    ? record.message
+    : typeof record.error === "string"
+      ? record.error
+      : typeof nestedError?.message === "string"
+        ? nestedError.message
+        : typeof record.content === "string"
+          ? record.content
+          : "Code Mode external tool returned a structured failure";
+  const error = new Error(message);
+  error.name = "CodeModeExternalToolFailure";
+  return error;
+}
 
 const studioPreviewRuntime: QaseyRequestContextMap = {
   "qasey-context": {
@@ -397,7 +459,13 @@ export async function buildQaseyAgentTooling(toolInput: ToolsInput | Promise<Too
     id: "execute_typescript",
     tools: codeModeTools,
     timeout: config.QASEY_CODE_MODE_TIMEOUT_MS,
-  }, quickJsCodeModeTransport);
+  }, observableQuickJsCodeModeTransport);
+  const executeCodeMode = codeMode.tool.execute?.bind(codeMode.tool);
+  if (executeCodeMode) {
+    codeMode.tool.execute = (input, context) => context?.observe
+      ? codeModeObservationContext.run(context.observe, () => executeCodeMode(input, context))
+      : executeCodeMode(input, context);
+  }
   return {
     tools: { ...directTools, execute_typescript: codeMode.tool },
     codeModeInstructions: `${codeMode.instructions}\n\nQasey 专属规则：\n- Code Mode 只包含只读工具。会产生副作用的工具、审批、进度报告和持久化 Workflow 仍作为独立的直接工具提供。\n- 当多个读取操作可以并行、分页、过滤、去重、连接或聚合时，使用 Code Mode。返回精简结果，同时保留作为证据所需的来源标识。\n- 如果某次外部调用的结果表明来源已经获取，不要重复调用；改用返回的工件回执或专用证据读取工具。`,
