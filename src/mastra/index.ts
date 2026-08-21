@@ -34,6 +34,7 @@ import { seedServiceRolePermissions } from "../platform/auth/service-role-permis
 import { runtimeReadiness } from "../platform/storage/readiness.ts";
 import { resolveDevelopmentPrincipal } from "../platform/auth/development-principal.ts";
 import { GLOBAL_SKILLS_PATH } from "./skill-paths.ts";
+import { createQaseyChannelProviders } from "./channel-providers.ts";
 
 const googleOidc = new GoogleOidcService({
   ...(config.GOOGLE_CLIENT_ID ? { clientId: config.GOOGLE_CLIENT_ID } : {}),
@@ -177,6 +178,7 @@ const server = {
   apiPrefix: MASTRA_API_PREFIX,
   cors: { origin: [], allowMethods: ["GET", "POST"], allowHeaders: ["content-type", "authorization", "x-qasey-webhook-token"] },
 };
+const qaseyChannelProviders = createQaseyChannelProviders(config);
 const sharedRuntime = createSharedMastraConfig({
   applications: [qaseyApplication, adminUiApplication],
   platform: {
@@ -271,6 +273,7 @@ Object.assign(server, sharedRuntime.config.server!);
 
 export const mastra = new Mastra({
   ...sharedRuntime.config,
+  channels: qaseyChannelProviders,
   server,
   recovery: { durableAgents: "auto" },
   bundler: {

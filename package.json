@@ -42,6 +42,7 @@
     "@mastra/quickjs": "0.1.0",
     "@mastra/redis": "1.4.0",
     "@mastra/redis-streams": "0.3.0",
+    "@mastra/slack": "1.6.1",
     "@moego/aws-secret-env": "0.1.0",
     "@octokit/auth-app": "^8.3.0",
     "@octokit/rest": "^22.0.0",
