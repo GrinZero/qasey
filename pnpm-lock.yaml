@@ -254,9 +254,6 @@ importers:
       '@mastra/redis-streams':
         specifier: 0.3.0
         version: 0.3.0(@mastra/core@1.59.0(patch_hash=0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3))(@opentelemetry/api@1.9.1)
-      '@mastra/slack':
-        specifier: 1.6.1
-        version: 1.6.1(@mastra/core@1.59.0(patch_hash=0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3))(debug@4.4.3(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3)
       '@moego/aws-secret-env':
         specifier: 0.1.0
         version: 0.1.0
@@ -1334,12 +1331,6 @@ packages:
     peerDependencies:
       '@mastra/core': '>=1.50.0-0 <2.0.0-0'
       zod: ^3.25.0 || ^4.0.0
-
-  '@mastra/slack@1.6.1':
-    resolution: {integrity: sha512-br/9fJfPuc0MWeTSkcYOrHpuwJG4FUVRGYTcx5aFdbJC+sK1vB2Bdo2puFWQ7gQA0vpkdjuP4hOVn/kDAB1GBA==}
-    engines: {node: '>=22.13.0'}
-    peerDependencies:
-      '@mastra/core': ^1.0.0
 
   '@modelcontextprotocol/client@2.0.0':
     resolution: {integrity: sha512-8f1OghQ2rjzIOfqgUCP+8GiUWqRs89njoWLNqAe8kWmDePv3s1fZXseej+QXemssEuuOvLLmLO/kqM3IQHtISw==}
@@ -5730,19 +5721,6 @@ snapshots:
       '@mastra/core': 1.59.0(patch_hash=0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3)
       hono: 4.13.1
       zod: 4.4.3
-
-  '@mastra/slack@1.6.1(@mastra/core@1.59.0(patch_hash=0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3))(debug@4.4.3(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3)':
-    dependencies:
-      '@chat-adapter/slack': 4.37.0(debug@4.4.3(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3)
-      '@mastra/core': 1.59.0(patch_hash=0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3)
-    transitivePeerDependencies:
-      - ai
-      - bufferutil
-      - debug
-      - supports-color
-      - utf-8-validate
-      - workflow
-      - zod
 
   '@modelcontextprotocol/client@2.0.0':
     dependencies:

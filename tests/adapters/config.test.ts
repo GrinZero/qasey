@@ -33,19 +33,6 @@ describe("shared runtime configuration", () => {
     expect(config.METERSPHERE_BASE_URL).toBe("https://metersphere.devops.moego.pet");
     expect(config.METERSPHERE_PROJECT_ID).toBe("20a78db9-19aa-11ee-a261-5a66b98c4036");
     expect(config.SLACK_CHANNEL_MODE).toBe("auto");
-    expect(config.SLACK_APP_CONFIG_TOKEN).toBeUndefined();
-    expect(config.SLACK_APP_CONFIG_REFRESH_TOKEN).toBeUndefined();
-  });
-
-  it("accepts optional SlackProvider App Manifest credentials", () => {
-    const config = loadConfig({
-      NODE_ENV: "development",
-      SLACK_APP_CONFIG_TOKEN: "xoxe-config-token",
-      SLACK_APP_CONFIG_REFRESH_TOKEN: "xoxe-refresh-token",
-    } as NodeJS.ProcessEnv);
-
-    expect(config.SLACK_APP_CONFIG_TOKEN).toBe("xoxe-config-token");
-    expect(config.SLACK_APP_CONFIG_REFRESH_TOKEN).toBe("xoxe-refresh-token");
   });
 
   it("keeps Redis durability off locally unless explicitly enabled", () => {

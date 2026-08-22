@@ -259,31 +259,6 @@ export function classifyRuntimeRoute(
   catalog: ReadonlyMap<string, CatalogEntry>,
   routes: readonly CatalogEntry[],
 ): ClassifiedResource | undefined {
-  // Runtime-level ChannelProviders expose their OAuth and signed ingress at
-  // root-level custom routes rather than below Mastra's API prefix. Slack owns
-  // state validation for the OAuth callback and request-signature validation
-  // for events/commands; the platform middleware must not reject them first.
-  if (method === "GET" && path === "/slack/oauth/callback") {
-    return {
-      applicationId: "platform", resourceType: "platform", resourceId: "channel-provider:slack-oauth",
-      action: "receive", permission: "platform.channel-provider.connect", audiences: ["channel"], public: true,
-    };
-  }
-  if (method === "POST" && /^\/slack\/(?:events|commands)\/[^/]+\/?$/u.test(path)) {
-    return {
-      applicationId: "platform", resourceType: "platform", resourceId: "channel-provider:slack",
-      action: "receive", permission: "platform.channel-provider.receive", audiences: ["channel"],
-      downstreamAuthenticated: true,
-    };
-  }
-  if (/^\/slack\/(?:connect|disconnect|installations)\/?$/u.test(path)) {
-    return {
-      applicationId: "platform", resourceType: "platform", resourceId: "channel-provider:slack",
-      action: actionFor(method, path),
-      permission: method === "GET" ? "platform.runtime.inspect" : "platform.runtime.manage",
-      audiences: ["admin-ui", "api", "service"],
-    };
-  }
   const mastraPath = stripMastraApiPrefix(path);
   // Mastra's scheduler is a platform management surface: its GET routes read
   // global rows, while POST/PATCH/DELETE can mutate or execute them. Classify

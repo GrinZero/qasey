@@ -49,8 +49,6 @@ export const ConfigSchema = z.object({
   REDIS_TLS: optionalBoolean,
   REDIS_TLS_SERVERNAME: optionalString,
   SLACK_BASE_URL: optionalUrl,
-  SLACK_APP_CONFIG_TOKEN: optionalString,
-  SLACK_APP_CONFIG_REFRESH_TOKEN: optionalString,
   SLACK_BOT_TOKEN: optionalString,
   SLACK_USER_TOKEN: optionalString,
   SLACK_SIGNING_SECRET: optionalString,

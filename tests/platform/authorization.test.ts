@@ -44,28 +44,6 @@ describe("permission route coverage", () => {
     })).toBe(false);
   });
 
-  it("classifies SlackProvider OAuth, signed ingress, and management routes", () => {
-    expect(classifyRuntimeRoute("/slack/oauth/callback", "GET", new Map(), [])).toMatchObject({
-      resourceId: "channel-provider:slack-oauth",
-      public: true,
-    });
-    expect(classifyRuntimeRoute("/slack/events/webhook-1", "POST", new Map(), [])).toMatchObject({
-      resourceId: "channel-provider:slack",
-      downstreamAuthenticated: true,
-    });
-    expect(classifyRuntimeRoute("/slack/commands/webhook-1", "POST", new Map(), [])).toMatchObject({
-      resourceId: "channel-provider:slack",
-      downstreamAuthenticated: true,
-    });
-    expect(classifyRuntimeRoute("/slack/installations", "GET", new Map(), [])).toMatchObject({
-      permission: "platform.runtime.inspect",
-      audiences: ["admin-ui", "api", "service"],
-    });
-    expect(classifyRuntimeRoute("/slack/connect", "POST", new Map(), [])).toMatchObject({
-      permission: "platform.runtime.manage",
-    });
-  });
-
   it("redirects anonymous Studio document navigations through Admin while preserving the original URL", async () => {
     const middleware = createAuthorizationMiddleware({
       catalog: [],
