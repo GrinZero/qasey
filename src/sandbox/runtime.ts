@@ -570,8 +570,9 @@ export class QaseySandboxRuntime {
 }
 
 export function sandboxRuntimeOptions(env: NodeJS.ProcessEnv = process.env): SandboxRuntimeOptions {
-  const isolation = env.QASEY_SANDBOX_ISOLATION === "none" ? "none" : "bwrap";
-  if (env.NODE_ENV === "production" && isolation !== "bwrap") throw new Error("Production sandbox runtime requires QASEY_SANDBOX_ISOLATION=bwrap");
+  // Temporary cloud validation: run directly in the sandbox Pod until the
+  // Kubernetes nodes support the user namespaces required by bubblewrap.
+  const isolation = "none" as const;
   return {
     dataRoot: env.QASEY_DATA_ROOT?.trim() || ".qasey/data",
     port: positiveInteger(env.QASEY_SANDBOX_PORT, 4120),
