@@ -1,6 +1,10 @@
 import { Octokit } from "@octokit/rest";
+import { createPrivateKey, generateKeyPairSync } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { createGitHubClient, GitHubInstallationTokenProvider, loadConfig } from "../../packages/adapters/src/index.ts";
+import { createGitHubClient, GitHubInstallationTokenProvider, loadConfig, normalizeGitHubPrivateKey } from "../../packages/adapters/src/index.ts";
+
+const testPrivateKey = generateKeyPairSync("rsa", { modulusLength: 2048 })
+  .privateKey.export({ type: "pkcs1", format: "pem" }).toString();
 
 describe("GitHub App authentication", () => {
   it("creates an installation-authenticated Octokit only from complete app configuration", () => {
@@ -10,6 +14,23 @@ describe("GitHub App authentication", () => {
       GITHUB_APP_INSTALLATION_ID: "456",
       GITHUB_APP_PRIVATE_KEY: "private-key",
     } as NodeJS.ProcessEnv))).toBeInstanceOf(Octokit);
+  });
+
+  it("normalizes flattened and escaped-newline GitHub App PEM secrets", () => {
+    const flattened = testPrivateKey.replace(/\r?\n/gu, "");
+    const escaped = testPrivateKey.replace(/\r?\n/gu, "\\n");
+    for (const privateKey of [testPrivateKey, flattened, escaped, `"${escaped}"`]) {
+      const normalized = normalizeGitHubPrivateKey(privateKey);
+      expect(() => createPrivateKey(normalized)).not.toThrow();
+      expect(normalized).toMatch(/^-----BEGIN RSA PRIVATE KEY-----\n/u);
+      expect(normalized).toMatch(/\n-----END RSA PRIVATE KEY-----\n$/u);
+    }
+    expect(loadConfig({
+      GITHUB_APP_ID: "123",
+      GITHUB_APP_INSTALLATION_ID: "456",
+      GITHUB_APP_PRIVATE_KEY: flattened,
+    } as NodeJS.ProcessEnv).GITHUB_APP_PRIVATE_KEY)
+      .toBe(normalizeGitHubPrivateKey(testPrivateKey));
   });
 
   it("mints and caches an explicitly read-only installation token", async () => {

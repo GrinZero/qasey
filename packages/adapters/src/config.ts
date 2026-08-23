@@ -2,6 +2,10 @@ import { z } from "zod";
 
 const optionalUrl = z.preprocess(value => value === "" ? undefined : value, z.url().optional());
 const optionalString = z.preprocess(value => value === "" ? undefined : value, z.string().min(1).optional());
+const optionalGitHubPrivateKey = z.preprocess(
+  value => typeof value === "string" && value ? normalizeGitHubPrivateKey(value) : value === "" ? undefined : value,
+  z.string().min(1).optional(),
+);
 const optionalPositiveInteger = z.preprocess(
   value => value === "" || value === undefined ? undefined : value,
   z.coerce.number().int().positive().optional(),
@@ -62,7 +66,7 @@ export const ConfigSchema = z.object({
   JIRA_QASEY_ACCOUNT_ID: z.string().default("712020:6095e32e-729d-4cd1-8585-a1d04e1f67d6"),
   GITHUB_APP_ID: optionalString,
   GITHUB_APP_INSTALLATION_ID: optionalPositiveInteger,
-  GITHUB_APP_PRIVATE_KEY: optionalString,
+  GITHUB_APP_PRIVATE_KEY: optionalGitHubPrivateKey,
   GITHUB_ORG: z.string().default("MoeGolibrary"),
   QASEY_ENABLE_DRAFT_PR: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
   QASEY_PUBLIC_BASE_URL: z.url().default("http://localhost:4111"),
@@ -198,6 +202,29 @@ export const ConfigSchema = z.object({
     }
   }
 });
+
+/**
+ * Secret managers commonly flatten multiline PEM values or preserve `\n` as
+ * two literal characters. Rebuild a canonical PEM without ever logging its
+ * contents. Non-PEM values are left alone so schema/auth validation can report
+ * a safe configuration error at the normal boundary.
+ */
+export function normalizeGitHubPrivateKey(value: string): string {
+  let candidate = value.trim();
+  if ((candidate.startsWith('"') && candidate.endsWith('"')) || (candidate.startsWith("'") && candidate.endsWith("'"))) {
+    candidate = candidate.slice(1, -1).trim();
+  }
+  candidate = candidate
+    .replace(/\\r\\n|\\n|\\r/gu, "\n")
+    .replace(/\r\n?/gu, "\n")
+    .trim();
+  const envelope = /^-----BEGIN ([A-Z0-9 ]+)-----(.*?)-----END \1-----$/su.exec(candidate);
+  if (!envelope) return candidate;
+  const body = envelope[2]!.replace(/\s+/gu, "");
+  if (!body || !/^[A-Za-z0-9+/]+={0,2}$/u.test(body) || body.length % 4 !== 0) return candidate;
+  const lines = body.match(/.{1,64}/gu) ?? [];
+  return `-----BEGIN ${envelope[1]}-----\n${lines.join("\n")}\n-----END ${envelope[1]}-----\n`;
+}
 
 export type QaseyConfig = z.infer<typeof ConfigSchema>;
 

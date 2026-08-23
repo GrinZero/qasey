@@ -5,7 +5,7 @@ import { lstat, readFile, readlink } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { RepositoryProfile } from "../../contracts/src/index.ts";
-import type { QaseyConfig } from "./config.ts";
+import { normalizeGitHubPrivateKey, type QaseyConfig } from "./config.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -16,12 +16,13 @@ type GitHubAppConfig = Pick<
 
 export function createGitHubClient(config: GitHubAppConfig): Octokit | undefined {
   if (!config.GITHUB_APP_ID || !config.GITHUB_APP_INSTALLATION_ID || !config.GITHUB_APP_PRIVATE_KEY) return undefined;
+  const privateKey = normalizeGitHubPrivateKey(config.GITHUB_APP_PRIVATE_KEY);
   return new Octokit({
     authStrategy: createAppAuth,
     auth: {
       appId: config.GITHUB_APP_ID,
       installationId: config.GITHUB_APP_INSTALLATION_ID,
-      privateKey: config.GITHUB_APP_PRIVATE_KEY,
+      privateKey,
     },
   });
 }
@@ -34,10 +35,11 @@ export class GitHubInstallationTokenProvider {
     if (!config.GITHUB_APP_ID || !config.GITHUB_APP_INSTALLATION_ID || !config.GITHUB_APP_PRIVATE_KEY) {
       throw new Error("GitHub App authentication is not configured");
     }
+    const privateKey = normalizeGitHubPrivateKey(config.GITHUB_APP_PRIVATE_KEY);
     this.authenticate = authenticate ?? createAppAuth({
       appId: config.GITHUB_APP_ID,
       installationId: config.GITHUB_APP_INSTALLATION_ID,
-      privateKey: config.GITHUB_APP_PRIVATE_KEY,
+      privateKey,
     });
   }
 
