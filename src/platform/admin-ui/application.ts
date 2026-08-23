@@ -7,6 +7,7 @@ import type { PermissionService } from "../auth/permission-store.ts";
 import type { OAuthPrincipal } from "../auth/oauth-principal.ts";
 import { GoogleOidcError, type GoogleOidcService } from "../auth/google-oidc.ts";
 import { loadAdminUiHtml } from "./shell.ts";
+import { TriggerProviderError, type TriggerProviderRegistry } from "../triggers/trigger-provider-registry.ts";
 
 export function createAdminUiApplication(options: {
   applicationCatalog: readonly CatalogEntry[];
@@ -14,6 +15,7 @@ export function createAdminUiApplication(options: {
   permissions: PermissionService;
   audit: AuditLog;
   googleOidc: GoogleOidcService;
+  triggerProviders?: TriggerProviderRegistry;
 }): AgentApplicationBundle {
   const routes: OwnedApiRoute[] = [
     owned("shell", "platform.admin-ui.access", registerApiRoute("/admin", {
@@ -119,8 +121,142 @@ export function createAdminUiApplication(options: {
         action: "bind", decision: "allow", reason: "permission_mutation", metadata: { role: input.role } });
       return c.json({ bound: true });
     } })),
+    ...(options.triggerProviders ? triggerRoutes({ triggerProviders: options.triggerProviders, audit: options.audit }) : []),
   ];
   return { id: "platform", agents: {}, workflows: {}, access: { agents: {}, workflows: {} }, routes };
+}
+
+function triggerRoutes(options: {
+  triggerProviders: TriggerProviderRegistry;
+  audit: AuditLog;
+}): OwnedApiRoute[] {
+  const configuration = z.record(z.string(), z.string());
+  const revision = z.number().int().positive();
+  return [
+    owned("trigger-providers", "platform.triggers.read", registerApiRoute("/admin/api/triggers/providers", {
+      method: "GET",
+      handler: async c => c.json({ providers: options.triggerProviders.listProviders() }),
+    })),
+    owned("trigger-targets", "platform.triggers.read", registerApiRoute("/admin/api/triggers/providers/:providerId/targets", {
+      method: "GET",
+      handler: async c => {
+        const principal = adminPrincipal(c);
+        return c.json({ targets: await options.triggerProviders.targets(c.req.param("providerId"), principal.tenantId) });
+      },
+    })),
+    owned("trigger-connections", "platform.triggers.read", registerApiRoute("/admin/api/triggers/connections", {
+      method: "GET",
+      handler: async c => {
+        const principal = adminPrincipal(c);
+        return c.json({ connections: await options.triggerProviders.listConnections(principal.tenantId) });
+      },
+    })),
+    owned("trigger-create", "platform.triggers.manage", registerApiRoute("/admin/api/triggers/connections", {
+      method: "POST",
+      handler: async c => triggerMutation(c, options, "create", async principal => {
+        const input = z.object({
+          providerId: z.string().min(1),
+          displayName: z.string().trim().min(1).max(80),
+          targetId: z.string().min(1),
+          configuration,
+        }).parse(await c.req.json());
+        const connection = await options.triggerProviders.create(input.providerId, {
+          tenantId: principal.tenantId, actorId: principal.subjectId,
+          displayName: input.displayName, targetId: input.targetId, configuration: input.configuration,
+        });
+        return { connection, status: 201 as const };
+      }),
+    })),
+    owned("trigger-configuration", "platform.triggers.manage", registerApiRoute("/admin/api/triggers/connections/:providerId/:id/configuration", {
+      method: "PATCH",
+      handler: async c => triggerMutation(c, options, "configuration_update", async principal => {
+        const input = z.object({ revision, configuration }).parse(await c.req.json());
+        const connection = await options.triggerProviders.updateConfiguration(c.req.param("providerId"), {
+          tenantId: principal.tenantId, actorId: principal.subjectId, id: c.req.param("id"),
+          revision: input.revision, configuration: input.configuration,
+        });
+        return { connection };
+      }),
+    })),
+    owned("trigger-rebind", "platform.triggers.manage", registerApiRoute("/admin/api/triggers/connections/:providerId/:id/rebind", {
+      method: "POST",
+      handler: async c => triggerMutation(c, options, "rebind", async principal => {
+        const input = z.object({ revision, targetId: z.string().min(1) }).parse(await c.req.json());
+        const connection = await options.triggerProviders.rebind(c.req.param("providerId"), {
+          tenantId: principal.tenantId, actorId: principal.subjectId, id: c.req.param("id"),
+          revision: input.revision, targetId: input.targetId,
+        });
+        return { connection };
+      }),
+    })),
+    owned("trigger-status", "platform.triggers.manage", registerApiRoute("/admin/api/triggers/connections/:providerId/:id/status", {
+      method: "POST",
+      handler: async c => triggerMutation(c, options, "status_change", async principal => {
+        const input = z.object({ revision, enabled: z.boolean() }).parse(await c.req.json());
+        const connection = await options.triggerProviders.setEnabled(c.req.param("providerId"), {
+          tenantId: principal.tenantId, actorId: principal.subjectId, id: c.req.param("id"), ...input,
+        });
+        return { connection };
+      }),
+    })),
+    owned("trigger-delete", "platform.triggers.manage", registerApiRoute("/admin/api/triggers/connections/:providerId/:id", {
+      method: "DELETE",
+      handler: async c => triggerMutation(c, options, "delete", async principal => {
+        const input = z.object({ revision }).parse(await c.req.json());
+        const id = c.req.param("id");
+        await options.triggerProviders.delete(c.req.param("providerId"), {
+          tenantId: principal.tenantId, actorId: principal.subjectId, id, ...input,
+        });
+        return { deleted: true };
+      }),
+    })),
+  ];
+}
+
+function adminPrincipal(c: { get(key: string): unknown }): OAuthPrincipal {
+  const context = c.get("requestContext") as { get(key: string): unknown };
+  return OAuthPrincipalSchema.parse(context.get("platform-principal"));
+}
+
+async function triggerMutation(
+  c: any,
+  options: { audit: AuditLog },
+  action: string,
+  execute: (principal: OAuthPrincipal) => Promise<Record<string, unknown> & {
+    connection?: { id: string; providerId: string; target?: { id: string } };
+    status?: 201;
+  }>,
+): Promise<Response> {
+  try {
+    assertSameOrigin(c.req.raw);
+    const principal = adminPrincipal(c);
+    const result = await execute(principal);
+    const connection = result.connection;
+    await options.audit.write({
+      requestId: String(c.get("requestContext").get("requestId")),
+      tenantId: principal.tenantId,
+      subjectId: principal.subjectId,
+      applicationId: "platform",
+      resourceType: "trigger-connection",
+      resourceId: connection?.id ?? c.req.param("id") ?? "new",
+      action,
+      decision: "allow",
+      reason: "trigger_mutation",
+      metadata: {
+        providerId: connection?.providerId ?? c.req.param("providerId") ?? "unknown",
+        ...(connection?.target?.id ? { targetId: connection.target.id } : {}),
+      },
+    });
+    const { status, ...body } = result;
+    return c.json(body, status ?? 200);
+  } catch (error) {
+    if (error instanceof TriggerProviderError) {
+      const status = error.code === "not_found" ? 404 : error.code === "conflict" ? 409 : 400;
+      return c.json({ error: error.code, message: error.message }, status);
+    }
+    if (error instanceof z.ZodError) return c.json({ error: "invalid_request", message: "提交的数据不完整或格式不正确。" }, 400);
+    throw error;
+  }
 }
 
 export async function listVisibleApplicationManifests(options: {

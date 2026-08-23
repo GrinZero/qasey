@@ -34,6 +34,14 @@ import { seedServiceRolePermissions } from "../platform/auth/service-role-permis
 import { runtimeReadiness } from "../platform/storage/readiness.ts";
 import { resolveDevelopmentPrincipal } from "../platform/auth/development-principal.ts";
 import { GLOBAL_SKILLS_PATH } from "./skill-paths.ts";
+import {
+  InMemorySlackInstallationRepository,
+  PostgresSlackInstallationRepository,
+} from "../platform/channels/slack-installation-repository.ts";
+import { SlackIntegrationManager } from "../platform/channels/slack-integration-manager.ts";
+import { ManagedSlackProvider } from "./managed-slack-provider.ts";
+import { TriggerProviderRegistry } from "../platform/triggers/trigger-provider-registry.ts";
+import { SlackTriggerProvider } from "../platform/triggers/slack-trigger-provider.ts";
 
 const googleOidc = new GoogleOidcService({
   ...(config.GOOGLE_CLIENT_ID ? { clientId: config.GOOGLE_CLIENT_ID } : {}),
@@ -85,12 +93,29 @@ const permissionService = new PermissionService(permissionStore);
 const auditLog = config.NODE_ENV === "production" && config.DATABASE_URL
   ? new PostgresAuditLog(config.DATABASE_URL)
   : new InMemoryAuditLog();
+const slackCredentialKey = config.MASTRA_ENCRYPTION_KEY
+  ?? config.GOOGLE_COOKIE_PASSWORD
+  ?? "qasey-local-managed-slack-credentials";
+const slackInstallationRepository = config.NODE_ENV === "production" && config.DATABASE_URL
+  ? new PostgresSlackInstallationRepository(config.DATABASE_URL, slackCredentialKey)
+  : new InMemorySlackInstallationRepository(slackCredentialKey);
+const slackIntegrations = new SlackIntegrationManager(
+  slackInstallationRepository,
+  config.QASEY_PUBLIC_BASE_URL,
+  [{ applicationId: "qasey", agentId: "qasey-main", name: "Qasey" }],
+);
+const managedSlackProvider = new ManagedSlackProvider(slackIntegrations);
+const triggerProviders = new TriggerProviderRegistry([
+  new SlackTriggerProvider(slackIntegrations, installationId => managedSlackProvider.invalidate(installationId)),
+]);
 runtimeReadiness.register("permission-store", () => permissionStore.healthCheck?.() ?? Promise.resolve());
 runtimeReadiness.register("audit-log", () => auditLog.healthCheck?.() ?? Promise.resolve());
+runtimeReadiness.register("slack-installations", () => slackInstallationRepository.healthCheck?.() ?? Promise.resolve());
 await Promise.all([
   initializeQaseyInfrastructure(),
   permissionStore.init?.(),
   auditLog.init?.(),
+  slackInstallationRepository.init?.(),
 ]);
 await seedServiceRolePermissions(permissionService, config.JIRA_BASE_URL);
 runtimeReadiness.markInitializationComplete();
@@ -110,11 +135,14 @@ const adminUiApplication = createAdminUiApplication({
   permissions: permissionService,
   audit: auditLog,
   googleOidc,
+  triggerProviders,
 });
 const lifecycle = new LifecycleContainer();
 lifecycle.own({ close: closeQaseyInfrastructure });
 if (permissionStore.close) lifecycle.own({ close: () => permissionStore.close!() });
 if (auditLog.close) lifecycle.own({ close: () => auditLog.close!() });
+if (slackInstallationRepository.close) lifecycle.own({ close: () => slackInstallationRepository.close!() });
+lifecycle.own(managedSlackProvider);
 const remoteSandboxPool = sandboxPoolClient;
 const workspace = lifecycle.own(createScopedWorkspace({
   root: config.QASEY_WORKSPACE_DIR,
@@ -271,6 +299,7 @@ Object.assign(server, sharedRuntime.config.server!);
 
 export const mastra = new Mastra({
   ...sharedRuntime.config,
+  channels: { slack: managedSlackProvider },
   server,
   recovery: { durableAgents: "auto" },
   bundler: {

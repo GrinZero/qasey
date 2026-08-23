@@ -88,3 +88,55 @@ export interface SandboxSessionState {
     applications?: string[];
   };
 }
+
+export type TriggerConnectionStatus = "awaiting_webhook" | "active" | "disabled" | "error";
+
+export interface TriggerConfigurationField {
+  key: string;
+  label: string;
+  type: "text" | "secret";
+  required: boolean;
+  placeholder?: string;
+  help?: string;
+}
+
+export interface TriggerProvider {
+  id: string;
+  name: string;
+  description: string;
+  category: "channel" | "webhook" | "schedule" | "event-source";
+  configurationTitle: string;
+  configurationDescription: string;
+  fields: TriggerConfigurationField[];
+  capabilities: {
+    configurationUpdate: boolean;
+    enableDisable: boolean;
+    rebind: boolean;
+    delete: boolean;
+  };
+}
+
+export interface TriggerTarget {
+  id: string;
+  applicationId: string;
+  kind: "agent" | "workflow";
+  resourceId: string;
+  name: string;
+}
+
+export interface TriggerConnection {
+  id: string;
+  providerId: string;
+  providerName: string;
+  displayName: string;
+  status: TriggerConnectionStatus;
+  statusDetail: string;
+  revision: number;
+  target: TriggerTarget;
+  identity?: { label: string; value: string; context?: string };
+  endpoint?: { label: string; url: string };
+  guidance?: { title: string; body: string; codes?: string[] };
+  lastVerifiedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}

@@ -14,7 +14,8 @@ pnpm dev
 - Agent：`POST /studio/api/agents/qasey-main/generate`、`/stream`
 - Workflow：`POST /studio/api/workflows/qasey-e2e-lifecycle/start`、`/resume`
 - Qasey Run：`GET|POST /v1/runs` 与 owner-scoped 子资源
-- Slack：`POST /studio/api/agents/qasey-main/channels/slack/webhook`
+- Slack（Admin UI 管理）：`POST /channels/slack/apps/:webhookId/events`
+- Slack（兼容原有环境变量配置）：`POST /studio/api/agents/qasey-main/channels/slack/webhook`
 - Jira：`POST /webhooks/jira`（签名后直接进入原生 Agent）
 - Probes：`GET /`（Studio 实例发现）、`GET /healthz`、`GET /readyz`
 
@@ -34,7 +35,8 @@ pnpm dev
 
 - `PLATFORM_BOOTSTRAP_ADMIN_EMAILS`：逗号分隔的 break-glass 管理员
 - `PLATFORM_SERVICE_TOKEN`：服务身份 Bearer token
-- `SLACK_BOT_TOKEN`、`SLACK_SIGNING_SECRET`；本地 Socket Mode 可用 `SLACK_SOCKET_MODE_APP_TOKEN`
+- Admin UI 的“触发器”通过通用 TriggerProvider registry 管理外部事件来源与 Agent/Workflow 绑定；Slack 是首个 provider，可保存多个已安装的 Slack App 并获取稳定 Webhook URL。Bot Token 与 Signing Secret 会在服务端加密保存，不需要配置 `SLACK_*` 环境变量
+- `SLACK_BOT_TOKEN`、`SLACK_SIGNING_SECRET`；本地 Socket Mode 可用 `SLACK_SOCKET_MODE_APP_TOKEN`（仅用于兼容原有单 App 配置）
 - `JIRA_BASE_URL`、`JIRA_EMAIL`、`JIRA_API_TOKEN`、`JIRA_WEBHOOK_TOKEN`
 - `GITHUB_APP_ID`、`GITHUB_APP_INSTALLATION_ID`、`GITHUB_APP_PRIVATE_KEY`：GitHub App installation authentication
 - `QASEY_MCP_CONFIG_FILE`、`QASEY_MCP_OAUTH_DIR`

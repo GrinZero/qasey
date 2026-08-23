@@ -1,0 +1,186 @@
+import type { SlackConnectionView, SlackIntegrationManager } from "../channels/slack-integration-manager.ts";
+import { SlackIntegrationError } from "../channels/slack-integration-manager.ts";
+import { SlackInstallationRepositoryError } from "../channels/slack-installation-repository.ts";
+import type {
+  PlatformTriggerProvider,
+  TriggerConnection,
+  TriggerProviderManifest,
+  TriggerTarget,
+} from "./trigger-provider-registry.ts";
+import { TriggerProviderError } from "./trigger-provider-registry.ts";
+
+const manifest: TriggerProviderManifest = {
+  id: "slack",
+  name: "Slack",
+  description: "用 Slack 消息、提及和交互事件触发 Agent。",
+  category: "channel",
+  configurationTitle: "连接 Slack App",
+  configurationDescription: "使用已经安装到 Workspace 的 App；系统不会自动创建 App。",
+  fields: [
+    { key: "botToken", label: "Bot User OAuth Token", type: "secret", required: true, placeholder: "xoxb-…" },
+    {
+      key: "signingSecret", label: "Signing Secret", type: "secret", required: true,
+      placeholder: "Slack Basic Information 中的 Signing Secret",
+    },
+  ],
+  capabilities: { configurationUpdate: true, enableDisable: true, rebind: true, delete: true },
+};
+
+export class SlackTriggerProvider implements PlatformTriggerProvider {
+  readonly manifest = manifest;
+
+  constructor(
+    private readonly integrations: SlackIntegrationManager,
+    private readonly onChanged?: (installationId: string) => void,
+  ) {}
+
+  async targets(_tenantId: string): Promise<readonly TriggerTarget[]> {
+    return this.integrations.targets.map(target => ({
+      id: targetId(target.agentId),
+      applicationId: target.applicationId,
+      kind: "agent",
+      resourceId: target.agentId,
+      name: target.name,
+    }));
+  }
+
+  async list(tenantId: string): Promise<readonly TriggerConnection[]> {
+    return (await translate(() => this.integrations.list(tenantId))).map(connection => this.connection(connection));
+  }
+
+  async create(input: {
+    tenantId: string; actorId: string; displayName: string; targetId: string;
+    configuration: Readonly<Record<string, string>>;
+  }): Promise<TriggerConnection> {
+    const target = this.requireTarget(input.targetId);
+    const connection = await translate(() => this.integrations.create({
+      tenantId: input.tenantId,
+      actorId: input.actorId,
+      displayName: input.displayName,
+      agentId: target.resourceId,
+      credentials: credentials(input.configuration),
+    }));
+    return this.connection(connection);
+  }
+
+  async updateConfiguration(input: {
+    tenantId: string; actorId: string; id: string; revision: number;
+    configuration: Readonly<Record<string, string>>;
+  }): Promise<TriggerConnection> {
+    const connection = await translate(() => this.integrations.updateCredentials({
+      tenantId: input.tenantId, actorId: input.actorId, id: input.id, revision: input.revision,
+      credentials: credentials(input.configuration),
+    }));
+    this.onChanged?.(connection.id);
+    return this.connection(connection);
+  }
+
+  async rebind(input: {
+    tenantId: string; actorId: string; id: string; revision: number; targetId: string;
+  }): Promise<TriggerConnection> {
+    const target = this.requireTarget(input.targetId);
+    const connection = await translate(() => this.integrations.rebind({
+      tenantId: input.tenantId, actorId: input.actorId, id: input.id, revision: input.revision,
+      agentId: target.resourceId,
+    }));
+    this.onChanged?.(connection.id);
+    return this.connection(connection);
+  }
+
+  async setEnabled(input: {
+    tenantId: string; actorId: string; id: string; revision: number; enabled: boolean;
+  }): Promise<TriggerConnection> {
+    const connection = await translate(() => this.integrations.setEnabled(input));
+    this.onChanged?.(connection.id);
+    return this.connection(connection);
+  }
+
+  async delete(input: { tenantId: string; actorId: string; id: string; revision: number }): Promise<void> {
+    await translate(() => this.integrations.delete(input));
+    this.onChanged?.(input.id);
+  }
+
+  private requireTarget(id: string): TriggerTarget {
+    const agentId = id.startsWith("agent:") ? id.slice("agent:".length) : "";
+    const target = this.integrations.targets.find(candidate => candidate.agentId === agentId);
+    if (!target) throw new TriggerProviderError("invalid_target", "这个目标尚未声明 Slack Trigger 能力。");
+    return { id, applicationId: target.applicationId, kind: "agent", resourceId: target.agentId, name: target.name };
+  }
+
+  private connection(connection: SlackConnectionView): TriggerConnection {
+    const configuredTarget = this.integrations.targets.find(candidate => candidate.agentId === connection.agentId);
+    const target: TriggerTarget = configuredTarget
+      ? {
+          id: targetId(configuredTarget.agentId), applicationId: configuredTarget.applicationId,
+          kind: "agent", resourceId: configuredTarget.agentId, name: configuredTarget.name,
+        }
+      : {
+          id: targetId(connection.agentId), applicationId: "unknown",
+          kind: "agent", resourceId: connection.agentId, name: connection.agentId,
+        };
+    const statusDetail = connection.status === "awaiting_webhook"
+      ? "把 Webhook URL 填入 Slack，验证成功后自动启用。"
+      : connection.status === "active"
+        ? "Slack 事件会发送给当前绑定目标。"
+        : connection.status === "disabled"
+          ? "入口地址会保留，但新事件不会进入绑定目标。"
+          : "运行时连接失败，请检查配置或重新保存。";
+    return {
+      id: connection.id,
+      providerId: this.manifest.id,
+      providerName: this.manifest.name,
+      displayName: connection.displayName,
+      status: connection.status,
+      statusDetail,
+      revision: connection.revision,
+      target,
+      identity: {
+        label: "Slack identity",
+        value: connection.identity.botUserId,
+        context: `${connection.identity.teamName ?? connection.identity.teamId} · ${connection.identity.appId}`,
+      },
+      endpoint: { label: "Event Subscriptions / Interactivity URL", url: connection.webhookUrl },
+      ...(connection.status === "awaiting_webhook" ? {
+        guidance: {
+          title: "等待 Slack 验证",
+          body: "在 Slack App 设置中启用 Event Subscriptions；同一个 URL 也用于 Interactivity。",
+          codes: ["app_mention", "message.im"],
+        },
+      } : {}),
+      lastVerifiedAt: connection.lastTokenVerifiedAt,
+      createdAt: connection.createdAt,
+      updatedAt: connection.updatedAt,
+    };
+  }
+}
+
+function targetId(agentId: string): string { return `agent:${agentId}`; }
+
+function credentials(configuration: Readonly<Record<string, string>>) {
+  return {
+    botToken: configuration.botToken?.trim() ?? "",
+    signingSecret: configuration.signingSecret?.trim() ?? "",
+  };
+}
+
+async function translate<T>(operation: () => Promise<T>): Promise<T> {
+  try { return await operation(); }
+  catch (error) {
+    if (error instanceof TriggerProviderError) throw error;
+    if (error instanceof SlackInstallationRepositoryError) {
+      throw new TriggerProviderError(
+        error.code === "not_found" ? "not_found" : "conflict",
+        error.message,
+      );
+    }
+    if (error instanceof SlackIntegrationError) {
+      throw new TriggerProviderError(
+        error.code === "not_found" ? "not_found"
+          : error.code === "invalid_target" ? "invalid_target"
+            : "invalid_configuration",
+        error.message,
+      );
+    }
+    throw error;
+  }
+}

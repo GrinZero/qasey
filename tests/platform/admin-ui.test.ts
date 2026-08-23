@@ -8,6 +8,10 @@ import { InMemoryAuditLog } from "../../src/platform/auth/audit-log.ts";
 import { InMemoryPermissionStore, PermissionService } from "../../src/platform/auth/permission-store.ts";
 import { GoogleOidcService } from "../../src/platform/auth/google-oidc.ts";
 import { canRunQaseyTask } from "../../apps/admin-ui/src/catalog.ts";
+import { InMemorySlackInstallationRepository } from "../../src/platform/channels/slack-installation-repository.ts";
+import { SlackIntegrationManager } from "../../src/platform/channels/slack-integration-manager.ts";
+import { TriggerProviderRegistry } from "../../src/platform/triggers/trigger-provider-registry.ts";
+import { SlackTriggerProvider } from "../../src/platform/triggers/slack-trigger-provider.ts";
 
 const googleOidc = new GoogleOidcService({ callbackUrl: "http://localhost:4111/auth/google/callback", secureCookies: false });
 
@@ -53,6 +57,25 @@ describe("same-origin Admin UI", () => {
     expect(() => assertSameOrigin(new Request("https://runtime.test/admin/api/permissions/grants", { headers: { origin: "https://runtime.test" } }))).not.toThrow();
     expect(() => assertSameOrigin(new Request("https://runtime.test/admin/api/permissions/grants", { headers: { origin: "https://evil.test" } }))).toThrow(/CSRF/u);
     expect(() => assertSameOrigin(new Request("https://runtime.test/admin/api/permissions/grants"))).toThrow(/CSRF/u);
+  });
+
+  it("exposes provider-neutral Trigger management routes only when configured", () => {
+    const slackIntegrations = new SlackIntegrationManager(
+      new InMemorySlackInstallationRepository("test-key"),
+      "https://qasey.example.com",
+      [{ applicationId: "qasey", agentId: "qasey-main", name: "Qasey" }],
+      { verify: async () => ({ appId: "A1", teamId: "T1", botUserId: "U1" }) },
+    );
+    const triggerProviders = new TriggerProviderRegistry([new SlackTriggerProvider(slackIntegrations)]);
+    const app = createAdminUiApplication({
+      applicationCatalog: [], permissions: new PermissionService(new InMemoryPermissionStore()),
+      audit: new InMemoryAuditLog(), googleOidc, triggerProviders,
+    });
+    const routes = app.routes ?? [];
+    expect(routes.find(route => route.id === "trigger-connections")?.access.permission).toBe("platform.triggers.read");
+    expect(routes.find(route => route.id === "trigger-create")?.access.permission).toBe("platform.triggers.manage");
+    expect(routes.map(route => `${route.route.method} ${route.route.path}`)).toContain("POST /admin/api/triggers/connections/:providerId/:id/rebind");
+    expect(routes.map(route => `${route.route.method} ${route.route.path}`)).toContain("DELETE /admin/api/triggers/connections/:providerId/:id");
   });
 
   it.each(["src/mastra/public", ".mastra/output"])("finds the Admin UI target from %s", async workingDirectory => {

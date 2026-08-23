@@ -1,4 +1,4 @@
-import { createSlackAdapter } from "@chat-adapter/slack";
+import { createSlackAdapter, type SlackBotToken } from "@chat-adapter/slack";
 import type { ChannelConfig, ChannelHandler } from "@mastra/core/channels";
 import { EntityType, SpanType } from "@mastra/core/observability";
 import { resolveSlackChannelMode } from "../../../../packages/adapters/src/config.ts";
@@ -25,23 +25,48 @@ function createQaseyChannels(): ChannelConfig | undefined {
   if (!config.SLACK_BOT_TOKEN) return undefined;
   const mode = resolveSlackChannelMode(config);
   if (!mode) return undefined;
-  const adapter = createSlackAdapter({
+  return createQaseySlackChannelConfig({
     mode,
     botToken: config.SLACK_BOT_TOKEN,
     ...(mode === "webhook" ? { signingSecret: config.SLACK_SIGNING_SECRET! } : {}),
     ...(mode === "socket" ? { appToken: config.SLACK_SOCKET_MODE_APP_TOKEN! } : {}),
     ...(config.SLACK_BOT_USER_ID ? { botUserId: config.SLACK_BOT_USER_ID } : {}),
+  });
+}
+
+export interface QaseySlackChannelOptions {
+  mode?: "webhook" | "socket";
+  botToken: SlackBotToken;
+  signingSecret?: string;
+  appToken?: string;
+  botUserId?: string;
+  /** Platform tenant that owns a UI-managed Slack installation. */
+  tenantId?: string;
+  /** Stable installation id used to isolate memory across Slack Apps. */
+  installationId?: string;
+}
+
+/** Build one isolated Slack bot identity while sharing Qasey's domain behavior. */
+export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions): ChannelConfig {
+  const mode = options.mode ?? "webhook";
+  const adapter = createSlackAdapter({
+    mode,
+    botToken: options.botToken,
+    ...(mode === "webhook" && options.signingSecret ? { signingSecret: options.signingSecret } : {}),
+    ...(mode === "socket" && options.appToken ? { appToken: options.appToken } : {}),
+    ...(options.botUserId ? { botUserId: options.botUserId } : {}),
     nativeStreaming: true,
   });
   const handler: ChannelHandler = async (thread, message, _defaultHandler, { requestContext, mastra }) => {
     if (!mastra) throw new Error("Mastra runtime is required for the Qasey Slack workflow");
-    const tenantId = slackTenantId(message);
-    const scope = scopeFor(thread, message, tenantId);
+    const tenantId = options.tenantId ?? slackTenantId(message);
+    const scope = scopeFor(thread, message, tenantId, options.installationId);
     requestContext.set("requestId", `slack:${message.id}`);
     requestContext.set("applicationId", "qasey");
     requestContext.set("tenantId", tenantId);
     requestContext.set("userId", message.author.userId);
     requestContext.set("ingressSource", "mastra-channel:slack");
+    if (options.installationId) requestContext.set("integrationId", options.installationId);
     requestContext.set("identity", {
       userId: message.author.userId,
       tenantId,
@@ -231,8 +256,18 @@ function createQaseyChannels(): ChannelConfig | undefined {
       onMention: handler,
       onSubscribedMessage: handler,
     },
-    resolveResourceId: ({ thread, message }) => scopeFor(thread, message, slackTenantId(message)).resourceId,
-    resolveThreadId: ({ thread, message }) => scopeFor(thread, message, slackTenantId(message)).threadId,
+    resolveResourceId: ({ thread, message }) => scopeFor(
+      thread,
+      message,
+      options.tenantId ?? slackTenantId(message),
+      options.installationId,
+    ).resourceId,
+    resolveThreadId: ({ thread, message }) => scopeFor(
+      thread,
+      message,
+      options.tenantId ?? slackTenantId(message),
+      options.installationId,
+    ).threadId,
     chatOptions: {
       concurrency: { strategy: "queue", maxQueueSize: 10, onQueueFull: "drop-oldest", queueEntryTtlMs: 90_000 },
       dedupeTtlMs: 10 * 60_000,
@@ -241,13 +276,14 @@ function createQaseyChannels(): ChannelConfig | undefined {
   };
 }
 
-function scopeFor(thread: NativeThread, message: NativeMessage, tenantId: string) {
+function scopeFor(thread: NativeThread, message: NativeMessage, tenantId: string, installationId?: string) {
+  const prefix = installationId ? `${installationId}:` : "";
   return conversationScope({
     applicationId: "qasey",
     tenantId,
     userId: message.author.userId,
-    conversationId: thread.channelId,
-    externalThreadId: message.threadId || thread.channelId,
+    conversationId: `${prefix}${thread.channelId}`,
+    externalThreadId: `${prefix}${message.threadId || thread.channelId}`,
     kind: thread.isDM ? "private" : "shared",
   });
 }

@@ -16,6 +16,15 @@ const entries: CatalogEntry[] = [
 ];
 
 describe("permission route coverage", () => {
+  it("delegates managed Slack webhook authentication to the signing-secret verifier", () => {
+    expect(classifyRuntimeRoute("/channels/slack/apps/1f7a91aa/events", "POST", new Map(), [])).toMatchObject({
+      applicationId: "qasey",
+      resourceId: "slack",
+      downstreamAuthenticated: true,
+      audiences: ["channel"],
+    });
+  });
+
   it("protects Mastra Studio pages and recognizes its API client header", () => {
     expect(isPublicRuntimePath("/", "GET", true)).toBe(true);
     expect(isPublicRuntimePath("/", "GET", false)).toBe(false);

@@ -1,4 +1,4 @@
-import type { AgentApplication, AuditRecord, CatalogEntry, QaseyRun, SandboxSessionState, Session } from "./types";
+import type { AgentApplication, AuditRecord, CatalogEntry, QaseyRun, SandboxSessionState, Session, TriggerConnection, TriggerProvider, TriggerTarget } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -99,6 +99,29 @@ export const api = {
     method: "POST",
     body: JSON.stringify({ subjectId, role }),
   }),
+  triggerProviders: () => requestJson<{ providers: TriggerProvider[] }>("/admin/api/triggers/providers"),
+  triggerConnections: () => requestJson<{ connections: TriggerConnection[] }>("/admin/api/triggers/connections"),
+  triggerTargets: (providerId: string) => requestJson<{ targets: TriggerTarget[] }>(
+    `/admin/api/triggers/providers/${encodeURIComponent(providerId)}/targets`,
+  ),
+  createTriggerConnection: (input: { providerId: string; displayName: string; targetId: string; configuration: Record<string, string> }) =>
+    requestJson<{ connection: TriggerConnection }>("/admin/api/triggers/connections", { method: "POST", body: JSON.stringify(input) }),
+  updateTriggerConfiguration: (providerId: string, id: string, revision: number, configuration: Record<string, string>) =>
+    requestJson<{ connection: TriggerConnection }>(`/admin/api/triggers/connections/${encodeURIComponent(providerId)}/${encodeURIComponent(id)}/configuration`, {
+      method: "PATCH", body: JSON.stringify({ revision, configuration }),
+    }),
+  rebindTriggerConnection: (providerId: string, id: string, revision: number, targetId: string) =>
+    requestJson<{ connection: TriggerConnection }>(`/admin/api/triggers/connections/${encodeURIComponent(providerId)}/${encodeURIComponent(id)}/rebind`, {
+      method: "POST", body: JSON.stringify({ revision, targetId }),
+    }),
+  setTriggerConnectionEnabled: (providerId: string, id: string, revision: number, enabled: boolean) =>
+    requestJson<{ connection: TriggerConnection }>(`/admin/api/triggers/connections/${encodeURIComponent(providerId)}/${encodeURIComponent(id)}/status`, {
+      method: "POST", body: JSON.stringify({ revision, enabled }),
+    }),
+  deleteTriggerConnection: (providerId: string, id: string, revision: number) =>
+    requestJson<{ deleted: boolean }>(`/admin/api/triggers/connections/${encodeURIComponent(providerId)}/${encodeURIComponent(id)}`, {
+      method: "DELETE", body: JSON.stringify({ revision }),
+    }),
   loginUrl: (redirectUri = "/admin") => requestJson<{ url: string }>(
     `/auth/google/login?${new URLSearchParams({ redirect_uri: redirectUri })}`,
   ),

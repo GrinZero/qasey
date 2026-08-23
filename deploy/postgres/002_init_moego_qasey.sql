@@ -55,6 +55,53 @@ CREATE TABLE IF NOT EXISTS platform_channel_deliveries (
   PRIMARY KEY (application_id, tenant_id, delivery_id)
 );
 
+-- moego_qasey：由 Admin UI 管理的 Slack App installation 与 Agent 绑定。
+CREATE TABLE IF NOT EXISTS platform_slack_app_installations (
+  id uuid PRIMARY KEY,
+  tenant_id text NOT NULL,
+  webhook_id uuid UNIQUE NOT NULL,
+  display_name text NOT NULL,
+  slack_app_id text NOT NULL,
+  slack_app_name text,
+  slack_team_id text NOT NULL,
+  slack_team_name text,
+  slack_bot_user_id text NOT NULL,
+  slack_bot_id text,
+  is_enterprise_install boolean NOT NULL DEFAULT false,
+  bot_token_ciphertext text NOT NULL,
+  signing_secret_ciphertext text NOT NULL,
+  credential_key_id text NOT NULL,
+  credential_fingerprint text NOT NULL,
+  status text NOT NULL CHECK (status IN ('awaiting_webhook','active','disabled','error')),
+  webhook_verified_at timestamptz,
+  last_token_verified_at timestamptz NOT NULL,
+  last_error_code text,
+  revision bigint NOT NULL DEFAULT 1,
+  created_by text NOT NULL,
+  updated_by text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  deleted_at timestamptz
+);
+CREATE UNIQUE INDEX IF NOT EXISTS platform_slack_installation_identity_idx
+  ON platform_slack_app_installations(slack_app_id, slack_team_id) WHERE deleted_at IS NULL;
+CREATE TABLE IF NOT EXISTS platform_trigger_bindings (
+  id uuid PRIMARY KEY,
+  tenant_id text NOT NULL,
+  provider_id text NOT NULL,
+  connection_id text NOT NULL,
+  application_id text NOT NULL,
+  target_kind text NOT NULL CHECK (target_kind IN ('agent','workflow')),
+  target_id text NOT NULL,
+  status text NOT NULL CHECK (status IN ('active','inactive')),
+  revision bigint NOT NULL DEFAULT 1,
+  bound_by text NOT NULL,
+  bound_at timestamptz NOT NULL DEFAULT now(),
+  unbound_at timestamptz
+);
+CREATE UNIQUE INDEX IF NOT EXISTS platform_trigger_binding_active_idx
+  ON platform_trigger_bindings(provider_id, connection_id) WHERE status = 'active';
+
 -- moego_qasey：Qasey MCP 集成的加密 OAuth credential。
 CREATE TABLE IF NOT EXISTS qasey_mcp_oauth_credentials (
   namespace text NOT NULL, storage_key text NOT NULL, encrypted_value text NOT NULL,

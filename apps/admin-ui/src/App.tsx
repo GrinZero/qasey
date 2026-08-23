@@ -4,11 +4,13 @@ import {
   ArrowRight,
   Bot,
   Boxes,
+  Cable,
   Check,
   CheckCircle2,
   ChevronRight,
   CircleAlert,
   ClipboardCheck,
+  Copy,
   Clock3,
   FileSearch,
   FileText,
@@ -25,6 +27,7 @@ import {
   MessageSquareText,
   MonitorPlay,
   Plus,
+  Power,
   Play,
   RefreshCw,
   RotateCcw,
@@ -35,6 +38,7 @@ import {
   Square,
   TestTube2,
   Terminal,
+  Trash2,
   UserRound,
   X,
   XCircle,
@@ -42,9 +46,9 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, errorMessage } from "./api";
 import { canRunQaseyTask } from "./catalog";
-import type { AgentApplication, AuditRecord, CatalogEntry, QaseyRun, RunStatus, SandboxSessionState, Session } from "./types";
+import type { AgentApplication, AuditRecord, CatalogEntry, QaseyRun, RunStatus, SandboxSessionState, Session, TriggerConnection, TriggerConnectionStatus, TriggerProvider, TriggerTarget } from "./types";
 
-type View = "platform-home" | "inbox" | "activity" | "qasey-overview" | "qasey-runs" | "qasey-review" | "qasey-cua" | "access";
+type View = "platform-home" | "inbox" | "activity" | "qasey-overview" | "qasey-runs" | "qasey-review" | "qasey-cua" | "triggers" | "access";
 type AuthState = { kind: "loading" } | { kind: "anonymous"; message?: string } | { kind: "authenticated"; session: Session };
 
 const statusMeta: Record<RunStatus, { label: string; tone: string; step: number }> = {
@@ -140,7 +144,10 @@ export function App() {
     { id: "qasey-cua", label: "Ubuntu 工作台", icon: MonitorPlay },
   ];
   const qaseyActive = view.startsWith("qasey-");
-  const currentLabel = [...platformNav, ...qaseyNav, { id: "access" as View, label: "访问与审计", icon: ShieldCheck }].find(item => item.id === view)?.label ?? "平台首页";
+  const currentLabel = [...platformNav, ...qaseyNav,
+    { id: "triggers" as View, label: "触发器", icon: Cable },
+    { id: "access" as View, label: "访问与审计", icon: ShieldCheck },
+  ].find(item => item.id === view)?.label ?? "平台首页";
 
   const logout = async () => {
     try { await api.logout(); } finally { setAuth({ kind: "anonymous" }); }
@@ -172,7 +179,7 @@ export function App() {
           <p className="nav-label application-label">Applications</p>
           {applications.map(application => <button key={application.id} className={application.id === "qasey" && qaseyActive ? "application-nav active" : "application-nav"} onClick={() => openApplication(application)}><span className={`app-glyph ${application.id === "qasey" ? "qasey" : "generic"}`}>{application.id === "qasey" ? <TestTube2 size={16} /> : <Bot size={16} />}</span><span><strong>{application.name}</strong><small>{application.category}</small></span><ChevronRight size={15} /></button>)}
           {qaseyActive && <div className="application-subnav">{qaseyNav.map(item => <NavButton key={item.id} item={item} active={view === item.id} onClick={() => { setView(item.id); setMenuOpen(false); }} />)}</div>}
-          {auth.session.isAdmin && <><p className="nav-label application-label">管理</p><NavButton item={{ label: "访问与审计", icon: ShieldCheck }} active={view === "access"} onClick={() => { setView("access"); setMenuOpen(false); }} /></>}
+          {auth.session.isAdmin && <><p className="nav-label application-label">管理</p><NavButton item={{ label: "触发器", icon: Cable }} active={view === "triggers"} onClick={() => { setView("triggers"); setMenuOpen(false); }} /><NavButton item={{ label: "访问与审计", icon: ShieldCheck }} active={view === "access"} onClick={() => { setView("access"); setMenuOpen(false); }} /></>}
         </nav>
         <div className="sidebar-spacer" />
         <div className="environment-card">
@@ -204,6 +211,7 @@ export function App() {
           {view === "qasey-runs" && <RunsView runs={runs} loading={loadingRuns} onRefresh={loadWorkspace} />}
           {view === "qasey-review" && <ReviewView runs={runs} onChanged={loadWorkspace} />}
           {view === "qasey-cua" && <CuaView subjectId={auth.session.subjectId} />}
+          {view === "triggers" && auth.session.isAdmin && <TriggersView />}
           {view === "access" && auth.session.isAdmin && <AccessView session={auth.session} />}
         </div>
       </main>
@@ -516,6 +524,148 @@ function ReviewCard({ run, onChanged }: { run: QaseyRun; onChanged: () => Promis
     finally { setBusy(false); }
   };
   return <section className="surface review-card"><div className="review-card-head"><div><span className="mono">{compactId(run.id)}</span><h2>{run.repository.owner}/{run.repository.repository}</h2><p>{run.framework === "playwright" ? "Web · Playwright" : "App · Maestro"} · {formatRelative(run.updatedAt)}</p></div><StatusBadge status={run.status} /></div><EvidenceRail run={run} compact /><div className="artifact-row">{run.artifacts.length ? run.artifacts.slice(0,4).map(item => <a key={item.id} href={`/v1/runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(item.id)}`} target="_blank" rel="noreferrer"><FileSearch size={15} />{item.name}</a>) : <span>此运行暂未上传证据产物</span>}</div><label htmlFor={`feedback-${run.id}`}>审阅反馈 <span>要求修改时必填</span></label><textarea id={`feedback-${run.id}`} rows={3} value={feedback} onChange={event => { setFeedback(event.target.value); setError(""); }} placeholder="指出需要修改的测试、证据或实现…" />{error && <p className="field-error" role="alert"><CircleAlert size={15} />{error}</p>}<div className="review-actions"><button className="secondary-button danger-text" disabled={busy} onClick={() => void decide("request_changes")}><RotateCcw size={16} />要求修改</button><button className="primary-button success-button" disabled={busy} onClick={() => void decide("approve")}>{busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}批准运行</button></div></section>;
+}
+
+const triggerStatusMeta: Record<TriggerConnectionStatus, { label: string; tone: string }> = {
+  awaiting_webhook: { label: "等待验证", tone: "warning" },
+  active: { label: "已启用", tone: "success" },
+  disabled: { label: "已停用", tone: "neutral" },
+  error: { label: "需要处理", tone: "danger" },
+};
+
+function TriggersView() {
+  const [providers, setProviders] = useState<TriggerProvider[]>([]);
+  const [connections, setConnections] = useState<TriggerConnection[]>([]);
+  const [targets, setTargets] = useState<Record<string, TriggerTarget[]>>({});
+  const [dialog, setDialog] = useState<{ mode: "create" } | { mode: "configuration"; connection: TriggerConnection }>();
+  const [busyId, setBusyId] = useState("");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const [providerResponse, connectionResponse] = await Promise.all([api.triggerProviders(), api.triggerConnections()]);
+      const targetEntries = await Promise.all(providerResponse.providers.map(async provider => [
+        provider.id,
+        (await api.triggerTargets(provider.id)).targets,
+      ] as const));
+      setProviders(providerResponse.providers);
+      setConnections(connectionResponse.connections);
+      setTargets(Object.fromEntries(targetEntries));
+      setError("");
+    } catch (cause) { setError(errorMessage(cause)); }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (!connections.some(connection => connection.status === "awaiting_webhook")) return;
+    const timer = window.setInterval(() => void load(), 5000);
+    return () => window.clearInterval(timer);
+  }, [connections, load]);
+
+  const replace = (connection: TriggerConnection) => setConnections(current =>
+    current.some(item => item.id === connection.id && item.providerId === connection.providerId)
+      ? current.map(item => item.id === connection.id && item.providerId === connection.providerId ? connection : item)
+      : [connection, ...current]);
+
+  const act = async (connection: TriggerConnection, action: "toggle" | "delete", targetId?: string) => {
+    const key = `${connection.providerId}:${connection.id}`;
+    setBusyId(key); setError(""); setNotice("");
+    try {
+      if (action === "delete") {
+        if (!window.confirm(`删除 ${connection.displayName}？外部 Provider 中的资源不会被删除。`)) return;
+        await api.deleteTriggerConnection(connection.providerId, connection.id, connection.revision);
+        setConnections(current => current.filter(item => item.id !== connection.id || item.providerId !== connection.providerId));
+        setNotice("Trigger 已删除；外部 Provider 中的资源没有被修改。");
+      } else if (targetId) {
+        replace((await api.rebindTriggerConnection(connection.providerId, connection.id, connection.revision, targetId)).connection);
+        setNotice("绑定目标已更新，Trigger 入口保持不变。");
+      } else {
+        replace((await api.setTriggerConnectionEnabled(connection.providerId, connection.id, connection.revision, connection.status === "disabled")).connection);
+      }
+    } catch (cause) { setError(errorMessage(cause)); }
+    finally { setBusyId(""); }
+  };
+
+  const copyEndpoint = async (connection: TriggerConnection) => {
+    if (!connection.endpoint) return;
+    await navigator.clipboard.writeText(connection.endpoint.url);
+    setNotice(`${connection.displayName} 的 Trigger 入口已复制。`);
+  };
+
+  return <>
+    <PageHeading eyebrow="Automation ingress" title="Triggers" description="集中管理事件从哪里来，以及它们要启动哪个 Agent 或 Workflow。" action={<button className="primary-button" disabled={!providers.length} onClick={() => setDialog({ mode: "create" })}><Plus size={16} />新增 Trigger</button>} />
+    {error && <InlineError message={error} action="重新加载" onAction={load} />}
+    {notice && <div className="success-notice"><CheckCircle2 size={17} />{notice}</div>}
+    <section className="integration-thesis" aria-label="Trigger 路由模型">
+      <div><span className="integration-node slack"><MessageSquareText size={18} /></span><small>事件来源</small></div>
+      <span className="integration-link"><i /><ChevronRight size={15} /></span>
+      <div><span className="integration-node route"><Cable size={18} /></span><small>Trigger Provider</small></div>
+      <span className="integration-link"><i /><ChevronRight size={15} /></span>
+      <div><span className="integration-node agent"><Bot size={18} /></span><small>Agent / Workflow</small></div>
+    </section>
+    <div className="trigger-provider-strip" aria-label="可用 Trigger Providers">{providers.map(provider => <div key={provider.id}><span className="integration-app-mark"><ProviderIcon providerId={provider.id} /></span><span><strong>{provider.name}</strong><small>{provider.description}</small></span><em>{connections.filter(connection => connection.providerId === provider.id).length} 个连接</em></div>)}</div>
+    {connections.length === 0
+      ? <section className="surface integration-empty"><span><Cable size={25} /></span><h2>还没有 Trigger</h2><p>选择一个 Provider，配置事件来源，再把它绑定到 Agent 或 Workflow。</p><button className="secondary-button" disabled={!providers.length} onClick={() => setDialog({ mode: "create" })}><Plus size={15} />创建第一个 Trigger</button></section>
+      : <div className="integration-grid">{connections.map(connection => {
+        const status = triggerStatusMeta[connection.status];
+        const provider = providers.find(item => item.id === connection.providerId);
+        const busy = busyId === `${connection.providerId}:${connection.id}`;
+        return <section className="surface integration-card" key={`${connection.providerId}:${connection.id}`}>
+          <header><div className="integration-app-mark"><ProviderIcon providerId={connection.providerId} /></div><div><h2>{connection.displayName}</h2><p>{connection.providerName}{connection.identity?.context ? ` · ${connection.identity.context}` : ""}</p></div><span className={`integration-status ${status.tone}`}><i />{status.label}</span></header>
+          <p className="integration-status-detail">{connection.statusDetail}</p>
+          <div className="binding-lane"><div><small>{connection.identity?.label ?? "Provider"}</small><strong>{connection.identity?.value ?? connection.providerName}</strong></div><ChevronRight size={15} /><label><span>绑定目标</span><select value={connection.target.id} disabled={busy || !provider?.capabilities.rebind} onChange={event => void act(connection, "toggle", event.target.value)}>{(targets[connection.providerId] ?? []).map(target => <option key={target.id} value={target.id}>{target.name} · {target.kind}</option>)}</select></label></div>
+          {connection.endpoint && <div className="webhook-field"><label htmlFor={`endpoint-${connection.providerId}-${connection.id}`}>{connection.endpoint.label}</label><div><input id={`endpoint-${connection.providerId}-${connection.id}`} readOnly value={connection.endpoint.url} /><button className="icon-button bordered" onClick={() => void copyEndpoint(connection)} aria-label="复制 Trigger 入口"><Copy size={15} /></button></div></div>}
+          {connection.guidance && <div className="webhook-guide"><strong>{connection.guidance.title}</strong><span>{connection.guidance.body}{connection.guidance.codes?.map(code => <code key={code}>{code}</code>)}</span></div>}
+          <footer><span>{connection.lastVerifiedAt ? `最近验证于 ${formatRelative(connection.lastVerifiedAt)}` : `更新于 ${formatRelative(connection.updatedAt)}`}</span><div>{provider?.capabilities.configurationUpdate && <button className="text-button" onClick={() => setDialog({ mode: "configuration", connection })}>更新配置</button>}{provider?.capabilities.enableDisable && <button className="icon-button bordered" disabled={busy} onClick={() => void act(connection, "toggle")} aria-label={connection.status === "disabled" ? "启用 Trigger" : "停用 Trigger"} title={connection.status === "disabled" ? "启用 Trigger" : "停用 Trigger"}>{busy ? <LoaderCircle className="spin" size={15} /> : <Power size={15} />}</button>}{provider?.capabilities.delete && <button className="icon-button bordered danger-text" disabled={busy} onClick={() => void act(connection, "delete")} aria-label="删除 Trigger" title="删除 Trigger"><Trash2 size={15} /></button>}</div></footer>
+        </section>;
+      })}</div>}
+    {dialog && <TriggerConfigurationDialog mode={dialog.mode} {...(dialog.mode === "configuration" ? { connection: dialog.connection } : {})} providers={providers} targets={targets} onClose={() => setDialog(undefined)} onSaved={connection => { replace(connection); setDialog(undefined); setNotice(dialog.mode === "create" ? "Trigger 已保存；按 Provider 指引完成入口验证。" : "Trigger 配置已更新。"); }} />}
+  </>;
+}
+
+function ProviderIcon({ providerId }: { providerId: string }) {
+  return providerId === "slack" ? <MessageSquareText size={19} /> : <Cable size={19} />;
+}
+
+function TriggerConfigurationDialog({ mode, connection, providers, targets, onClose, onSaved }: {
+  mode: "create" | "configuration";
+  connection?: TriggerConnection;
+  providers: TriggerProvider[];
+  targets: Record<string, TriggerTarget[]>;
+  onClose: () => void;
+  onSaved: (connection: TriggerConnection) => void;
+}) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const initialProviderId = connection?.providerId ?? providers[0]?.id ?? "";
+  const [providerId, setProviderId] = useState(initialProviderId);
+  const [displayName, setDisplayName] = useState("");
+  const [targetId, setTargetId] = useState(connection?.target.id ?? targets[initialProviderId]?.[0]?.id ?? "");
+  const [configuration, setConfiguration] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const provider = providers.find(item => item.id === providerId);
+  const availableTargets = targets[providerId] ?? [];
+  useEffect(() => {
+    const element = dialogRef.current;
+    if (!element) return;
+    element.showModal();
+    return () => element.close();
+  }, []);
+  const save = async () => {
+    if (!provider) { setError("请选择 Trigger Provider。"); return; }
+    if (mode === "create" && (!displayName.trim() || !targetId)) { setError("请填写名称并选择绑定目标。"); return; }
+    if (provider.fields.some(field => field.required && !configuration[field.key]?.trim())) { setError("请填写所有必填配置。"); return; }
+    setBusy(true); setError("");
+    try {
+      const response = mode === "create"
+        ? await api.createTriggerConnection({ providerId, displayName: displayName.trim(), targetId, configuration })
+        : await api.updateTriggerConfiguration(providerId, connection!.id, connection!.revision, configuration);
+      setConfiguration({}); onSaved(response.connection);
+    } catch (cause) { setError(errorMessage(cause)); }
+    finally { setBusy(false); }
+  };
+  return <dialog ref={dialogRef} className="integration-dialog" aria-labelledby="trigger-dialog-title" onCancel={event => { event.preventDefault(); onClose(); }}><div className="dialog-head"><div><p className="eyebrow">Trigger Provider · {provider?.name ?? "Select"}</p><h2 id="trigger-dialog-title">{mode === "create" ? "新增 Trigger" : `更新 ${connection?.displayName}`}</h2><p>{provider?.configurationDescription ?? "选择事件来源和它要启动的目标。"}</p></div><button className="icon-button bordered" onClick={onClose} aria-label="关闭"><X size={18} /></button></div>{mode === "create" && <><label>Provider<select autoFocus value={providerId} onChange={event => { const nextProviderId = event.target.value; setProviderId(nextProviderId); setTargetId(targets[nextProviderId]?.[0]?.id ?? ""); setConfiguration({}); }}>{providers.map(item => <option key={item.id} value={item.id}>{item.name} · {item.category}</option>)}</select></label><div className="integration-form-row"><label>Trigger 名称<input value={displayName} onChange={event => setDisplayName(event.target.value)} placeholder="例如 QA Team mentions" /></label><label>绑定目标<select value={targetId} onChange={event => setTargetId(event.target.value)}>{availableTargets.map(target => <option key={target.id} value={target.id}>{target.name} · {target.kind}</option>)}</select></label></div></>}{provider?.fields.map(field => <label key={field.key}>{field.label}<input type={field.type === "secret" ? "password" : "text"} autoComplete={field.type === "secret" ? "new-password" : "off"} value={configuration[field.key] ?? ""} onChange={event => setConfiguration(current => ({ ...current, [field.key]: event.target.value }))} placeholder={field.placeholder} />{field.help && <small>{field.help}</small>}</label>)}<div className="credential-note"><ShieldCheck size={17} /><span>敏感字段会在服务端加密保存，之后不会回传到浏览器。每个 Provider 独立验证和运行自己的配置。</span></div>{error && <p className="field-error" role="alert"><CircleAlert size={15} />{error}</p>}<div className="dialog-actions"><button className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={busy} onClick={() => void save()}>{busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}{mode === "create" ? "保存 Trigger" : "保存配置"}</button></div></dialog>;
 }
 
 function AccessView({ session }: { session: Session }) {

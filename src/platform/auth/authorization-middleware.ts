@@ -259,6 +259,13 @@ export function classifyRuntimeRoute(
   catalog: ReadonlyMap<string, CatalogEntry>,
   routes: readonly CatalogEntry[],
 ): ClassifiedResource | undefined {
+  if (method === "POST" && /^\/channels\/slack\/apps\/[^/]+\/events\/?$/u.test(path)) {
+    return {
+      applicationId: "qasey", resourceType: "channel", resourceId: "slack",
+      action: "receive", permission: "qasey.channel.receive", audiences: ["channel"],
+      downstreamAuthenticated: true,
+    };
+  }
   const mastraPath = stripMastraApiPrefix(path);
   // Mastra's scheduler is a platform management surface: its GET routes read
   // global rows, while POST/PATCH/DELETE can mutate or execute them. Classify
