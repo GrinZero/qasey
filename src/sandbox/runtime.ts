@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { mkdir, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
@@ -9,10 +9,11 @@ import { chromium, type Browser, type BrowserContext, type Page } from "@playwri
 import {
   SandboxBrowserActionSchema, SandboxBrowserStartSchema, SandboxExecuteRequestSchema,
   SandboxDesktopActionSchema, SandboxDesktopApplicationSchema, SandboxDesktopStartSchema,
-  SandboxDesktopToolSchema, SandboxFilesystemRequestSchema, SandboxSessionClaimSchema,
+  SandboxDesktopToolSchema, SandboxFilesystemRequestSchema, SandboxRepositoryCloneSchema, SandboxSessionClaimSchema,
 } from "../platform/workspace/sandbox-protocol.ts";
 import type { SandboxSessionState } from "../platform/workspace/sandbox-protocol.ts";
 import { DesktopController, type DesktopToolResult } from "./desktop.ts";
+import { SharedRepositoryCache } from "../../packages/e2e/src/repository-cache.ts";
 
 interface SandboxRuntimeOptions {
   dataRoot: string;
@@ -42,6 +43,11 @@ interface ActiveSession {
   workspaceId: string;
   generation: number;
   tokenHash: Buffer;
+  repositoryTokenHash: Buffer;
+  repositoryCacheNamespace: string;
+  environment: NodeJS.ProcessEnv;
+  githubToken?: string;
+  githubTokenHash?: Buffer;
   root: string;
   filesystem: LocalFilesystem;
   sandbox: LocalSandbox;
@@ -62,17 +68,21 @@ export class QaseySandboxRuntime {
   private readinessError?: string;
   private gcTimer?: NodeJS.Timeout;
   private readonly dataRoot: string;
+  private readonly repositoryCache: SharedRepositoryCache;
+  private boundPort?: number;
   private desktopHost?: DesktopController;
   private desktopLease?: DesktopLease;
 
   constructor(private readonly options: SandboxRuntimeOptions) {
     this.dataRoot = resolve(options.dataRoot);
+    this.repositoryCache = new SharedRepositoryCache(join(this.dataRoot, "git-cache"));
   }
 
   async start(): Promise<{ port: number; close(): Promise<void> }> {
     await mkdir(join(this.dataRoot, "workspaces"), { recursive: true, mode: 0o700 });
     await mkdir(join(this.dataRoot, "browser"), { recursive: true, mode: 0o700 });
     await mkdir(join(this.dataRoot, "desktop"), { recursive: true, mode: 0o700 });
+    await mkdir(join(this.dataRoot, "git-cache"), { recursive: true, mode: 0o700 });
     try {
       await this.startDesktopHost();
       await this.runReadinessCheck();
@@ -99,8 +109,9 @@ export class QaseySandboxRuntime {
     this.gcTimer.unref();
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("Sandbox runtime did not bind a TCP port");
+    this.boundPort = (address as AddressInfo).port;
     return {
-      port: (address as AddressInfo).port,
+      port: this.boundPort,
       close: async () => {
         this.ready = false;
         if (this.gcTimer) clearInterval(this.gcTimer);
@@ -138,6 +149,14 @@ export class QaseySandboxRuntime {
       const state = await this.claim(claim);
       return sendJson(response, 200, state);
     }
+    const repositoryMatch = /^\/v1\/sessions\/([^/]+)\/repositories\/clone$/u.exec(url.pathname);
+    if (method === "POST" && repositoryMatch) {
+      const sessionId = decodeURIComponent(repositoryMatch[1] ?? "");
+      const session = this.authenticateRepository(request, sessionId);
+      session.lastActivityAt = Date.now();
+      await this.touchWorkspace(session);
+      return sendJson(response, 200, await this.cloneRepository(session, await readJson(request)));
+    }
     const match = /^\/v1\/sessions\/([^/]+)\/(filesystem|execute|stop|browser\/start|browser\/action|browser\/frame|desktop\/start|desktop\/action|desktop\/tool|desktop\/app|desktop\/frame|desktop\/stop)$/u.exec(url.pathname);
     if (!match) throw new HttpError(404, "Route not found");
     const sessionId = decodeURIComponent(match[1] ?? "");
@@ -171,12 +190,16 @@ export class QaseySandboxRuntime {
     const current = this.sessions.get(input.sessionId);
     const incomingHash = hashToken(input.token);
     if (current && current.generation === input.generation && equalToken(current.tokenHash, incomingHash)) {
-      current.lastActivityAt = Date.now();
-      return this.state(current);
+      if (sameOptionalToken(current.githubTokenHash, input.githubToken)) {
+        current.lastActivityAt = Date.now();
+        return this.state(current);
+      }
+      await this.closeSession(current);
+    } else {
+      if (current && input.generation <= current.generation) throw new HttpError(409, "Stale sandbox lease generation");
+      if (current) await this.closeSession(current);
     }
-    if (current && input.generation <= current.generation) throw new HttpError(409, "Stale sandbox lease generation");
     if (!current && this.sessions.size >= this.options.maxSessions) throw new HttpError(429, "Sandbox Pod is at capacity");
-    if (current) await this.closeSession(current);
     const root = containedPath(join(this.dataRoot, "workspaces"), input.workspaceId);
     const home = join(root, "home");
     const repository = join(root, "repo");
@@ -186,12 +209,18 @@ export class QaseySandboxRuntime {
     ]);
     const filesystem = new LocalFilesystem({ basePath: repository, contained: true });
     await filesystem.init();
+    const repositoryToken = randomBytes(32).toString("base64url");
+    const environment = sessionEnvironment(home, {
+      brokerUrl: `http://127.0.0.1:${this.boundPort ?? this.options.port}/v1/sessions/${encodeURIComponent(input.sessionId)}/repositories/clone`,
+      brokerToken: repositoryToken,
+      ...(input.githubToken ? { githubToken: input.githubToken } : {}),
+    });
     const sandbox = new LocalSandbox({
       id: `qasey-${input.workspaceId}`,
       workingDirectory: repository,
       timeout: this.options.commandTimeoutMs,
       isolation: this.options.isolation,
-      env: sessionEnvironment(home),
+      env: environment,
       nativeSandbox: { allowNetwork: true, allowSystemBinaries: true },
     });
     await sandbox.start();
@@ -200,6 +229,10 @@ export class QaseySandboxRuntime {
       workspaceId: input.workspaceId,
       generation: input.generation,
       tokenHash: incomingHash,
+      repositoryTokenHash: hashToken(repositoryToken),
+      repositoryCacheNamespace: input.repositoryCacheNamespace ?? input.workspaceId,
+      environment,
+      ...(input.githubToken ? { githubToken: input.githubToken, githubTokenHash: hashToken(input.githubToken) } : {}),
       root,
       filesystem,
       sandbox,
@@ -219,6 +252,40 @@ export class QaseySandboxRuntime {
       throw new HttpError(401, "Invalid sandbox session credential");
     }
     return session;
+  }
+
+  private authenticateRepository(request: IncomingMessage, sessionId: string): ActiveSession {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new HttpError(404, "Sandbox session not found");
+    const token = request.headers["x-qasey-repository-token"];
+    if (typeof token !== "string" || !equalToken(session.repositoryTokenHash, hashToken(token))) {
+      throw new HttpError(401, "Invalid repository broker credential");
+    }
+    return session;
+  }
+
+  private async cloneRepository(session: ActiveSession, raw: unknown): Promise<unknown> {
+    const input = SandboxRepositoryCloneSchema.parse(raw);
+    const [owner, repository] = input.repository.split("/") as [string, string];
+    const destination = containedPath(join(session.root, "repo"), input.destination);
+    const cloneUrl = `https://github.com/${owner}/${repository}.git`;
+    const env = session.githubToken ? gitHubGitEnvironment(session.githubToken) : undefined;
+    const result = await this.repositoryCache.materialize({
+      namespace: session.repositoryCacheNamespace,
+      owner,
+      repository,
+      cloneUrl,
+    }, destination, {
+      bare: input.bare,
+      ...(input.ref ? { ref: input.ref } : {}),
+      ...(env ? { env } : {}),
+      timeoutMs: this.options.commandTimeoutMs,
+    });
+    return {
+      destination: relativePath(join(session.root, "repo"), result.destination),
+      cacheHit: result.cacheHit,
+      ...(result.resolvedSha ? { resolvedSha: result.resolvedSha } : {}),
+    };
   }
 
   private async filesystem(session: ActiveSession, raw: unknown): Promise<unknown> {
@@ -350,11 +417,10 @@ export class QaseySandboxRuntime {
   ): Promise<void> {
     const host = this.requireDesktopHost();
     const lease = this.requireDesktopLease(session);
-    const home = join(session.root, "home");
     const repository = join(session.root, "repo");
     const environment = {
       ...host.environment,
-      ...sessionEnvironment(home),
+      ...session.environment,
     };
     if (application === "browser") {
       if (!lease.browser) {
@@ -661,7 +727,11 @@ function desktopPublicResult(result: DesktopToolResult): unknown {
   };
 }
 
-function sessionEnvironment(home: string): NodeJS.ProcessEnv {
+function sessionEnvironment(home: string, repository: {
+  brokerUrl: string;
+  brokerToken: string;
+  githubToken?: string;
+}): NodeJS.ProcessEnv {
   return {
     PATH: `${join(home, ".local", "bin")}:${join(home, ".npm-global", "bin")}:${process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin"}`,
     HOME: home,
@@ -671,7 +741,37 @@ function sessionEnvironment(home: string): NodeJS.ProcessEnv {
     XDG_DATA_HOME: join(home, ".local", "share"),
     NPM_CONFIG_PREFIX: join(home, ".npm-global"),
     PIP_DISABLE_PIP_VERSION_CHECK: "1",
+    QASEY_GH_BROKER_URL: repository.brokerUrl,
+    QASEY_GH_BROKER_TOKEN: repository.brokerToken,
+    GH_PROMPT_DISABLED: "1",
+    GIT_TERMINAL_PROMPT: "0",
+    ...(repository.githubToken ? {
+      GH_TOKEN: repository.githubToken,
+      GITHUB_TOKEN: repository.githubToken,
+      ...gitHubGitEnvironment(repository.githubToken),
+    } : {}),
   };
+}
+
+function gitHubGitEnvironment(token: string): Record<string, string> {
+  return {
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "http.https://github.com/.extraHeader",
+    GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
+  };
+}
+
+function sameOptionalToken(currentHash: Buffer | undefined, incoming: string | undefined): boolean {
+  if (!currentHash && !incoming) return true;
+  if (!currentHash || !incoming) return false;
+  return equalToken(currentHash, hashToken(incoming));
+}
+
+function relativePath(rootInput: string, targetInput: string): string {
+  const root = resolve(rootInput);
+  const target = resolve(targetInput);
+  if (target !== root && !target.startsWith(`${root}${sep}`)) throw new HttpError(400, "Path escaped sandbox workspace");
+  return target === root ? "." : target.slice(root.length + 1);
 }
 
 function assertNoDesktopFileArguments(value: unknown, path = "arguments"): void {

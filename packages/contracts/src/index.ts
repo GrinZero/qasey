@@ -148,6 +148,7 @@ export const E2ERunSchema = z.object({
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
   branch: z.string().optional(),
+  baseSha: z.string().regex(/^[a-f0-9]{40,64}$/).optional(),
   pullRequestUrl: z.url().optional(),
   error: z.string().optional(),
   artifacts: z.array(ArtifactRefSchema),

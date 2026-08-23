@@ -11,7 +11,8 @@ describe("Playwright vertical slice", () => {
       await cp(resolve("tests/fixtures/playwright-smoke"), root, { recursive: true });
       await mkdir(join(root, "artifacts"), { recursive: true });
       const result = await new PlaywrightRunner().run({
-        id: "smoke", root, branch: "qasey/smoke",
+        id: "smoke", root, gitDir: join(root, ".git"), branch: "qasey/smoke",
+        baseSha: "0123456789abcdef0123456789abcdef01234567", purpose: "verifier",
         repository: { owner: "local", repository: "smoke", cloneUrl: root, baseRef: "main", allowedPaths: ["."], skillsPaths: [] },
       }, "smoke");
       expect(result.passed, result.summary).toBe(true);

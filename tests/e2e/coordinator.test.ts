@@ -27,8 +27,16 @@ describe("E2E coordinator", () => {
     const repository = new InMemoryRunRepository();
     const createdWorkspaces: WorkspaceRef[] = [];
     const workspaces: WorkspaceManager = {
-      create: vi.fn(async (profile, id) => {
-        const ref = { id, root: `/isolated/${id}`, branch: `qasey/${id}`, repository: profile };
+      create: vi.fn(async (profile, id, options) => {
+        const ref: WorkspaceRef = {
+          id,
+          root: `/isolated/${id}`,
+          gitDir: `/isolated/${id}/store.git`,
+          branch: options?.branch ?? `qasey/${id}`,
+          baseSha: options?.baseSha ?? "0123456789abcdef0123456789abcdef01234567",
+          purpose: options?.purpose ?? "author",
+          repository: profile,
+        };
         createdWorkspaces.push(ref);
         return ref;
       }),

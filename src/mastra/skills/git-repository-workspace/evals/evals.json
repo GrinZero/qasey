@@ -1,0 +1,23 @@
+{
+  "skill_name": "git-repository-workspace",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "帮我分析这个 PR 的调用链和回归影响。",
+      "expected_output": "先搜索 session 中已有仓库；必要时 clone bare store，并在精确 PR head SHA 的 inspect worktree中使用本地搜索和 git diff。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "继续上次的修改，再补一个测试。",
+      "expected_output": "发现并复用当前 session 已有 author worktree，不重复 clone，也不覆盖未提交修改。",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "改完以后跑一下完整验证。",
+      "expected_output": "保留 author worktree，从固定 base SHA新建 verifier worktree，通过 patch或 commit导入改动后验证。",
+      "files": []
+    }
+  ]
+}

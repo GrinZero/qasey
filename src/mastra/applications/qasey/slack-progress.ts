@@ -22,6 +22,7 @@ const SKILL_LABELS: Record<string, string> = {
   "qa-quick-query": "QA 快速查询规范",
   "qa-review": "QA 评审规范",
   "e2e-lifecycle": "E2E 执行规范",
+  "git-repository-workspace": "Git 仓库工作区规范",
 };
 
 /**
@@ -107,6 +108,10 @@ function renderToolCall(toolName: string, args: unknown, taskTopic?: string): st
   if (toolName === "get_current_time") return undefined;
   if (toolName === "execute_typescript") return "正在并行核对相关资料…";
 
+  if (toolName === "mastra_workspace_execute_command" && isRepositoryReadCommand(input)) {
+    return repositoryCommandStatus(input, taskTopic);
+  }
+
   if (toolName.startsWith("github_")) {
     const repo = stringField(input, "repo", "repository") || "相关仓库";
     const pullNumber = numberField(input, "pullNumber", "pull_number", "number");
@@ -187,6 +192,10 @@ function renderToolResult(
     return count === undefined
       ? statusLine(`已准备好${topic}相关工具…`)
       : statusLine(`已准备好 ${count} 个${topic}相关工具…`);
+  }
+
+  if (toolName === "mastra_workspace_execute_command" && isRepositoryReadCommand(input)) {
+    return "已完成本地 Git/GitHub 查询，正在分析代码与改动…";
   }
 
   if (toolName.startsWith("github_")) {
@@ -281,6 +290,9 @@ function renderMeterSphereResult(toolName: string, input: Record<string, unknown
 function renderToolFailure(toolName: string, input: Record<string, unknown>): string {
   if (toolName === "skill") return "暂时无法加载任务规范，正在调整处理方式…";
   if (toolName === "search_tools") return "暂时无法查找相关能力，正在调整处理方式…";
+  if (toolName === "mastra_workspace_execute_command" && isRepositoryReadCommand(input)) {
+    return "本地 Git/GitHub 查询暂时失败，正在调整检索方式…";
+  }
   if (toolName.startsWith("jira_")) {
     const issue = stringField(input, "issueKey", "issue_key", "key") || "Jira 需求";
     return statusLine(`暂时无法读取 ${issue}，正在重新判断下一步…`);
@@ -308,6 +320,35 @@ function progressStatus(input: Record<string, unknown>): string | undefined {
 function friendlySkillName(name?: string): string {
   if (!name) return "相关任务规范";
   return SKILL_LABELS[name] ?? `${name.replace(/[-_]+/g, " ")} 规范`;
+}
+
+function repositoryCommandStatus(input: Record<string, unknown>, taskTopic?: string): string {
+  const command = commandText(input);
+  if (/\bgh\s+(?:pr|api)\b/iu.test(command)) {
+    const pullNumber = command.match(/(?:\bpr\s+(?:view|diff|checks)\s+|\/pulls\/)(\d+)\b/iu)?.[1];
+    return statusLine(`正在核对 GitHub${pullNumber ? ` PR #${pullNumber}` : " PR"} 与相关代码…`);
+  }
+  if (/\b(?:rg|grep)\b/iu.test(command)) {
+    return statusLine(`正在搜索${taskTopic ? `${taskTopic}相关` : "仓库中的"}实现…`);
+  }
+  return "正在读取本地 Git 工作区与改动历史…";
+}
+
+function isRepositoryReadCommand(input: Record<string, unknown>): boolean {
+  const command = commandText(input);
+  if (!command) return false;
+  if (/\b(?:push|commit|merge|rebase|reset|checkout|switch|branch\s+-[dD]|clean\s+-f)\b/iu.test(command)) return false;
+  return /(?:^|[\s;&|])(?:gh|git|rg|grep)(?:\s|$)/iu.test(command);
+}
+
+function commandText(input: Record<string, unknown>): string {
+  const values: string[] = [];
+  for (const key of ["command", "cmd", "args"] as const) {
+    const value = input[key];
+    if (typeof value === "string") values.push(value);
+    else if (Array.isArray(value)) values.push(...value.filter((item): item is string => typeof item === "string"));
+  }
+  return values.join(" ");
 }
 
 function lastUserMessageText(messages: unknown): string | undefined {

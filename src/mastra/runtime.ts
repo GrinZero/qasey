@@ -17,7 +17,7 @@ import type { ToolsInput } from "@mastra/core/agent";
 import {
   InMemoryRunRepository, PostgresRunRepository,
 } from "../../packages/domain/src/index.ts";
-import { createGitHubClient, GitHubPublisher, loadConfig, QaseyMcpCatalog, JiraClient, ReadConnectorCatalog } from "../../packages/adapters/src/index.ts";
+import { createGitHubClient, GitHubInstallationTokenProvider, GitHubPublisher, loadConfig, QaseyMcpCatalog, JiraClient, ReadConnectorCatalog } from "../../packages/adapters/src/index.ts";
 import {
   AcpCodingHarness, CuaFallback, E2ECoordinator, LocalArtifactStore, LocalWorkspaceManager,
   MaestroRunner, NoopCodingHarness, NoopDraftPrBroker, PlaywrightRunner,
@@ -40,6 +40,7 @@ export const config = {
   QASEY_OBSERVABILITY_DB_PATH: resolveProjectPath(loadedConfig.QASEY_OBSERVABILITY_DB_PATH),
   QASEY_ARTIFACT_DIR: resolveProjectPath(loadedConfig.QASEY_ARTIFACT_DIR),
   QASEY_WORKSPACE_DIR: resolveProjectPath(loadedConfig.QASEY_WORKSPACE_DIR),
+  QASEY_GIT_CACHE_DIR: resolveProjectPath(loadedConfig.QASEY_GIT_CACHE_DIR),
   QASEY_DATA_ROOT: resolveProjectPath(loadedConfig.QASEY_DATA_ROOT),
 };
 export const studioEditorEnabled = config.QASEY_ENABLE_STUDIO_EDITOR
@@ -66,6 +67,9 @@ export const runRepository = config.DATABASE_URL ? new PostgresRunRepository(con
 export const channelDeliveryInbox = config.DATABASE_URL
   ? new PostgresChannelDeliveryInbox(config.DATABASE_URL)
   : new InMemoryChannelDeliveryInbox();
+export const githubReadTokens = config.GITHUB_APP_ID && config.GITHUB_APP_INSTALLATION_ID && config.GITHUB_APP_PRIVATE_KEY
+  ? new GitHubInstallationTokenProvider(config)
+  : undefined;
 const sandboxLeaseOptions = {
   replicas: config.QASEY_SANDBOX_REPLICAS,
   maxSessionsPerReplica: config.QASEY_SANDBOX_MAX_SESSIONS,
@@ -81,6 +85,7 @@ export const sandboxPoolClient = sandboxLeaseStore
   ? new SandboxPoolClient(sandboxLeaseStore, {
       endpointTemplate: config.QASEY_SANDBOX_ENDPOINT_TEMPLATE,
       requestTimeoutMs: config.QASEY_SANDBOX_REQUEST_TIMEOUT_MS,
+      ...(githubReadTokens ? { githubTokenForScope: () => githubReadTokens.readToken() } : {}),
     })
   : undefined;
 // The registry can survive a development hot reload. Reset it before replacing
@@ -95,9 +100,9 @@ if (sandboxLeaseStore) runtimeReadiness.register("sandbox-lease-store", () => sa
 export const mcpCatalog = new QaseyMcpCatalog(config);
 runtimeReadiness.register("mcp-oauth-storage", () => mcpCatalog.healthCheck());
 export const githubClient = createGitHubClient(config);
-export const readConnectorCatalog = new ReadConnectorCatalog(config, githubClient);
+export const readConnectorCatalog = new ReadConnectorCatalog(config);
 export const jiraClient = new JiraClient(config.JIRA_BASE_URL, config.JIRA_EMAIL, config.JIRA_API_TOKEN);
-export const workspaceManager = new LocalWorkspaceManager(config.QASEY_WORKSPACE_DIR);
+export const workspaceManager = new LocalWorkspaceManager(config.QASEY_WORKSPACE_DIR, config.QASEY_GIT_CACHE_DIR);
 export const codingHarness = config.QASEY_ENABLE_EXECUTION
   ? new AcpCodingHarness(config.QASEY_ACP_COMMAND, config.QASEY_ACP_ARGS)
   : new NoopCodingHarness();

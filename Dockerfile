@@ -45,6 +45,7 @@ RUN apt-get update \
     fonts-dejavu-core \
     fonts-noto-color-emoji \
     git \
+    gh \
     jq \
     libxi6 \
     mousepad \
@@ -74,11 +75,14 @@ COPY .env .env.testing .env.devops ./
 COPY ci ./ci
 RUN corepack enable \
   && git --version \
+  && gh --version \
   && python3 --version \
   && ffmpeg -version >/dev/null \
   && Xvfb -help >/dev/null 2>&1
 RUN chown pwuser:pwuser /app \
-  && install -d -o pwuser -g pwuser -m 0750 /app/.mastra/output/workspace
+  && install -d -o pwuser -g pwuser -m 0750 /app/.mastra/output/workspace \
+  && chmod 0755 /app/dist/gh-wrapper.mjs \
+  && ln -s /app/dist/gh-wrapper.mjs /usr/local/bin/gh
 USER 1001
 EXPOSE 8080
 CMD ["sh", "ci/start.sh", "api"]

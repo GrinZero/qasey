@@ -43,6 +43,7 @@ describe("native scoped workspace", () => {
 
     const agentSkills = resolveAgentSkills([QASEY_MAIN_SKILLS_PATH]);
     expect((await workspaceSkills!.list()).map(skill => skill.name)).toContain("global-skill-smoke-test");
+    expect((await workspaceSkills!.list()).map(skill => skill.name)).toContain("git-repository-workspace");
     expect((await agentSkills.list()).map(skill => skill.name)).toEqual(expect.arrayContaining([
       "qa-review",
       "metersphere-case-management",
@@ -51,10 +52,13 @@ describe("native scoped workspace", () => {
     const { merged } = await mergeWorkspaceSkills(agentSkills, workspaceSkills!);
     expect((await merged.list()).map(skill => skill.name)).toEqual(expect.arrayContaining([
       "global-skill-smoke-test",
+      "git-repository-workspace",
       "qa-review",
       "metersphere-case-management",
     ]));
     expect((await merged.get("global-skill-smoke-test"))?.instructions).toContain("GLOBAL_WORKSPACE_SKILL_OK");
+    expect((await merged.get("git-repository-workspace"))?.instructions).toContain("Search first");
+    expect((await merged.get("git-repository-workspace"))?.instructions).toContain("verify/<run-id>");
     expect((await merged.get("qa-review"))?.instructions).toContain("QA 评审");
     expect((await merged.get("metersphere-case-management"))?.instructions).toContain("case_create_full");
     await workspace.close();

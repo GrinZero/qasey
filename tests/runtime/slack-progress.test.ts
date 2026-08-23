@@ -101,7 +101,7 @@ describe("Qasey Slack progress", () => {
     })).toBe("已准备好 4 个MeterSphere相关工具…");
   });
 
-  it("describes GitHub, Jira, Slack, Figma, and Lark events semantically", () => {
+  it("describes local GitHub workspace, Jira, Slack, Figma, and Lark events semantically", () => {
     const projector = new SlackAgentStatusProjector();
 
     expect(projector.project({
@@ -109,19 +109,19 @@ describe("Qasey Slack progress", () => {
       runId: "run-1",
       step: 1,
       toolCallId: "github-1",
-      toolName: "github_get_pull_request_diff",
-      args: { owner: "MoeGolibrary", repo: "Boarding_Desktop", pullNumber: 6582 },
-    })).toBe("正在查看 Boarding Desktop #6582 的代码改动…");
+      toolName: "mastra_workspace_execute_command",
+      args: { command: "gh pr diff 6582 --repo MoeGolibrary/Boarding_Desktop" },
+    })).toBe("正在核对 GitHub PR #6582 与相关代码…");
 
     expect(projector.project({
       type: "tool-result",
       runId: "run-1",
       step: 1,
       toolCallId: "github-1",
-      toolName: "github_get_pull_request_diff",
-      result: { changedFiles: 18, additions: 421, summary: "Split Payment related changes" },
+      toolName: "mastra_workspace_execute_command",
+      result: { exitCode: 0, stdout: "18 files changed" },
       isError: false,
-    })).toBe("已读取 PR #6582，发现 18 个文件变更…");
+    })).toBe("已完成本地 Git/GitHub 查询，正在分析代码与改动…");
 
     expect(projector.project({
       type: "tool-call",

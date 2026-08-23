@@ -59,10 +59,15 @@ export class E2ECoordinator {
     try {
       const isQaRepair = run.status === "repairing";
       run = await this.transition(owner, run, "preparing_workspace", "Preparing isolated author workspace");
-      author = await this.workspaces.create(run.repository, `${run.id}-author`);
+      author = await this.workspaces.create(run.repository, `${run.id}-author`, {
+        namespace: `${owner.applicationId}-${owner.tenantId}`,
+        purpose: "author",
+        branch: run.branch ?? `qasey/${run.id}`,
+        ...(run.baseSha ? { baseSha: run.baseSha } : {}),
+      });
       if (isQaRepair) await this.workspaces.applyPatch(author, await this.artifacts.loadPatch(owner, run.id));
       await this.installDependencies(author);
-      run = await this.repository.update(owner, run.id, { branch: author.branch });
+      run = await this.repository.update(owner, run.id, { branch: author.branch, baseSha: author.baseSha });
       run = await this.transition(owner, run, "authoring", isQaRepair ? "Applying QA feedback in ACP coding harness" : "Delegating E2E authoring to ACP coding harness");
       await this.harness.author({
         runId: run.id, framework: run.framework, sourceCaseIds: run.sourceCaseIds,
@@ -107,7 +112,12 @@ export class E2ECoordinator {
     let verifier: WorkspaceRef | undefined;
     try {
       const patch = await this.artifacts.loadPatch(owner, run.id);
-      verifier = await this.workspaces.create(run.repository, `${run.id}-verifier`);
+      verifier = await this.workspaces.create(run.repository, `${run.id}-verifier`, {
+        namespace: `${owner.applicationId}-${owner.tenantId}`,
+        purpose: "verifier",
+        ...(run.branch ? { branch: run.branch } : {}),
+        ...(run.baseSha ? { baseSha: run.baseSha } : {}),
+      });
       await this.workspaces.applyPatch(verifier, patch);
       await this.installDependencies(verifier);
       run = await this.transition(owner, run, "clean_verifying", "Running immutable patch in a fresh verifier workspace");

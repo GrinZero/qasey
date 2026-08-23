@@ -141,7 +141,7 @@ const capabilityMatchers: Record<string, (toolName: string) => boolean> = {
   qa_context_read: name => name === "qaExperience_qa_context_get",
   figma_read: name => name.startsWith("figma_"),
   slack_read: name => name.startsWith("slack_"),
-  github_read: name => name.startsWith("github_"),
+  github_read: name => name === "github_local_read",
   jira_read: name => name.startsWith("jira_"),
   lark_doc_read: name => name.startsWith("lark_"),
   metersphere_read: name => /metersphere_ms_(list|get)_/.test(name),
@@ -164,14 +164,35 @@ function collectToolNames(value: unknown, output = new Set<string>()): Set<strin
   }
   if (typeof value !== "object") return output;
   const object = value as Record<string, unknown>;
+  if (isLocalRepositoryRead(object)) output.add("github_local_read");
   for (const key of ["toolName", "name", "toolId"] as const) {
     const candidate = object[key];
-    if (typeof candidate === "string" && /^(?:metersphere_|qaExperience_|figma_|slack_|github_|jira_|lark_|rag_|e2e)/.test(candidate)) {
+    if (typeof candidate === "string" && /^(?:mastra_workspace_execute_command|metersphere_|qaExperience_|figma_|slack_|jira_|lark_|rag_|e2e)/.test(candidate)) {
       output.add(candidate);
     }
   }
   for (const child of Object.values(object)) collectToolNames(child, output);
   return output;
+}
+
+function isLocalRepositoryRead(object: Record<string, unknown>): boolean {
+  const toolName = [object.toolName, object.name, object.toolId]
+    .find(candidate => candidate === "mastra_workspace_execute_command");
+  if (!toolName) return false;
+  const payload = [object.args, object.input, object.parameters]
+    .filter(value => value !== undefined)
+    .map(value => safeJson(value))
+    .join(" ");
+  if (/\b(?:push|commit|merge|rebase|reset|clean\s+-f)\b/iu.test(payload)) return false;
+  return /(?:^|[^a-z0-9_-])(?:gh|git|rg|grep)(?:[^a-z0-9_-]|$)/iu.test(payload);
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return typeof value === "string" ? value : JSON.stringify(value);
+  } catch {
+    return "";
+  }
 }
 
 function normalize(value: string): string {

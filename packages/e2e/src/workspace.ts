@@ -1,17 +1,28 @@
 import { mkdir, mkdtemp, rm, cp, realpath, writeFile } from "node:fs/promises";
-import { resolve, relative, join, basename } from "node:path";
+import { resolve, relative, join } from "node:path";
 import type { RepositoryProfile } from "../../contracts/src/index.ts";
 import { runSafeCommand, type CommandResult, type SafeCommand } from "./process.ts";
+import { SharedRepositoryCache } from "./repository-cache.ts";
+
+export interface WorkspaceCreateOptions {
+  namespace?: string;
+  purpose?: "author" | "verifier" | "inspect";
+  branch?: string;
+  baseSha?: string;
+}
 
 export interface WorkspaceRef {
   id: string;
   root: string;
+  gitDir: string;
   repository: RepositoryProfile;
   branch: string;
+  baseSha: string;
+  purpose: NonNullable<WorkspaceCreateOptions["purpose"]>;
 }
 
 export interface WorkspaceManager {
-  create(repository: RepositoryProfile, runId: string): Promise<WorkspaceRef>;
+  create(repository: RepositoryProfile, runId: string, options?: WorkspaceCreateOptions): Promise<WorkspaceRef>;
   exec(ref: WorkspaceRef, executable: string, args: string[], timeoutMs?: number): Promise<CommandResult>;
   collectPatch(ref: WorkspaceRef): Promise<string>;
   changedPaths(ref: WorkspaceRef): Promise<string[]>;
@@ -23,24 +34,40 @@ export interface WorkspaceManager {
 
 export class LocalWorkspaceManager implements WorkspaceManager {
   private readonly refs = new Map<string, WorkspaceRef>();
-  constructor(private readonly workspaceRoot: string) {}
+  private readonly repositoryCache: SharedRepositoryCache;
 
-  async create(repository: RepositoryProfile, runId: string): Promise<WorkspaceRef> {
+  constructor(private readonly workspaceRoot: string, cacheRoot = join(resolve(workspaceRoot), "..", "git-cache")) {
+    this.repositoryCache = new SharedRepositoryCache(cacheRoot);
+  }
+
+  async create(repository: RepositoryProfile, runId: string, options: WorkspaceCreateOptions = {}): Promise<WorkspaceRef> {
     const absoluteRoot = resolve(this.workspaceRoot);
     await mkdir(absoluteRoot, { recursive: true });
     const container = await mkdtemp(join(absoluteRoot, `${safeName(runId)}-`));
-    const root = join(container, basename(repository.repository));
-    const branch = `qasey/${safeName(runId)}`;
-    const clone = await runSafeCommand({
-      executable: "git",
-      args: ["clone", "--depth", "1", "--branch", repository.baseRef, "--", repository.cloneUrl, root],
-      cwd: container,
+    const root = join(container, "worktree");
+    const gitDir = join(container, "store.git");
+    const purpose = options.purpose ?? "author";
+    const branch = options.branch ?? `qasey/${safeName(runId)}`;
+    const materialized = await this.repositoryCache.materialize({
+      namespace: options.namespace ?? "local",
+      owner: repository.owner,
+      repository: repository.repository,
+      cloneUrl: repository.cloneUrl,
+    }, gitDir, {
+      bare: true,
+      ref: repository.baseRef,
       timeoutMs: 120_000,
     });
-    if (clone.exitCode !== 0) throw new Error(`git clone failed: ${clone.stderr.slice(-1000)}`);
-    const checkout = await runSafeCommand({ executable: "git", args: ["checkout", "-b", branch], cwd: root });
-    if (checkout.exitCode !== 0) throw new Error(`git checkout failed: ${checkout.stderr.slice(-1000)}`);
-    const ref = { id: runId, root, repository, branch };
+    const baseSha = options.baseSha ?? materialized.resolvedSha;
+    if (!baseSha) throw new Error(`Unable to resolve base ref ${repository.baseRef}`);
+    const hasCommit = await runSafeCommand({ executable: "git", args: ["--git-dir", gitDir, "cat-file", "-e", `${baseSha}^{commit}`], cwd: container });
+    if (hasCommit.exitCode !== 0) throw new Error(`Pinned base commit is unavailable: ${baseSha}`);
+    const worktreeArgs = purpose === "author"
+      ? ["--git-dir", gitDir, "worktree", "add", "-b", branch, "--", root, baseSha]
+      : ["--git-dir", gitDir, "worktree", "add", "--detach", "--", root, baseSha];
+    const checkout = await runSafeCommand({ executable: "git", args: worktreeArgs, cwd: container });
+    if (checkout.exitCode !== 0) throw new Error(`git worktree add failed: ${checkout.stderr.slice(-1000)}`);
+    const ref = { id: runId, root, gitDir, repository, branch, baseSha, purpose };
     this.refs.set(runId, ref);
     return ref;
   }
@@ -107,6 +134,11 @@ export class LocalWorkspaceManager implements WorkspaceManager {
     const workspaceRoot = await realpath(resolve(this.workspaceRoot));
     const container = await realpath(resolve(ref.root, ".."));
     if (!container.startsWith(`${workspaceRoot}/`)) throw new Error("Refusing to delete outside workspace root");
+    await runSafeCommand({
+      executable: "git",
+      args: ["--git-dir", ref.gitDir, "worktree", "remove", "--force", "--", ref.root],
+      cwd: container,
+    }).catch(() => undefined);
     await rm(container, { recursive: true, force: true });
     this.refs.delete(ref.id);
   }

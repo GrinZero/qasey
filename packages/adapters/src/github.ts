@@ -26,6 +26,41 @@ export function createGitHubClient(config: GitHubAppConfig): Octokit | undefined
   });
 }
 
+export class GitHubInstallationTokenProvider {
+  private readonly authenticate: ReturnType<typeof createAppAuth>;
+  private cached?: { token: string; expiresAt: number };
+
+  constructor(config: GitHubAppConfig, authenticate?: ReturnType<typeof createAppAuth>) {
+    if (!config.GITHUB_APP_ID || !config.GITHUB_APP_INSTALLATION_ID || !config.GITHUB_APP_PRIVATE_KEY) {
+      throw new Error("GitHub App authentication is not configured");
+    }
+    this.authenticate = authenticate ?? createAppAuth({
+      appId: config.GITHUB_APP_ID,
+      installationId: config.GITHUB_APP_INSTALLATION_ID,
+      privateKey: config.GITHUB_APP_PRIVATE_KEY,
+    });
+  }
+
+  async readToken(): Promise<string> {
+    if (this.cached && this.cached.expiresAt > Date.now() + 5 * 60_000) return this.cached.token;
+    const authentication = await this.authenticate({
+      type: "installation",
+      permissions: {
+        contents: "read",
+        pull_requests: "read",
+      },
+    });
+    if (!("token" in authentication) || typeof authentication.token !== "string") {
+      throw new Error("GitHub App did not return an installation token");
+    }
+    const expiresAt = "expiresAt" in authentication && typeof authentication.expiresAt === "string"
+      ? Date.parse(authentication.expiresAt)
+      : Date.now() + 50 * 60_000;
+    this.cached = { token: authentication.token, expiresAt };
+    return authentication.token;
+  }
+}
+
 export class GitHubPublisher {
   constructor(private readonly octokit?: Octokit) {}
   get configured(): boolean { return Boolean(this.octokit); }

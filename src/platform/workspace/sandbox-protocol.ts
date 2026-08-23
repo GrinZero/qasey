@@ -5,6 +5,17 @@ export const SandboxSessionClaimSchema = z.object({
   workspaceId: z.string().regex(/^[a-f0-9]{64}$/u),
   generation: z.number().int().positive(),
   token: z.string().min(32).max(512),
+  repositoryCacheNamespace: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+  githubToken: z.string().min(32).max(4096).optional(),
+}).strict();
+
+export const SandboxRepositoryCloneSchema = z.object({
+  repository: z.string()
+    .regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u)
+    .refine(value => value.split("/").every(segment => segment !== "." && segment !== ".."), "Repository path segments cannot be dot directories"),
+  destination: z.string().min(1).max(1_000),
+  bare: z.boolean().default(false),
+  ref: z.string().regex(/^[A-Za-z0-9._/-]+$/u).optional(),
 }).strict();
 
 export const SandboxFilesystemRequestSchema = z.discriminatedUnion("operation", [

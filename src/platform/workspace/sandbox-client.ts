@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { CommandResult, ExecuteCommandOptions, SandboxInfo, WorkspaceSandbox } from "@mastra/core/workspace";
 import type {
   CopyOptions, FileContent, FileEntry, FileStat, FilesystemInfo, ListOptions, ReadOptions,
@@ -14,6 +15,7 @@ import type { z } from "zod";
 export interface SandboxPoolOptions {
   endpointTemplate: string;
   requestTimeoutMs?: number;
+  githubTokenForScope?(scope: SandboxLeaseScope): Promise<string>;
 }
 
 export class SandboxPoolClient {
@@ -25,13 +27,13 @@ export class SandboxPoolClient {
 
   async session(scope: SandboxLeaseScope): Promise<SandboxRuntimeSession> {
     const lease = await this.acquireLease(scope);
-    const session = this.runtimeSession(scope, lease);
+    const session = await this.runtimeSession(scope, lease);
     try {
       await session.claim();
       return session;
     } catch {
       const reassigned = await this.leases.reassign(scope, lease.ordinal);
-      const fallback = this.runtimeSession(scope, reassigned);
+      const fallback = await this.runtimeSession(scope, reassigned);
       await fallback.claim();
       return fallback;
     }
@@ -59,7 +61,7 @@ export class SandboxPoolClient {
       if (!(error instanceof Error) || !error.message.includes("desktop is currently leased")) throw error;
       await session.stop().catch(() => undefined);
       const reassigned = await this.leases.reassign(scope, session.lease.ordinal);
-      const fallback = this.runtimeSession(scope, reassigned);
+      const fallback = await this.runtimeSession(scope, reassigned);
       await fallback.claim();
       try {
         return { session: fallback, state: await fallback.desktopStart(input) };
@@ -70,9 +72,10 @@ export class SandboxPoolClient {
     }
   }
 
-  private runtimeSession(scope: SandboxLeaseScope, lease: SandboxLease): SandboxRuntimeSession {
+  private async runtimeSession(scope: SandboxLeaseScope, lease: SandboxLease): Promise<SandboxRuntimeSession> {
     const endpoint = this.options.endpointTemplate.replace("{ordinal}", String(lease.ordinal)).replace(/\/$/u, "");
-    return new SandboxRuntimeSession(endpoint, lease, this.requestTimeoutMs, () => this.leases.touch(scope));
+    const githubToken = await this.options.githubTokenForScope?.(scope);
+    return new SandboxRuntimeSession(endpoint, lease, this.requestTimeoutMs, () => this.leases.touch(scope), githubToken);
   }
 
   private async acquireLease(scope: SandboxLeaseScope): Promise<SandboxLease> {
@@ -94,6 +97,7 @@ export class SandboxRuntimeSession {
     readonly lease: SandboxLease,
     private readonly requestTimeoutMs: number,
     private readonly touchLease: () => Promise<void>,
+    private readonly githubToken?: string,
   ) {}
 
   async claim(): Promise<SandboxSessionState> {
@@ -104,6 +108,8 @@ export class SandboxRuntimeSession {
         workspaceId: this.lease.workspaceId,
         generation: this.lease.generation,
         token: this.lease.token,
+        repositoryCacheNamespace: repositoryCacheNamespace(this.lease),
+        ...(this.githubToken ? { githubToken: this.githubToken } : {}),
       }),
     }, false);
   }
@@ -214,6 +220,13 @@ export class SandboxRuntimeSession {
       },
     });
   }
+}
+
+function repositoryCacheNamespace(scope: SandboxLeaseScope): string {
+  return createHash("sha256")
+    .update(scope.applicationId).update("\0")
+    .update(scope.tenantId)
+    .digest("hex");
 }
 
 export class RemoteWorkspaceFilesystem implements WorkspaceFilesystem {

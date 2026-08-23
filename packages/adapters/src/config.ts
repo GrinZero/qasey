@@ -95,6 +95,7 @@ export const ConfigSchema = z.object({
   QASEY_MEMORY_INPUT_TOKEN_LIMIT: z.coerce.number().int().min(20_000).default(120_000),
   QASEY_ARTIFACT_DIR: z.string().default(".qasey/artifacts"),
   QASEY_WORKSPACE_DIR: z.string().default(".qasey/workspaces"),
+  QASEY_GIT_CACHE_DIR: z.string().default(".qasey/git-cache"),
   QASEY_DATA_ROOT: z.string().default(".qasey/data"),
   QASEY_SANDBOX_ENABLED: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
   QASEY_SANDBOX_ENDPOINT_TEMPLATE: z.string().min(1).default("http://moego-qasey-sandbox-{ordinal}.moego-qasey-sandbox:4120"),

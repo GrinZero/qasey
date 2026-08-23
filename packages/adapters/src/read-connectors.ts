@@ -1,14 +1,12 @@
 import { createTool } from "@mastra/core/tools";
 import type { ToolsInput } from "@mastra/core/agent";
-import { Octokit } from "@octokit/rest";
 import { WebClient } from "@slack/web-api";
 import { z } from "zod";
 import type { QaseyConfig } from "./config.ts";
-import { createGitHubClient } from "./github.ts";
 
 const ReadConnectorOutputSchema = z.object({
   source: z.object({
-    provider: z.enum(["slack", "github", "jira"]),
+    provider: z.enum(["slack", "jira"]),
     operation: z.string(),
     locator: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])),
   }),
@@ -24,11 +22,6 @@ export const QASEY_READ_CONNECTOR_TOOL_NAMES = [
   "slack_get_history",
   "slack_get_user",
   "slack_get_file",
-  "github_get_file",
-  "github_get_pull_request",
-  "github_get_pull_request_diff",
-  "github_list_reviews",
-  "github_search_repositories",
   "jira_search_issues",
   "jira_get_issue",
 ] as const;
@@ -36,18 +29,15 @@ export const QASEY_READ_CONNECTOR_TOOL_NAMES = [
 export class ReadConnectorCatalog {
   private readonly slackBot: WebClient | undefined;
   private readonly slackUser: WebClient | undefined;
-  private readonly github: Octokit | undefined;
-  constructor(private readonly config: QaseyConfig, github: Octokit | undefined = createGitHubClient(config)) {
+  constructor(private readonly config: QaseyConfig) {
     this.slackBot = config.SLACK_BOT_TOKEN ? new WebClient(config.SLACK_BOT_TOKEN) : undefined;
     this.slackUser = config.SLACK_USER_TOKEN ? new WebClient(config.SLACK_USER_TOKEN) : undefined;
-    this.github = github;
   }
 
   tools(): ToolsInput {
     return {
       ...(this.slackBot ? this.slackBotTools(this.slackBot) : {}),
       ...(this.slackUser ? this.slackSearchTool(this.slackUser) : {}),
-      ...(this.github ? this.githubTools(this.github) : {}),
       ...(this.config.JIRA_BASE_URL && this.config.JIRA_EMAIL && this.config.JIRA_API_TOKEN ? this.jiraTools() : {}),
     };
   }
@@ -92,47 +82,6 @@ export class ReadConnectorCatalog {
         inputSchema: z.object({ fileId: z.string().min(1) }),
         outputSchema: ReadConnectorOutputSchema,
         execute: async ({ fileId }) => readResult("slack", "get_file", { fileId }, await client.files.info({ file: fileId })),
-        toModelOutput: boundedModelOutput,
-      }),
-    };
-  }
-
-  private githubTools(client: Octokit): ToolsInput {
-    const repo = z.object({ owner: z.string().default(this.config.GITHUB_ORG), repo: z.string().min(1) });
-    return {
-      github_get_file: createTool({
-        id: "github_get_file", description: "读取 GitHub 仓库中的文件或目录列表。只读。",
-        inputSchema: repo.extend({ path: z.string(), ref: z.string().default("main") }),
-        outputSchema: ReadConnectorOutputSchema,
-        execute: async ({ owner, repo, path, ref }) => readResult("github", "get_file", { owner, repo, path, ref }, (await client.repos.getContent({ owner, repo, path, ref })).data),
-        toModelOutput: boundedModelOutput,
-      }),
-      github_get_pull_request: createTool({
-        id: "github_get_pull_request", description: "读取 Pull Request 元数据。只读。",
-        inputSchema: repo.extend({ pullNumber: z.number().int().positive() }),
-        outputSchema: ReadConnectorOutputSchema,
-        execute: async ({ owner, repo, pullNumber }) => readResult("github", "get_pull_request", { owner, repo, pullNumber }, (await client.pulls.get({ owner, repo, pull_number: pullNumber })).data),
-        toModelOutput: boundedModelOutput,
-      }),
-      github_get_pull_request_diff: createTool({
-        id: "github_get_pull_request_diff", description: "读取 Pull Request 的 unified diff。只读。",
-        inputSchema: repo.extend({ pullNumber: z.number().int().positive() }),
-        outputSchema: ReadConnectorOutputSchema,
-        execute: async ({ owner, repo, pullNumber }) => readResult("github", "get_pull_request_diff", { owner, repo, pullNumber }, (await client.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", { owner, repo, pull_number: pullNumber, headers: { accept: "application/vnd.github.v3.diff" } })).data),
-        toModelOutput: boundedModelOutput,
-      }),
-      github_list_reviews: createTool({
-        id: "github_list_reviews", description: "列出 GitHub Pull Request 的评审。只读。",
-        inputSchema: repo.extend({ pullNumber: z.number().int().positive() }),
-        outputSchema: ReadConnectorOutputSchema,
-        execute: async ({ owner, repo, pullNumber }) => readResult("github", "list_reviews", { owner, repo, pullNumber }, (await client.pulls.listReviews({ owner, repo, pull_number: pullNumber })).data),
-        toModelOutput: boundedModelOutput,
-      }),
-      github_search_repositories: createTool({
-        id: "github_search_repositories", description: `搜索仓库，范围限制为 ${this.config.GITHUB_ORG} 组织。只读。`,
-        inputSchema: z.object({ query: z.string().min(1), perPage: z.number().int().min(1).max(30).default(10) }),
-        outputSchema: ReadConnectorOutputSchema,
-        execute: async ({ query, perPage }) => readResult("github", "search_repositories", { query, perPage }, (await client.search.repos({ q: `${query} org:${this.config.GITHUB_ORG}`, per_page: perPage })).data),
         toModelOutput: boundedModelOutput,
       }),
     };

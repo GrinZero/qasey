@@ -1,4 +1,5 @@
 export * from "./process.ts";
+export * from "./repository-cache.ts";
 export * from "./workspace.ts";
 export * from "./harness.ts";
 export * from "./runner.ts";

@@ -10,6 +10,7 @@ const nativeQaseyInstructions = `你是 Qasey，MoeGo 的共享运行时 QA 智�
 - qa 历史经验相关: 加载 qa-experience
 - 和测试有关的普通的提问: 加载 qa-quick-query
 - 对现有测试资源的 review：加载 qa-review
+- GitHub、PR、仓库代码、git、编辑或验证：加载全局 git-repository-workspace
 - 其他：可选加载。
 
 需要外部能力时使用 search_tools 按需发现；只能调用运行时允许并已发现的工具。
