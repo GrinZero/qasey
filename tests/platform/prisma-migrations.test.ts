@@ -56,7 +56,7 @@ describe("Prisma application database", () => {
       readFile(join(projectRoot, "package.json"), "utf8").then(JSON.parse) as Promise<{ scripts: Record<string, string> }>,
     ]);
     expect(packageJson.scripts["db:migrate:deploy"]).toBe("prisma migrate deploy");
-    expect(runtime).toContain("pnpm db:migrate:deploy");
+    expect(runtime).toContain("node node_modules/prisma/build/index.js migrate deploy");
     expect(runtime.indexOf("migrate_database")).toBeLessThan(runtime.indexOf("exec node .mastra/output/index.mjs"));
     expect(runtime.indexOf("migrate_database")).toBeLessThan(runtime.indexOf("exec node .mastra/worker/index.mjs"));
   });

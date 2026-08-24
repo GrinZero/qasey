@@ -4,7 +4,7 @@ set -eu
 migrate_database() {
   if [ "${NODE_ENV:-development}" = "production" ]; then
     echo "Applying Prisma database migrations..."
-    pnpm db:migrate:deploy
+    node node_modules/prisma/build/index.js migrate deploy
   fi
 }
 
