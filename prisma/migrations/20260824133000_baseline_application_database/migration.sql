@@ -9,9 +9,17 @@ BEGIN
   END IF;
   IF EXISTS (
     SELECT 1 FROM information_schema.tables
+    WHERE table_schema = current_schema()
+      AND table_type = 'BASE TABLE'
+      AND left(table_name, 7) = 'mastra_'
+  ) THEN
+    RETURN;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
     WHERE table_schema = current_schema() AND table_type = 'BASE TABLE' AND table_name <> '_prisma_migrations'
   ) THEN
-    RAISE EXCEPTION 'Refusing to baseline a non-empty schema without recognized Qasey tables';
+    RAISE EXCEPTION 'Refusing to baseline a non-empty schema without recognized Qasey or Mastra tables';
   END IF;
 END $$;
 

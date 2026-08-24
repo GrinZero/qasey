@@ -38,7 +38,8 @@ describe("Prisma application database", () => {
       expect(schema, `${table} is absent from schema.prisma`).toContain(`@@map("${table}")`);
       expect(migration, `${table} is absent from the baseline migration`).toContain(`CREATE TABLE IF NOT EXISTS "${table}"`);
     }
-    expect(migration).toContain("Refusing to baseline a non-empty schema without recognized Qasey tables");
+    expect(migration).toContain("left(table_name, 7) = 'mastra_'");
+    expect(migration).toContain("Refusing to baseline a non-empty schema without recognized Qasey or Mastra tables");
   });
 
   it("keeps DDL in migrations and deploys it before production processes start", async () => {
