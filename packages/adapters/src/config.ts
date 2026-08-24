@@ -254,9 +254,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): QaseyConfig {
     : hasCompleteSplitPostgresConfig || mustValidateSplitPostgresConfig
       ? databaseUrlsFromPgParts(env)
       : undefined;
+  const applicationDatabaseUrl = env.DATABASE_URL ?? databaseUrls?.application;
+  const editorUsesApplicationDatabase = env.NODE_ENV === "production"
+    && env.QASEY_ENABLE_STUDIO_EDITOR?.toLowerCase() === "true";
   return ConfigSchema.parse({
     ...env,
-    ...(env.DATABASE_URL ? {} : { DATABASE_URL: databaseUrls?.application }),
+    ...(env.DATABASE_URL ? {} : { DATABASE_URL: applicationDatabaseUrl }),
+    // The Editor is a separate Mastra storage domain, but it does not require
+    // a separate PostgreSQL database. Production deployments reuse the durable
+    // application database unless an explicit Editor database is configured.
+    ...(env.EDITOR_DATABASE_URL || !editorUsesApplicationDatabase
+      ? {}
+      : { EDITOR_DATABASE_URL: applicationDatabaseUrl }),
     // Split deployment credentials are also used by local development to
     // reach the shared application database. Do not silently opt a local
     // `pnpm dev` process into the remote observability database: its schema

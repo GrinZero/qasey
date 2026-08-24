@@ -31,6 +31,7 @@ describe("split PostgreSQL configuration", () => {
     const config = loadConfig({
       NODE_ENV: "production",
       ...splitPostgresEnv,
+      QASEY_ENABLE_STUDIO_EDITOR: "true",
       GOOGLE_CLIENT_ID: "google-client-id",
       GOOGLE_CLIENT_SECRET: "google-client-secret",
       GOOGLE_COOKIE_PASSWORD: "a-secure-cookie-password-over-32-chars",
@@ -41,7 +42,18 @@ describe("split PostgreSQL configuration", () => {
       REDIS_TLS: "true",
     });
     expect(config.DATABASE_URL).toContain("/moego_qasey");
+    expect(config.EDITOR_DATABASE_URL).toBe(config.DATABASE_URL);
     expect(config.OBSERVABILITY_DATABASE_URL).toContain("/moego_qasey_observability");
+  });
+
+  it("keeps the local Editor on filesystem storage without an explicit URL", () => {
+    const config = loadConfig({
+      NODE_ENV: "development",
+      ...splitPostgresEnv,
+      QASEY_ENABLE_STUDIO_EDITOR: "true",
+    });
+
+    expect(config.EDITOR_DATABASE_URL).toBeUndefined();
   });
 
   it("keeps local observability on DuckDB unless a remote URL is explicit", () => {

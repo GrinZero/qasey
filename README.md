@@ -44,6 +44,7 @@ pnpm dev
 - `QASEY_ENABLE_CODE_MODE`：启用基于 QuickJS 隔离运行时的只读工具编排（默认开启）；可用 `QASEY_CODE_MODE_TIMEOUT_MS` 和 `QASEY_CODE_MODE_MEMORY_LIMIT_MB` 限制单次执行
 - `QASEY_ENABLE_LOCAL_CODE_MODE`：仅为开发 Workspace 开启 LocalSandbox；Code Mode 自身不依赖宿主机或远程 sandbox
 - `QASEY_ENABLE_STUDIO_EDITOR`、`QASEY_ENABLE_STUDIO_MCP_PREVIEW`：生产默认关闭
+- `EDITOR_DATABASE_URL`：可选的独立 Editor 数据库；生产开启 Editor 但未配置时，默认复用 `DATABASE_URL`
 - `QASEY_ENABLE_DATADOG`、`DD_LLMOBS_ML_APP`
 
 本地开发默认把 Observability 写入 `QASEY_OBSERVABILITY_DB_PATH` 指向的 DuckDB；即使本机通过拆分 PG 配置连接共享应用数据库，也不会隐式初始化远端 Observability schema。确需联调时可显式设置 `OBSERVABILITY_DATABASE_URL`。生产仍使用独立的 PostgreSQL Observability 数据库。
