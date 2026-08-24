@@ -1,5 +1,6 @@
 import type { SlackConnectionView, SlackIntegrationManager } from "../channels/slack-integration-manager.ts";
 import { SlackIntegrationError } from "../channels/slack-integration-manager.ts";
+import { normalizeSlackDevRuntimeCommand } from "../channels/slack-dev-runtime.ts";
 import { SlackInstallationRepositoryError } from "../channels/slack-installation-repository.ts";
 import type {
   PlatformTriggerProvider,
@@ -50,7 +51,14 @@ export class SlackTriggerProvider implements PlatformTriggerProvider {
         label: "启用本地 Runtime 开发隧道",
         type: "boolean",
         required: false,
-        help: "仅用于 testing。启用后，这个 Slack App 才会注册 /qasey-local 并按用户绑定路由到本地 Runtime。",
+        help: "仅用于 testing。启用后，这个 Slack App 会处理下面配置的 Slash Command，并按用户绑定路由到本地 Runtime。",
+      }, {
+        key: "devRuntimeCommand",
+        label: "本地 Runtime Slash Command",
+        type: "text",
+        required: false,
+        placeholder: this.options.slashCommand.command,
+        help: `在 Slack App 后台创建该 Command；留空时使用 ${this.options.slashCommand.command}。`,
       }],
     } : baseManifest;
   }
@@ -83,6 +91,9 @@ export class SlackTriggerProvider implements PlatformTriggerProvider {
       devRuntimeEnabled: this.options.slashCommand
         ? booleanValue(input.configuration.devRuntimeEnabled)
         : false,
+      ...(this.options.slashCommand ? {
+        devRuntimeCommand: slashCommandValue(input.configuration.devRuntimeCommand, this.options.slashCommand.command),
+      } : {}),
     }));
     return this.connection(connection);
   }
@@ -92,22 +103,27 @@ export class SlackTriggerProvider implements PlatformTriggerProvider {
     configuration: Readonly<Record<string, string>>;
   }): Promise<TriggerConnection> {
     const devRuntimeEnabled = optionalBooleanValue(input.configuration.devRuntimeEnabled);
+    const devRuntimeCommand = this.options.slashCommand
+      ? optionalSlashCommandValue(input.configuration.devRuntimeCommand, this.options.slashCommand.command)
+      : undefined;
     const configuredCredentials = credentials(input.configuration);
     const hasCredentialInput = Boolean(configuredCredentials.botToken || configuredCredentials.signingSecret);
     const connection = await translate(() => this.options.slashCommand
-      && devRuntimeEnabled !== undefined
+      && (devRuntimeEnabled !== undefined || devRuntimeCommand !== undefined)
       && !hasCredentialInput
-      ? this.integrations.setDevRuntimeEnabled({
+      ? this.integrations.setDevRuntimeConfiguration({
           tenantId: input.tenantId,
           actorId: input.actorId,
           id: input.id,
           revision: input.revision,
-          enabled: devRuntimeEnabled,
+          ...(devRuntimeEnabled !== undefined ? { enabled: devRuntimeEnabled } : {}),
+          ...(devRuntimeCommand !== undefined ? { command: devRuntimeCommand } : {}),
         })
       : this.integrations.updateCredentials({
           tenantId: input.tenantId, actorId: input.actorId, id: input.id, revision: input.revision,
           credentials: configuredCredentials,
           ...(this.options.slashCommand && devRuntimeEnabled !== undefined ? { devRuntimeEnabled } : {}),
+          ...(this.options.slashCommand && devRuntimeCommand !== undefined ? { devRuntimeCommand } : {}),
         }));
     this.onChanged?.(connection.id);
     return this.connection(connection);
@@ -182,11 +198,14 @@ export class SlackTriggerProvider implements PlatformTriggerProvider {
       },
       endpoint: { label: "Event Subscriptions / Interactivity URL", url: connection.webhookUrl },
       ...(this.options.slashCommand ? {
-        configurationValues: { devRuntimeEnabled: String(connection.devRuntimeEnabled) },
+        configurationValues: {
+          devRuntimeEnabled: String(connection.devRuntimeEnabled),
+          devRuntimeCommand: connection.devRuntimeCommand,
+        },
       } : {}),
       ...(this.options.slashCommand && connection.devRuntimeEnabled ? {
         setupFields: [
-          { key: "slash-command", label: "Slash Command", value: this.options.slashCommand.command, copyable: true },
+          { key: "slash-command", label: "Slash Command", value: connection.devRuntimeCommand, copyable: true },
           { key: "slash-command-request-url", label: "Request URL", value: connection.webhookUrl, copyable: true },
           { key: "slash-command-description", label: "Short Description", value: this.options.slashCommand.description },
           { key: "slash-command-usage-hint", label: "Usage Hint", value: this.options.slashCommand.usageHint, copyable: true },
@@ -225,6 +244,21 @@ function optionalBooleanValue(value: string | undefined): boolean | undefined {
 
 function booleanValue(value: string | undefined): boolean {
   return value?.trim().toLowerCase() === "true";
+}
+
+function optionalSlashCommandValue(value: string | undefined, fallback: string): string | undefined {
+  return value === undefined ? undefined : slashCommandValue(value, fallback);
+}
+
+function slashCommandValue(value: string | undefined, fallback: string): string {
+  try {
+    return normalizeSlackDevRuntimeCommand(value, fallback);
+  } catch (error) {
+    throw new TriggerProviderError(
+      "invalid_configuration",
+      error instanceof Error ? error.message : "Slash Command 格式不正确。",
+    );
+  }
 }
 
 async function translate<T>(operation: () => Promise<T>): Promise<T> {

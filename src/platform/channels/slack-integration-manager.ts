@@ -124,6 +124,7 @@ export class SlackIntegrationManager {
     agentId: string;
     credentials: SlackAppCredentials;
     devRuntimeEnabled?: boolean;
+    devRuntimeCommand?: string;
   }): Promise<SlackConnectionView> {
     this.assertTarget(input.agentId);
     assertCredentials(input.credentials);
@@ -135,6 +136,7 @@ export class SlackIntegrationManager {
       agentId: input.agentId,
       identity,
       ...(input.devRuntimeEnabled !== undefined ? { devRuntimeEnabled: input.devRuntimeEnabled } : {}),
+      ...(input.devRuntimeCommand !== undefined ? { devRuntimeCommand: input.devRuntimeCommand } : {}),
       ...input.credentials,
     }));
   }
@@ -146,6 +148,7 @@ export class SlackIntegrationManager {
     revision: number;
     credentials: SlackAppCredentials;
     devRuntimeEnabled?: boolean;
+    devRuntimeCommand?: string;
   }): Promise<SlackConnectionView> {
     assertCredentials(input.credentials);
     const identity = await this.verifier.verify(input.credentials.botToken);
@@ -156,6 +159,7 @@ export class SlackIntegrationManager {
       expectedRevision: input.revision,
       identity,
       ...(input.devRuntimeEnabled !== undefined ? { devRuntimeEnabled: input.devRuntimeEnabled } : {}),
+      ...(input.devRuntimeCommand !== undefined ? { devRuntimeCommand: input.devRuntimeCommand } : {}),
       ...input.credentials,
     }));
   }
@@ -165,11 +169,21 @@ export class SlackIntegrationManager {
     return this.view(await this.repository.rebind(input.tenantId, input.id, input.agentId, input.revision, input.actorId));
   }
 
-  async setDevRuntimeEnabled(input: { tenantId: string; actorId: string; id: string; revision: number; enabled: boolean }): Promise<SlackConnectionView> {
-    return this.view(await this.repository.setDevRuntimeEnabled(
+  async setDevRuntimeConfiguration(input: {
+    tenantId: string;
+    actorId: string;
+    id: string;
+    revision: number;
+    enabled?: boolean;
+    command?: string;
+  }): Promise<SlackConnectionView> {
+    return this.view(await this.repository.setDevRuntimeConfiguration(
       input.tenantId,
       input.id,
-      input.enabled,
+      {
+        ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
+        ...(input.command !== undefined ? { command: input.command } : {}),
+      },
       input.revision,
       input.actorId,
     ));

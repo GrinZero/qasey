@@ -1,26 +1,30 @@
 import type { AgentChannels } from "@mastra/core/channels";
 import type { Mastra } from "@mastra/core/mastra";
 import { devRuntimeTunnelServerEnabled } from "../../../../packages/adapters/src/config.ts";
+import { DEFAULT_SLACK_DEV_RUNTIME_COMMAND } from "../../../platform/channels/slack-dev-runtime.ts";
 import { config } from "../../runtime.ts";
 import { DevRuntimeTunnelError, getDevRuntimeTunnelService } from "./dev-runtime-service.ts";
 
 const registered = new WeakSet<object>();
 export const QASEY_LOCAL_SLASH_COMMAND_SETUP = {
-  command: "/qasey-local",
+  command: DEFAULT_SLACK_DEV_RUNTIME_COMMAND,
   description: "绑定本地 Qasey Runtime",
   usageHint: "bind <runtime-id> | unbind | status",
   requiredScope: "commands",
 } as const;
-const HELP = [
-  "*Qasey 本地 Runtime*",
-  `\`${QASEY_LOCAL_SLASH_COMMAND_SETUP.command} bind local-XXXXXXXX\` 绑定当前本地 Runtime`,
-  `\`${QASEY_LOCAL_SLASH_COMMAND_SETUP.command} unbind\` 恢复 testing 云端执行`,
-  `\`${QASEY_LOCAL_SLASH_COMMAND_SETUP.command} status\` 查看当前绑定`,
-].join("\n");
+function help(command: string): string {
+  return [
+    "*Qasey 本地 Runtime*",
+    `\`${command} bind local-XXXXXXXX\` 绑定当前本地 Runtime`,
+    `\`${command} unbind\` 恢复 testing 云端执行`,
+    `\`${command} status\` 查看当前绑定`,
+  ].join("\n");
+}
 
 export async function registerQaseySlackTunnelCommand(
   mastra: Mastra,
   suppliedChannels?: AgentChannels,
+  command: string = QASEY_LOCAL_SLASH_COMMAND_SETUP.command,
 ): Promise<void> {
   if (!devRuntimeTunnelServerEnabled(config)) return;
   // File-based agents are injected by Mastra's generated entry only after this
@@ -35,7 +39,7 @@ export async function registerQaseySlackTunnelCommand(
   }
   if (!channels) {
     if (!mastra.listAgents()["qasey-main"]) {
-      throw new Error("qasey-main did not register in time for /qasey-local");
+      throw new Error(`qasey-main did not register in time for ${command}`);
     }
     // A provider-managed Slack App may be the only Slack ingress. In that case
     // the bridge callback will register the command when the installation loads.
@@ -47,9 +51,9 @@ export async function registerQaseySlackTunnelCommand(
     await new Promise(resolve => setTimeout(resolve, 25));
     sdk = channels.sdk;
   }
-  if (!sdk) throw new Error("Qasey Slack SDK did not initialize in time for /qasey-local");
+  if (!sdk) throw new Error(`Qasey Slack SDK did not initialize in time for ${command}`);
   registered.add(channels);
-  sdk.onSlashCommand(QASEY_LOCAL_SLASH_COMMAND_SETUP.command, async event => {
+  sdk.onSlashCommand(command, async event => {
     const raw = event.raw as Record<string, unknown> | undefined;
     const workspaceId = stringValue(raw?.team_id) || stringValue(raw?.enterprise_id);
     const slackUserId = event.user.userId || stringValue(raw?.user_id);
@@ -81,7 +85,7 @@ export async function registerQaseySlackTunnelCommand(
         ].join("\n"));
         return;
       }
-      await reply(HELP);
+      await reply(help(command));
     } catch (error) {
       const message = error instanceof DevRuntimeTunnelError
         ? error.message

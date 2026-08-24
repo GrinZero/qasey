@@ -154,7 +154,8 @@ export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions)
     const tunnelAvailable = devRuntimeTunnelServerEnabled(config);
     const tunnelEnabled = tunnelAvailable
       && (!options.installationId || options.devRuntimeTunnelEnabled === true);
-    let executionSource = tunnelAvailable ? "testing-cloud" : undefined;
+    // Only expose an execution source after this request has matched a local Runtime binding.
+    let executionSource: string | undefined;
     const tunnel = tunnelEnabled
       ? getDevRuntimeTunnelService(mastra)
       : undefined;

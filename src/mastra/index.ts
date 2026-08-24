@@ -77,6 +77,8 @@ const formatDatadogSpan: CustomSpanFormatter = span => {
     ...span,
     ...(requestContext ? { requestContext } : {}),
     ...(config.QASEY_DATADOG_CAPTURE_CONTENT ? {} : { input: undefined, output: undefined }),
+  }, {
+    captureModelContent: config.QASEY_DATADOG_CAPTURE_CONTENT,
   }) as typeof span;
 };
 
@@ -111,7 +113,7 @@ const slackIntegrations = new SlackIntegrationManager(
 );
 const managedSlackProvider = new ManagedSlackProvider(slackIntegrations, {
   onBridgeReady: ({ mastra, channels, installation }) => installation.devRuntimeEnabled
-    ? registerQaseySlackTunnelCommand(mastra, channels)
+    ? registerQaseySlackTunnelCommand(mastra, channels, installation.devRuntimeCommand)
     : undefined,
 });
 const triggerProviders = new TriggerProviderRegistry([

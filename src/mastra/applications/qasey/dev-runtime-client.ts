@@ -4,6 +4,7 @@ import { RequestContext } from "@mastra/core/request-context";
 import type { QaseyConfig } from "../../../../packages/adapters/src/config.ts";
 import { devRuntimeTunnelClientEnabled } from "../../../../packages/adapters/src/config.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../../../platform/context/schema.ts";
+import { DEFAULT_SLACK_DEV_RUNTIME_COMMAND } from "../../../platform/channels/slack-dev-runtime.ts";
 import { runQaseyTaskWorkflow } from "../../workflows/qasey-task-workflow.ts";
 import {
   DEV_RUNTIME_APPROVAL_GATE_KEY,
@@ -131,7 +132,7 @@ export class DevRuntimeTunnelClient {
   private async handleServerEvent(event: DevRuntimeServerEvent): Promise<void> {
     if (event.type === "connected") {
       this.log.info(`Local Slack runtime: ${this.runtimeId}`);
-      this.log.info(`Bind with: /qasey-local bind ${this.runtimeId}`);
+      this.log.info(`Bind with your Slack App command: <command> bind ${this.runtimeId} (default: ${DEFAULT_SLACK_DEV_RUNTIME_COMMAND})`);
       return;
     }
     if (event.type === "job") {

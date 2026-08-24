@@ -4,6 +4,8 @@
 
 `manifest.testing.json` 仅用于 testing Slack App。它额外注册 `/qasey-local` 和 `commands` scope，所有 Request URL 指向 `qasey.t2.moego.dev`。应用该 manifest 后需要重新安装 testing App；不要把该 Slash Command 合并到生产 manifest。
 
+Admin UI 管理的 Slack App 可以为每条 Trigger connection 配置独立的本地 Runtime Slash Command；留空时默认使用 `/qasey-local`。Qasey 只处理该 command，仍需在对应 Slack App 后台创建同名 Slash Command，并把 connection 展示的 Request URL 填入 Slack。
+
 本地开发建议在 Slack App 设置中临时启用 Socket Mode，并创建带 `connections:write` 的 app-level token，配置：
 
 ```env
