@@ -138,6 +138,13 @@ export interface ExecuteQaseyOptions {
   requestContext?: RequestContext<any>;
 }
 
+type QaseyAgentStreamResult = {
+  fullStream: AsyncIterable<ChunkType>;
+  output?: Pick<DurableAgentStreamResult["output"], "getFullOutput">;
+  getFullOutput?: () => Promise<unknown>;
+  cleanup?: () => void;
+};
+
 export async function executeQasey(mastra: Mastra, context: QaseyRequestContext, options: ExecuteQaseyOptions = {}): Promise<QaseyResponse> {
   const runId = options.runId ?? crypto.randomUUID();
   const requestContext = prepareQaseyRequestContext(context, options.requestContext);
@@ -284,8 +291,11 @@ export async function runQaseyAgentPhase(
         });
       },
     ),
-  }) as unknown as DurableAgentStreamResult;
-  let result: Awaited<ReturnType<typeof stream.output.getFullOutput>>;
+  }) as unknown as QaseyAgentStreamResult;
+  const getFullOutput = stream.output?.getFullOutput.bind(stream.output)
+    ?? stream.getFullOutput?.bind(stream);
+  if (!getFullOutput) throw new TypeError("Agent stream did not expose getFullOutput");
+  let result: unknown;
   try {
     let step = 0;
     let stepText = "";
@@ -298,9 +308,9 @@ export async function runQaseyAgentPhase(
       if (event) await options.events?.onAgentRuntimeEvent?.(event);
       if (event?.type === "step-finish") stepText = "";
     }
-    result = await stream.output.getFullOutput();
+    result = await getFullOutput();
   } finally {
-    stream.cleanup();
+    stream.cleanup?.();
   }
   abortSignal.throwIfAborted();
   const completedResult = restoreProcessedAgentOutput(result, finishSnapshot);
