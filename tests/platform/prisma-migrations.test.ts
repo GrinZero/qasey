@@ -38,6 +38,7 @@ describe("Prisma application database", () => {
       expect(schema, `${table} is absent from schema.prisma`).toContain(`@@map("${table}")`);
       expect(migration, `${table} is absent from the baseline migration`).toContain(`CREATE TABLE IF NOT EXISTS "${table}"`);
     }
+    expect(migration).toContain("Refusing to baseline a non-empty schema without recognized Qasey tables");
   });
 
   it("keeps DDL in migrations and deploys it before production processes start", async () => {
@@ -51,12 +52,18 @@ describe("Prisma application database", () => {
     }
     expect(runtimeDdl).toEqual([]);
 
-    const [runtime, packageJson] = await Promise.all([
+    const [runtime, migrationRuntime, packageJson] = await Promise.all([
       readFile(join(projectRoot, "ci/runtime.sh"), "utf8"),
+      readFile(join(projectRoot, "ci/migrate-database.sh"), "utf8"),
       readFile(join(projectRoot, "package.json"), "utf8").then(JSON.parse) as Promise<{ scripts: Record<string, string> }>,
     ]);
     expect(packageJson.scripts["db:migrate:deploy"]).toBe("prisma migrate deploy");
-    expect(runtime).toContain("node node_modules/prisma/build/index.js migrate deploy");
+    expect(runtime).toContain("sh ci/migrate-database.sh");
+    expect(migrationRuntime).toContain('node "$prisma_cli" migrate deploy');
+    expect(migrationRuntime).toContain("*P3005*)");
+    expect(migrationRuntime).toContain('db execute --file "$baseline_sql"');
+    expect(migrationRuntime).toContain('migrate resolve --applied "$baseline_name"');
+    expect(migrationRuntime).not.toContain("pnpm");
     expect(runtime.indexOf("migrate_database")).toBeLessThan(runtime.indexOf("exec node .mastra/output/index.mjs"));
     expect(runtime.indexOf("migrate_database")).toBeLessThan(runtime.indexOf("exec node .mastra/worker/index.mjs"));
   });

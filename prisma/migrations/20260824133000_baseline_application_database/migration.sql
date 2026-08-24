@@ -1,3 +1,20 @@
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = current_schema()
+      AND table_name IN ('agent_application_runs', 'platform_roles', 'platform_audit_log', 'qasey_sandbox_leases')
+  ) THEN
+    RETURN;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = current_schema() AND table_type = 'BASE TABLE' AND table_name <> '_prisma_migrations'
+  ) THEN
+    RAISE EXCEPTION 'Refusing to baseline a non-empty schema without recognized Qasey tables';
+  END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS "agent_application_runs" (
   "application_id" TEXT NOT NULL,
   "tenant_id" TEXT NOT NULL,
