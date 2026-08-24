@@ -379,9 +379,10 @@ export function classifyRuntimeRoute(
 }
 
 function routeMatches(pattern: string, path: string): boolean {
+  if (pattern === "/admin/*" && path.startsWith("/admin/api/")) return false;
   const escaped = pattern
     .split("/")
-    .map(segment => segment.startsWith(":") ? "[^/]+" : segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .map(segment => segment === "*" ? ".*" : segment.startsWith(":") ? "[^/]+" : segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
     .join("/");
   return new RegExp(`^(?:/api)?${escaped}/?$`, "u").test(path);
 }

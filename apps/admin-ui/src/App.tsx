@@ -44,11 +44,12 @@ import {
   XCircle,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { api, ApiError, errorMessage } from "./api";
 import { canRunQaseyTask } from "./catalog";
+import { adminPaths, legacyAdminPath, viewForAdminPath, type View } from "./routes";
 import type { AgentApplication, AuditRecord, CatalogEntry, QaseyRun, RunStatus, SandboxSessionState, Session, TriggerConnection, TriggerConnectionStatus, TriggerProvider, TriggerTarget } from "./types";
 
-type View = "platform-home" | "inbox" | "activity" | "qasey-overview" | "qasey-runs" | "qasey-review" | "qasey-cua" | "triggers" | "access";
 type AuthState = { kind: "loading" } | { kind: "anonymous"; message?: string } | { kind: "authenticated"; session: Session };
 
 const statusMeta: Record<RunStatus, { label: string; tone: string; step: number }> = {
@@ -71,9 +72,12 @@ const evidenceStages = [
 ] as const;
 
 export function App() {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [auth, setAuth] = useState<AuthState>({ kind: "loading" });
-  const [loginRedirect] = useState(() => new URLSearchParams(window.location.search).get("redirect_uri") ?? "/admin");
-  const [view, setView] = useState<View>(() => window.location.hash === "#apps/qasey" ? "qasey-overview" : "platform-home");
+  const [loginRedirect] = useState(() => new URLSearchParams(window.location.search).get("redirect_uri")
+    ?? legacyAdminPath(window.location.pathname, window.location.hash)
+    ?? `${window.location.pathname}${window.location.hash}`);
   const [menuOpen, setMenuOpen] = useState(false);
   const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
   const [applications, setApplications] = useState<AgentApplication[]>([]);
@@ -103,7 +107,6 @@ export function App() {
       .then(session => {
         if (!active) return;
         setAuth({ kind: "authenticated", session });
-        window.history.replaceState({}, "", window.location.hash === "#apps/qasey" ? "/admin#apps/qasey" : "/admin");
       })
       .catch(() => {
         if (active) setAuth({ kind: "anonymous", ...(error ? { message: friendlySsoError(error) } : {}) });
@@ -132,6 +135,7 @@ export function App() {
 
   const activeCount = runs.filter(run => activeStatuses.includes(run.status)).length;
   const reviewCount = runs.filter(run => run.status === "awaiting_qa").length;
+  const view = viewForAdminPath(location.pathname);
   const platformNav: Array<{ id: View; label: string; icon: typeof Gauge; badge?: number }> = [
     { id: "platform-home", label: "平台首页", icon: LayoutDashboard },
     { id: "inbox", label: "待处理", icon: Inbox, badge: reviewCount },
@@ -143,7 +147,7 @@ export function App() {
     { id: "qasey-review", label: "待我审阅", icon: ClipboardCheck, badge: reviewCount },
     { id: "qasey-cua", label: "Ubuntu 工作台", icon: MonitorPlay },
   ];
-  const qaseyActive = view.startsWith("qasey-");
+  const qaseyActive = view?.startsWith("qasey-") ?? false;
   const currentLabel = [...platformNav, ...qaseyNav,
     { id: "triggers" as View, label: "触发器", icon: Cable },
     { id: "access" as View, label: "访问与审计", icon: ShieldCheck },
@@ -152,14 +156,22 @@ export function App() {
   const logout = async () => {
     try { await api.logout(); } finally { setAuth({ kind: "anonymous" }); }
   };
+  const openView = (nextView: View) => {
+    navigate(adminPaths[nextView]);
+    setMenuOpen(false);
+  };
   const openApplication = (application: AgentApplication) => {
     setMenuOpen(false);
-    if (application.id === "qasey") {
-      window.history.replaceState({}, "", application.homePath);
-      setView("qasey-overview");
+    const legacyPath = legacyAdminPath(
+      application.homePath.split("#", 1)[0] ?? application.homePath,
+      application.homePath.includes("#") ? `#${application.homePath.split("#").slice(1).join("#")}` : "",
+    );
+    const destination = legacyPath ?? application.homePath;
+    if (destination.startsWith("/admin")) {
+      navigate(destination);
       return;
     }
-    window.location.assign(application.homePath);
+    window.location.assign(destination);
   };
 
   return (
@@ -170,16 +182,16 @@ export function App() {
           <div><strong>MoeGo Agents</strong><span>Application platform</span></div>
           <button className="icon-button sidebar-close" onClick={() => setMenuOpen(false)} aria-label="关闭导航"><X size={20} /></button>
         </div>
-        <button className="new-task" onClick={() => { setView("qasey-overview"); setMenuOpen(false); }}>
+        <button className="new-task" onClick={() => openView("qasey-overview")}>
           <Plus size={17} /> 发起工作 <span>⌘ K</span>
         </button>
         <nav className="nav-list" aria-label="主导航">
           <p className="nav-label">平台</p>
-          {platformNav.map(item => <NavButton key={item.id} item={item} active={view === item.id} onClick={() => { setView(item.id); setMenuOpen(false); }} />)}
+          {platformNav.map(item => <NavButton key={item.id} item={item} active={view === item.id} onClick={() => openView(item.id)} />)}
           <p className="nav-label application-label">Applications</p>
           {applications.map(application => <button key={application.id} className={application.id === "qasey" && qaseyActive ? "application-nav active" : "application-nav"} onClick={() => openApplication(application)}><span className={`app-glyph ${application.id === "qasey" ? "qasey" : "generic"}`}>{application.id === "qasey" ? <TestTube2 size={16} /> : <Bot size={16} />}</span><span><strong>{application.name}</strong><small>{application.category}</small></span><ChevronRight size={15} /></button>)}
-          {qaseyActive && <div className="application-subnav">{qaseyNav.map(item => <NavButton key={item.id} item={item} active={view === item.id} onClick={() => { setView(item.id); setMenuOpen(false); }} />)}</div>}
-          {auth.session.isAdmin && <><p className="nav-label application-label">管理</p><NavButton item={{ label: "触发器", icon: Cable }} active={view === "triggers"} onClick={() => { setView("triggers"); setMenuOpen(false); }} /><NavButton item={{ label: "访问与审计", icon: ShieldCheck }} active={view === "access"} onClick={() => { setView("access"); setMenuOpen(false); }} /></>}
+          {qaseyActive && <div className="application-subnav">{qaseyNav.map(item => <NavButton key={item.id} item={item} active={view === item.id} onClick={() => openView(item.id)} />)}</div>}
+          {auth.session.isAdmin && <><p className="nav-label application-label">管理</p><NavButton item={{ label: "触发器", icon: Cable }} active={view === "triggers"} onClick={() => openView("triggers")} /><NavButton item={{ label: "访问与审计", icon: ShieldCheck }} active={view === "access"} onClick={() => openView("access")} /></>}
         </nav>
         <div className="sidebar-spacer" />
         <div className="environment-card">
@@ -204,19 +216,26 @@ export function App() {
         </header>
         <div className="page">
           {dataError && <InlineError message={dataError} action="重新加载" onAction={loadWorkspace} />}
-          {view === "platform-home" && <PlatformHome applications={applications} runs={runs} loading={loadingRuns} onOpenApplication={openApplication} onOpenInbox={() => setView("inbox")} />}
-          {view === "inbox" && <UnifiedInbox runs={runs} onOpenQaseyReview={() => setView("qasey-review")} />}
-          {view === "activity" && <ActivityView runs={runs} loading={loadingRuns} onRefresh={loadWorkspace} />}
-          {view === "qasey-overview" && <Overview catalog={catalog} runs={runs} loading={loadingRuns} onRefresh={loadWorkspace} onOpenRuns={() => setView("qasey-runs")} />}
-          {view === "qasey-runs" && <RunsView runs={runs} loading={loadingRuns} onRefresh={loadWorkspace} />}
-          {view === "qasey-review" && <ReviewView runs={runs} onChanged={loadWorkspace} />}
-          {view === "qasey-cua" && <CuaView subjectId={auth.session.subjectId} />}
-          {view === "triggers" && auth.session.isAdmin && <TriggersView />}
-          {view === "access" && auth.session.isAdmin && <AccessView session={auth.session} />}
+          <Routes>
+            <Route path={adminPaths["platform-home"]} element={<PlatformHome applications={applications} runs={runs} loading={loadingRuns} onOpenApplication={openApplication} onOpenInbox={() => openView("inbox")} />} />
+            <Route path={adminPaths.inbox} element={<UnifiedInbox runs={runs} onOpenQaseyReview={() => openView("qasey-review")} />} />
+            <Route path={adminPaths.activity} element={<ActivityView runs={runs} loading={loadingRuns} onRefresh={loadWorkspace} />} />
+            <Route path={adminPaths["qasey-overview"]} element={<Overview catalog={catalog} runs={runs} loading={loadingRuns} onRefresh={loadWorkspace} onOpenRuns={() => openView("qasey-runs")} />} />
+            <Route path={adminPaths["qasey-runs"]} element={<RunsView runs={runs} loading={loadingRuns} onRefresh={loadWorkspace} />} />
+            <Route path={adminPaths["qasey-review"]} element={<ReviewView runs={runs} onChanged={loadWorkspace} />} />
+            <Route path={adminPaths["qasey-cua"]} element={<CuaView subjectId={auth.session.subjectId} />} />
+            <Route path={adminPaths.triggers} element={auth.session.isAdmin ? <TriggersView /> : <Navigate to={adminPaths["platform-home"]} replace />} />
+            <Route path={adminPaths.access} element={auth.session.isAdmin ? <AccessView session={auth.session} /> : <Navigate to={adminPaths["platform-home"]} replace />} />
+            <Route path="*" element={<NotFoundView onHome={() => openView("platform-home")} />} />
+          </Routes>
         </div>
       </main>
     </div>
   );
+}
+
+function NotFoundView({ onHome }: { onHome: () => void }) {
+  return <><PageHeading eyebrow="404" title="页面不存在" description="这个链接可能已失效，或页面已经移动。" /><section className="surface integration-empty"><span><FileSearch size={25} /></span><h2>找不到这个页面</h2><p>返回平台首页后，可以从左侧导航继续。</p><button className="secondary-button" onClick={onHome}><ArrowRight size={15} />返回平台首页</button></section></>;
 }
 
 function BootScreen() {

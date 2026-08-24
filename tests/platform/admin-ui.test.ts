@@ -8,6 +8,7 @@ import { InMemoryAuditLog } from "../../src/platform/auth/audit-log.ts";
 import { InMemoryPermissionStore, PermissionService } from "../../src/platform/auth/permission-store.ts";
 import { GoogleOidcService } from "../../src/platform/auth/google-oidc.ts";
 import { canRunQaseyTask } from "../../apps/admin-ui/src/catalog.ts";
+import { adminPaths, legacyAdminPath, viewForAdminPath } from "../../apps/admin-ui/src/routes.ts";
 import { InMemorySlackInstallationRepository } from "../../src/platform/channels/slack-installation-repository.ts";
 import { SlackIntegrationManager } from "../../src/platform/channels/slack-integration-manager.ts";
 import { TriggerProviderRegistry } from "../../src/platform/triggers/trigger-provider-registry.ts";
@@ -38,6 +39,7 @@ describe("same-origin Admin UI", () => {
     const app = createAdminUiApplication({ publicBaseUrl: "https://runtime.test", applicationCatalog: [], permissions: new PermissionService(new InMemoryPermissionStore()), audit: new InMemoryAuditLog(), googleOidc });
     expect(app.routes?.map(route => route.route.path)).toEqual([
       "/admin", "/auth/google/login", "/auth/google/callback", "/auth/logout", "/admin/api/session", "/admin/api/catalog", "/admin/api/applications", "/admin/api/audit", "/admin/api/permissions/grants", "/admin/api/permissions/bindings",
+      "/admin/*",
     ]);
     expect(app.routes?.find(route => route.id === "shell")?.access.permission).toBe("platform.admin-ui.access");
     expect(app.routes?.find(route => route.id === "shell")?.public).toBe(true);
@@ -51,6 +53,13 @@ describe("same-origin Admin UI", () => {
     expect(adminUiHtml).not.toContain("/studio/api/workflows/");
     expect(adminUiHtml).toContain("/v1/qasey/tasks");
     expect(app.routes?.find(route => route.id === "audit")?.access.permission).toBe("platform.audit.read");
+  });
+
+  it("maps stable Admin UI URLs and migrates the legacy Qasey hash", () => {
+    expect(viewForAdminPath("/admin/triggers")).toBe("triggers");
+    expect(viewForAdminPath("/admin/apps/qasey/runs/")).toBe("qasey-runs");
+    expect(viewForAdminPath("/admin/unknown")).toBeUndefined();
+    expect(legacyAdminPath("/admin", "#apps/qasey")).toBe(adminPaths["qasey-overview"]);
   });
 
   it("requires a same-origin browser mutation request", () => {
@@ -133,7 +142,7 @@ describe("same-origin Admin UI", () => {
     store.grant("tenant-1", "qa", "qasey.agent.execute");
     const permissions = new PermissionService(store);
     const applications = [
-      { id: "qasey", ui: { name: "Qasey", description: "QA", category: "Quality", capabilities: ["Review"], homePath: "/admin#apps/qasey", accent: "indigo" as const } },
+      { id: "qasey", ui: { name: "Qasey", description: "QA", category: "Quality", capabilities: ["Review"], homePath: "/admin/apps/qasey", accent: "indigo" as const } },
       { id: "code-review", ui: { name: "Code Review", description: "Review", category: "Engineering", capabilities: ["Review"], homePath: "/admin#apps/code-review", accent: "teal" as const } },
     ];
     const visible = await listVisibleApplicationManifests({

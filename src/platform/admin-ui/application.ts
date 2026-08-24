@@ -131,6 +131,18 @@ export function createAdminUiApplication(options: {
       audit: options.audit,
       trustedOrigin,
     }) : []),
+    owned("shell-fallback", "platform.admin-ui.access", registerApiRoute("/admin/*", {
+      method: "GET",
+      requiresAuth: false,
+      handler: async c => {
+        if (c.req.path.startsWith("/admin/api/")) return c.json({ error: "not_found" }, 404);
+        c.header("content-security-policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+        c.header("referrer-policy", "no-referrer");
+        c.header("x-content-type-options", "nosniff");
+        c.header("cache-control", "no-cache");
+        return c.html(await loadAdminUiHtml());
+      },
+    }), true),
   ];
   return { id: "platform", agents: {}, workflows: {}, access: { agents: {}, workflows: {} }, routes };
 }

@@ -27,7 +27,7 @@ export function createQaseyApplication(modules: QaseyApplicationModules): AgentA
       description: "从需求分析到自动化验证，交付可追溯的 QA 结论。",
       category: "Quality Engineering",
       capabilities: ["需求分析", "测试运行", "证据审阅"],
-      homePath: "/admin#apps/qasey",
+      homePath: "/admin/apps/qasey",
       accent: "indigo",
     },
     agents: {},

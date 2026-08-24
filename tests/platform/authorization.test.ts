@@ -489,6 +489,16 @@ describe("permission route coverage", () => {
     expect(classifyRuntimeRoute("/admin", "GET", new Map(), [publicRoute])).toMatchObject({
       resourceId: "platform-shell", public: true,
     });
+
+    const fallbackRoute: CatalogEntry = {
+      ...publicRoute,
+      resourceId: "platform-shell-fallback",
+      routePath: "/admin/*",
+    };
+    expect(classifyRuntimeRoute("/admin/triggers", "GET", new Map(), [fallbackRoute])).toMatchObject({
+      resourceId: "platform-shell-fallback", public: true,
+    });
+    expect(classifyRuntimeRoute("/admin/api/missing", "GET", new Map(), [fallbackRoute])).toBeUndefined();
   });
 
   it("isolates role grants by tenant and reserves bootstrap bypass for platform-admin", async () => {
