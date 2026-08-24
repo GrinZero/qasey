@@ -11,6 +11,14 @@ interface ManagedSlackBridge {
   channels: AgentChannels;
 }
 
+export interface ManagedSlackProviderOptions {
+  onBridgeReady?: (context: {
+    mastra: Mastra;
+    channels: AgentChannels;
+    installation: SlackRuntimeInstallation;
+  }) => void | Promise<void>;
+}
+
 /**
  * BYO Slack App provider. App creation and credentials live in Qasey's Admin
  * control plane; this provider owns only signed ingress and runtime bridges.
@@ -20,7 +28,10 @@ export class ManagedSlackProvider implements ChannelProvider {
   private mastra?: Mastra;
   private readonly bridges = new Map<string, ManagedSlackBridge>();
 
-  constructor(private readonly integrations: SlackIntegrationManager) {}
+  constructor(
+    private readonly integrations: SlackIntegrationManager,
+    private readonly options: ManagedSlackProviderOptions = {},
+  ) {}
 
   __attach(mastra: Mastra): void { this.mastra = mastra; }
 
@@ -66,6 +77,7 @@ export class ManagedSlackProvider implements ChannelProvider {
   }
 
   invalidate(installationId: string): void {
+    this.bridges.get(installationId)?.channels.close();
     this.bridges.delete(installationId);
   }
 
@@ -89,10 +101,13 @@ export class ManagedSlackProvider implements ChannelProvider {
       botUserId: installation.identity.botUserId,
       tenantId: installation.tenantId,
       installationId: installation.id,
+      slackWorkspaceId: installation.identity.teamId,
+      devRuntimeTunnelEnabled: installation.devRuntimeEnabled,
     }));
     channels.__setAgent(agent);
     channels.__setLogger(this.mastra.getLogger());
     await channels.initialize(this.mastra);
+    await this.options.onBridgeReady?.({ mastra: this.mastra, channels, installation });
     const bridge = { revision: installation.revision, channels };
     this.bridges.set(installation.id, bridge);
     return bridge;

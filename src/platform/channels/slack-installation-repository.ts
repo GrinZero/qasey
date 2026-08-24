@@ -21,6 +21,7 @@ export interface SlackInstallation {
   displayName: string;
   identity: SlackInstallationIdentity;
   agentId: string;
+  devRuntimeEnabled: boolean;
   status: SlackInstallationStatus;
   revision: number;
   webhookVerifiedAt?: string;
@@ -43,6 +44,7 @@ export interface CreateSlackInstallationInput {
   botToken: string;
   signingSecret: string;
   actorId: string;
+  devRuntimeEnabled?: boolean;
 }
 
 export interface UpdateSlackCredentialsInput {
@@ -53,6 +55,7 @@ export interface UpdateSlackCredentialsInput {
   botToken: string;
   signingSecret: string;
   actorId: string;
+  devRuntimeEnabled?: boolean;
 }
 
 export class SlackInstallationRepositoryError extends Error {
@@ -72,6 +75,7 @@ export interface SlackInstallationRepository {
   getRuntimeByWebhookId(webhookId: string): Promise<SlackRuntimeInstallation | undefined>;
   create(input: CreateSlackInstallationInput): Promise<SlackInstallation>;
   updateCredentials(input: UpdateSlackCredentialsInput): Promise<SlackInstallation>;
+  setDevRuntimeEnabled(tenantId: string, id: string, enabled: boolean, expectedRevision: number, actorId: string): Promise<SlackInstallation>;
   rebind(tenantId: string, id: string, agentId: string, expectedRevision: number, actorId: string): Promise<SlackInstallation>;
   setEnabled(tenantId: string, id: string, enabled: boolean, expectedRevision: number, actorId: string): Promise<SlackInstallation>;
   markWebhookVerified(webhookId: string): Promise<SlackInstallation | undefined>;
@@ -124,6 +128,7 @@ export class InMemorySlackInstallationRepository implements SlackInstallationRep
       displayName: input.displayName,
       identity: structuredClone(input.identity),
       agentId: input.agentId,
+      devRuntimeEnabled: input.devRuntimeEnabled ?? false,
       status: "awaiting_webhook",
       revision: 1,
       lastTokenVerifiedAt: now,
@@ -154,6 +159,7 @@ export class InMemorySlackInstallationRepository implements SlackInstallationRep
       tenantId: input.tenantId, installationId: input.id, field: "signing-secret",
     });
     record.credentialFingerprint = fingerprint(input.botToken, this.encryptionKey);
+    if (input.devRuntimeEnabled !== undefined) record.devRuntimeEnabled = input.devRuntimeEnabled;
     record.status = "awaiting_webhook";
     delete record.webhookVerifiedAt;
     record.lastTokenVerifiedAt = new Date().toISOString();
@@ -165,6 +171,13 @@ export class InMemorySlackInstallationRepository implements SlackInstallationRep
   async rebind(tenantId: string, id: string, agentId: string, expectedRevision: number, _actorId: string): Promise<SlackInstallation> {
     const record = this.require(tenantId, id, expectedRevision);
     record.agentId = agentId;
+    bump(record);
+    return publicInstallation(record);
+  }
+
+  async setDevRuntimeEnabled(tenantId: string, id: string, enabled: boolean, expectedRevision: number, _actorId: string): Promise<SlackInstallation> {
+    const record = this.require(tenantId, id, expectedRevision);
+    record.devRuntimeEnabled = enabled;
     bump(record);
     return publicInstallation(record);
   }
@@ -222,6 +235,7 @@ interface InstallationRow {
   slack_bot_user_id: string;
   slack_bot_id: string | null;
   is_enterprise_install: boolean;
+  dev_runtime_enabled: boolean;
   bot_token_ciphertext: string;
   signing_secret_ciphertext: string;
   credential_fingerprint: string;
@@ -294,12 +308,12 @@ export class PostgresSlackInstallationRepository implements SlackInstallationRep
       await client.query(
         `INSERT INTO platform_slack_app_installations
          (id,tenant_id,webhook_id,display_name,slack_app_id,slack_app_name,slack_team_id,slack_team_name,
-          slack_bot_user_id,slack_bot_id,is_enterprise_install,bot_token_ciphertext,signing_secret_ciphertext,
+          slack_bot_user_id,slack_bot_id,is_enterprise_install,dev_runtime_enabled,bot_token_ciphertext,signing_secret_ciphertext,
           credential_key_id,credential_fingerprint,status,revision,last_token_verified_at,created_by,updated_by)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'default',$14,'awaiting_webhook',1,$15,$16,$16)`,
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'default',$15,'awaiting_webhook',1,$16,$17,$17)`,
         [id, input.tenantId, webhookId, input.displayName, input.identity.appId, input.identity.appName ?? null,
           input.identity.teamId, input.identity.teamName ?? null, input.identity.botUserId, input.identity.botId ?? null,
-          input.identity.enterpriseInstall ?? false,
+          input.identity.enterpriseInstall ?? false, input.devRuntimeEnabled ?? false,
           encryptSlackCredential(input.botToken, this.encryptionKey, { tenantId: input.tenantId, installationId: id, field: "bot-token" }),
           encryptSlackCredential(input.signingSecret, this.encryptionKey, { tenantId: input.tenantId, installationId: id, field: "signing-secret" }),
           fingerprint(input.botToken, this.encryptionKey), now, input.actorId],
@@ -319,13 +333,13 @@ export class PostgresSlackInstallationRepository implements SlackInstallationRep
     const result = await this.pool.query(
       `UPDATE platform_slack_app_installations SET
        slack_app_id=$4,slack_app_name=$5,slack_team_id=$6,slack_team_name=$7,slack_bot_user_id=$8,slack_bot_id=$9,
-       is_enterprise_install=$10,bot_token_ciphertext=$11,signing_secret_ciphertext=$12,credential_fingerprint=$13,
+       is_enterprise_install=$10,dev_runtime_enabled=COALESCE($11,dev_runtime_enabled),bot_token_ciphertext=$12,signing_secret_ciphertext=$13,credential_fingerprint=$14,
        status='awaiting_webhook',webhook_verified_at=NULL,last_token_verified_at=now(),last_error_code=NULL,
-       revision=revision+1,updated_by=$14,updated_at=now()
+       revision=revision+1,updated_by=$15,updated_at=now()
        WHERE tenant_id=$1 AND id=$2 AND revision=$3 AND deleted_at IS NULL`,
       [input.tenantId, input.id, input.expectedRevision, input.identity.appId, input.identity.appName ?? null,
         input.identity.teamId, input.identity.teamName ?? null, input.identity.botUserId, input.identity.botId ?? null,
-        input.identity.enterpriseInstall ?? false,
+        input.identity.enterpriseInstall ?? false, input.devRuntimeEnabled ?? null,
         encryptSlackCredential(input.botToken, this.encryptionKey, { tenantId: input.tenantId, installationId: input.id, field: "bot-token" }),
         encryptSlackCredential(input.signingSecret, this.encryptionKey, { tenantId: input.tenantId, installationId: input.id, field: "signing-secret" }),
         fingerprint(input.botToken, this.encryptionKey), input.actorId],
@@ -357,6 +371,18 @@ export class PostgresSlackInstallationRepository implements SlackInstallationRep
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;
     } finally { client.release(); }
+    return (await this.get(tenantId, id))!;
+  }
+
+  async setDevRuntimeEnabled(tenantId: string, id: string, enabled: boolean, expectedRevision: number, actorId: string): Promise<SlackInstallation> {
+    await this.ready();
+    const result = await this.pool.query(
+      `UPDATE platform_slack_app_installations SET dev_runtime_enabled=$4,
+       revision=revision+1,updated_by=$5,updated_at=now()
+       WHERE tenant_id=$1 AND id=$2 AND revision=$3 AND deleted_at IS NULL`,
+      [tenantId, id, expectedRevision, enabled, actorId],
+    );
+    if (result.rowCount !== 1) await this.throwMissingOrConflict(tenantId, id);
     return (await this.get(tenantId, id))!;
   }
 
@@ -469,6 +495,7 @@ function rowToInstallation(row: InstallationRow): SlackInstallation {
       ...(row.is_enterprise_install ? { enterpriseInstall: true } : {}),
     },
     agentId: row.agent_id,
+    devRuntimeEnabled: row.dev_runtime_enabled,
     status: row.status,
     revision: Number(row.revision),
     ...(row.webhook_verified_at ? { webhookVerifiedAt: row.webhook_verified_at.toISOString() } : {}),
@@ -507,6 +534,7 @@ CREATE TABLE IF NOT EXISTS platform_slack_app_installations (
   slack_bot_user_id text NOT NULL,
   slack_bot_id text,
   is_enterprise_install boolean NOT NULL DEFAULT false,
+  dev_runtime_enabled boolean NOT NULL DEFAULT false,
   bot_token_ciphertext text NOT NULL,
   signing_secret_ciphertext text NOT NULL,
   credential_key_id text NOT NULL,
@@ -522,6 +550,8 @@ CREATE TABLE IF NOT EXISTS platform_slack_app_installations (
   updated_at timestamptz NOT NULL DEFAULT now(),
   deleted_at timestamptz
 );
+ALTER TABLE platform_slack_app_installations
+  ADD COLUMN IF NOT EXISTS dev_runtime_enabled boolean NOT NULL DEFAULT false;
 CREATE UNIQUE INDEX IF NOT EXISTS platform_slack_installation_identity_idx
   ON platform_slack_app_installations(slack_app_id, slack_team_id) WHERE deleted_at IS NULL;
 CREATE TABLE IF NOT EXISTS platform_trigger_bindings (

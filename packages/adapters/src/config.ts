@@ -45,6 +45,12 @@ export const ConfigSchema = z.object({
     value => value === "" ? undefined : value,
     z.string().min(32).optional(),
   ),
+  QASEY_DEV_TUNNEL_ENABLED: optionalBoolean,
+  QASEY_DEV_TUNNEL_BASE_URL: optionalUrl,
+  QASEY_DEV_TUNNEL_TOKEN: z.preprocess(
+    value => value === "" ? undefined : value,
+    z.string().min(32).optional(),
+  ),
   QASEY_USE_REDIS_DURABILITY: optionalBoolean,
   REDIS_HOST: optionalString,
   REDIS_PORT: optionalPositiveInteger,
@@ -153,6 +159,19 @@ export const ConfigSchema = z.object({
       message: "WORKER_TOKEN must be distinct from PLATFORM_SERVICE_TOKEN",
     });
   }
+  for (const [key, token] of [
+    ["WORKER_TOKEN", value.WORKER_TOKEN],
+    ["PLATFORM_SERVICE_TOKEN", value.PLATFORM_SERVICE_TOKEN],
+    ["QASEY_DEV_AUTH_TOKEN", value.QASEY_DEV_AUTH_TOKEN],
+  ] as const) {
+    if (value.QASEY_DEV_TUNNEL_TOKEN && value.QASEY_DEV_TUNNEL_TOKEN === token) {
+      context.addIssue({
+        code: "custom",
+        path: ["QASEY_DEV_TUNNEL_TOKEN"],
+        message: `QASEY_DEV_TUNNEL_TOKEN must be distinct from ${key}`,
+      });
+    }
+  }
   if (value.QASEY_DEV_AUTH_TOKEN && value.NODE_ENV === "production") {
     context.addIssue({
       code: "custom",
@@ -160,10 +179,25 @@ export const ConfigSchema = z.object({
       message: "QASEY_DEV_AUTH_TOKEN must not be configured in production",
     });
   }
+  if (value.QASEY_DEV_TUNNEL_ENABLED && value.NODE_ENV === "production" && value.DD_ENV !== "ns-testing") {
+    context.addIssue({
+      code: "custom",
+      path: ["QASEY_DEV_TUNNEL_ENABLED"],
+      message: "QASEY_DEV_TUNNEL_ENABLED is restricted to the ns-testing deployment",
+    });
+  }
+  if (value.QASEY_DEV_TUNNEL_ENABLED && value.NODE_ENV === "production" && !value.QASEY_DEV_TUNNEL_TOKEN) {
+    context.addIssue({
+      code: "custom",
+      path: ["QASEY_DEV_TUNNEL_TOKEN"],
+      message: "QASEY_DEV_TUNNEL_TOKEN is required by the testing tunnel server",
+    });
+  }
   for (const [key, token] of [
     ["WORKER_TOKEN", value.WORKER_TOKEN],
     ["PLATFORM_SERVICE_TOKEN", value.PLATFORM_SERVICE_TOKEN],
     ["JIRA_WEBHOOK_TOKEN", value.JIRA_WEBHOOK_TOKEN],
+    ["QASEY_DEV_TUNNEL_TOKEN", value.QASEY_DEV_TUNNEL_TOKEN],
   ] as const) {
     if (value.QASEY_DEV_AUTH_TOKEN && token === value.QASEY_DEV_AUTH_TOKEN) {
       context.addIssue({
@@ -236,13 +270,33 @@ export function resolveRedisDurabilityEnabled(
 }
 
 export function resolveSlackChannelMode(
-  config: Pick<QaseyConfig, "NODE_ENV" | "SLACK_CHANNEL_MODE" | "SLACK_SIGNING_SECRET" | "SLACK_SOCKET_MODE_APP_TOKEN">,
+  config: Pick<QaseyConfig, "NODE_ENV" | "SLACK_CHANNEL_MODE" | "SLACK_SIGNING_SECRET" | "SLACK_SOCKET_MODE_APP_TOKEN">
+    & { QASEY_DEV_TUNNEL_ENABLED?: boolean | undefined },
 ): "webhook" | "socket" | undefined {
+  if (config.NODE_ENV === "development" && config.QASEY_DEV_TUNNEL_ENABLED) return undefined;
   if (config.SLACK_CHANNEL_MODE === "webhook") return config.SLACK_SIGNING_SECRET ? "webhook" : undefined;
   if (config.SLACK_CHANNEL_MODE === "socket") return config.SLACK_SOCKET_MODE_APP_TOKEN ? "socket" : undefined;
   if (config.NODE_ENV !== "production" && config.SLACK_SOCKET_MODE_APP_TOKEN) return "socket";
   if (config.SLACK_SIGNING_SECRET) return "webhook";
   return config.SLACK_SOCKET_MODE_APP_TOKEN ? "socket" : undefined;
+}
+
+export function devRuntimeTunnelServerEnabled(
+  config: Pick<QaseyConfig, "NODE_ENV" | "DD_ENV" | "QASEY_DEV_TUNNEL_ENABLED" | "QASEY_DEV_TUNNEL_TOKEN">,
+): boolean {
+  return config.QASEY_DEV_TUNNEL_ENABLED === true
+    && config.NODE_ENV === "production"
+    && config.DD_ENV === "ns-testing"
+    && Boolean(config.QASEY_DEV_TUNNEL_TOKEN);
+}
+
+export function devRuntimeTunnelClientEnabled(
+  config: Pick<QaseyConfig, "NODE_ENV" | "QASEY_DEV_TUNNEL_ENABLED" | "QASEY_DEV_TUNNEL_BASE_URL" | "QASEY_DEV_TUNNEL_TOKEN">,
+): boolean {
+  return config.QASEY_DEV_TUNNEL_ENABLED === true
+    && config.NODE_ENV === "development"
+    && Boolean(config.QASEY_DEV_TUNNEL_BASE_URL)
+    && Boolean(config.QASEY_DEV_TUNNEL_TOKEN);
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): QaseyConfig {

@@ -4,7 +4,7 @@ export type TriggerTargetKind = "agent" | "workflow";
 export interface TriggerConfigurationField {
   key: string;
   label: string;
-  type: "text" | "secret";
+  type: "text" | "secret" | "boolean";
   required: boolean;
   placeholder?: string;
   help?: string;
@@ -52,6 +52,13 @@ export interface TriggerConnection {
     label: string;
     url: string;
   };
+  setupFields?: readonly {
+    key: string;
+    label: string;
+    value: string;
+    copyable?: boolean;
+  }[];
+  configurationValues?: Readonly<Record<string, string>>;
   guidance?: {
     title: string;
     body: string;

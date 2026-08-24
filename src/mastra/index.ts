@@ -20,7 +20,7 @@ import { createAuthorizationMiddleware, isMastraStudioRequest, resolveRequestUse
 import { InMemoryAuditLog, PostgresAuditLog } from "../platform/auth/audit-log.ts";
 import { InMemoryPermissionStore, PermissionService, PostgresPermissionStore } from "../platform/auth/permission-store.ts";
 import { OAuthPrincipalSchema, createServicePrincipal, mapOAuthPrincipal } from "../platform/auth/oauth-principal.ts";
-import { resolveRedisDurabilityEnabled, verifyWebhookToken } from "../../packages/adapters/src/index.ts";
+import { devRuntimeTunnelServerEnabled, resolveRedisDurabilityEnabled, verifyWebhookToken } from "../../packages/adapters/src/index.ts";
 import { createScopedWorkspace } from "../platform/workspace/create-workspace.ts";
 import { createAdminUiApplication } from "../platform/admin-ui/application.ts";
 import { flattenApplicationRegistry } from "../runtime/registry-validator.ts";
@@ -34,6 +34,11 @@ import { seedServiceRolePermissions } from "../platform/auth/service-role-permis
 import { runtimeReadiness } from "../platform/storage/readiness.ts";
 import { resolveDevelopmentPrincipal } from "../platform/auth/development-principal.ts";
 import { GLOBAL_SKILLS_PATH } from "./skill-paths.ts";
+import { startDevRuntimeTunnelClient } from "./applications/qasey/dev-runtime-client.ts";
+import {
+  QASEY_LOCAL_SLASH_COMMAND_SETUP,
+  registerQaseySlackTunnelCommand,
+} from "./applications/qasey/slack-tunnel-command.ts";
 import {
   InMemorySlackInstallationRepository,
   PostgresSlackInstallationRepository,
@@ -104,9 +109,17 @@ const slackIntegrations = new SlackIntegrationManager(
   config.QASEY_PUBLIC_BASE_URL,
   [{ applicationId: "qasey", agentId: "qasey-main", name: "Qasey" }],
 );
-const managedSlackProvider = new ManagedSlackProvider(slackIntegrations);
+const managedSlackProvider = new ManagedSlackProvider(slackIntegrations, {
+  onBridgeReady: ({ mastra, channels, installation }) => installation.devRuntimeEnabled
+    ? registerQaseySlackTunnelCommand(mastra, channels)
+    : undefined,
+});
 const triggerProviders = new TriggerProviderRegistry([
-  new SlackTriggerProvider(slackIntegrations, installationId => managedSlackProvider.invalidate(installationId)),
+  new SlackTriggerProvider(
+    slackIntegrations,
+    installationId => managedSlackProvider.invalidate(installationId),
+    devRuntimeTunnelServerEnabled(config) ? { slashCommand: QASEY_LOCAL_SLASH_COMMAND_SETUP } : {},
+  ),
 ]);
 runtimeReadiness.register("permission-store", () => permissionStore.healthCheck?.() ?? Promise.resolve());
 runtimeReadiness.register("audit-log", () => auditLog.healthCheck?.() ?? Promise.resolve());
@@ -204,7 +217,7 @@ const cache = cacheClient
 const server = {
   studioBase: MASTRA_STUDIO_BASE,
   apiPrefix: MASTRA_API_PREFIX,
-  cors: { origin: [], allowMethods: ["GET", "POST"], allowHeaders: ["content-type", "authorization", "x-qasey-webhook-token"] },
+  cors: { origin: [], allowMethods: ["GET", "POST"], allowHeaders: ["content-type", "authorization", "x-qasey-webhook-token", "x-qasey-runtime-instance"] },
 };
 const sharedRuntime = createSharedMastraConfig({
   applications: [qaseyApplication, adminUiApplication],
@@ -317,5 +330,8 @@ export const mastra = new Mastra({
     ],
   },
 });
+await registerQaseySlackTunnelCommand(mastra);
+const devRuntimeTunnelClient = startDevRuntimeTunnelClient(mastra, config);
+if (devRuntimeTunnelClient) lifecycle.own({ close: () => devRuntimeTunnelClient.close() });
 export const applicationCatalog = sharedRuntime.catalog;
 export const closeRuntime = (): Promise<void> => lifecycle.close();

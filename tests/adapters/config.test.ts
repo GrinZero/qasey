@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { loadConfig, resolveRedisDurabilityEnabled, resolveSlackChannelMode } from "../../packages/adapters/src/index.ts";
+import {
+  devRuntimeTunnelClientEnabled,
+  devRuntimeTunnelServerEnabled,
+  loadConfig,
+  resolveRedisDurabilityEnabled,
+  resolveSlackChannelMode,
+} from "../../packages/adapters/src/index.ts";
 
 const productionAuth = {
   DATABASE_URL: "postgresql://qasey.example/moego_qasey",
@@ -64,6 +70,36 @@ describe("shared runtime configuration", () => {
     expect(resolveSlackChannelMode({ NODE_ENV: "development", ...credentials })).toBe("socket");
     expect(resolveSlackChannelMode({ NODE_ENV: "production", ...credentials })).toBe("webhook");
     expect(resolveSlackChannelMode({ NODE_ENV: "development", ...credentials, SLACK_CHANNEL_MODE: "webhook" })).toBe("webhook");
+    expect(resolveSlackChannelMode({ NODE_ENV: "development", ...credentials, QASEY_DEV_TUNNEL_ENABLED: true })).toBeUndefined();
+  });
+
+  it("enables the Dev Runtime tunnel only for local clients and ns-testing servers", () => {
+    const token = "testing-tunnel-token-that-is-at-least-32-characters";
+    const local = loadConfig({
+      NODE_ENV: "development",
+      QASEY_DEV_TUNNEL_ENABLED: "true",
+      QASEY_DEV_TUNNEL_BASE_URL: "https://qasey.t2.moego.dev",
+      QASEY_DEV_TUNNEL_TOKEN: token,
+    } as NodeJS.ProcessEnv);
+    expect(devRuntimeTunnelClientEnabled(local)).toBe(true);
+    expect(devRuntimeTunnelServerEnabled(local)).toBe(false);
+
+    const testing = loadConfig({
+      NODE_ENV: "production",
+      ...productionAuth,
+      DD_ENV: "ns-testing",
+      QASEY_DEV_TUNNEL_ENABLED: "true",
+      QASEY_DEV_TUNNEL_TOKEN: token,
+    } as NodeJS.ProcessEnv);
+    expect(devRuntimeTunnelServerEnabled(testing)).toBe(true);
+
+    expect(() => loadConfig({
+      NODE_ENV: "production",
+      ...productionAuth,
+      DD_ENV: "ns-devops",
+      QASEY_DEV_TUNNEL_ENABLED: "true",
+      QASEY_DEV_TUNNEL_TOKEN: token,
+    } as NodeJS.ProcessEnv)).toThrow(/ns-testing/);
   });
 
   it("requires an LLM application name when Datadog is enabled", () => {

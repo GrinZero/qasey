@@ -2,11 +2,12 @@ import { createSlackAdapter, type SlackBotToken } from "@chat-adapter/slack";
 import type { ChannelConfig, ChannelHandler } from "@mastra/core/channels";
 import { EntityType, SpanType } from "@mastra/core/observability";
 import { resolveSlackChannelMode } from "../../../../packages/adapters/src/config.ts";
+import { devRuntimeTunnelServerEnabled } from "../../../../packages/adapters/src/config.ts";
 import { conversationScope } from "../../../platform/context/conversation-scope.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../../../platform/context/schema.ts";
 import { config } from "../../runtime.ts";
 import { traceQaseyOperation } from "./observability.ts";
-import { runQaseyTaskWorkflow } from "../../workflows/qasey-task-workflow.ts";
+import { QaseyTaskOutputSchema, runQaseyTaskWorkflow } from "../../workflows/qasey-task-workflow.ts";
 import { logError, logInfo } from "../../../../packages/adapters/src/index.ts";
 import { slackCaseCompletionCards } from "./slack-case-delivery.ts";
 import {
@@ -15,6 +16,9 @@ import {
   showSlackStatus,
   SlackAgentStatusProjector,
 } from "./slack-progress.ts";
+import { DevRuntimeTunnelError, getDevRuntimeTunnelService } from "./dev-runtime-service.ts";
+import { slackTunnelApprovalCard, slackTunnelApprovalStatusCard } from "./slack-tunnel-delivery.ts";
+import type { QaseyAgentRuntimeEvent, QaseyResponse } from "./service.ts";
 
 type NativeMessage = Parameters<ChannelHandler>[1];
 type NativeThread = Parameters<ChannelHandler>[0];
@@ -44,6 +48,10 @@ export interface QaseySlackChannelOptions {
   tenantId?: string;
   /** Stable installation id used to isolate memory across Slack Apps. */
   installationId?: string;
+  /** Signed Slack team id used for local Runtime bindings. */
+  slackWorkspaceId?: string;
+  /** Installation-level opt-in for the testing Local Runtime tunnel. */
+  devRuntimeTunnelEnabled?: boolean;
 }
 
 /** Build one isolated Slack bot identity while sharing Qasey's domain behavior. */
@@ -60,6 +68,7 @@ export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions)
   const handler: ChannelHandler = async (thread, message, _defaultHandler, { requestContext, mastra }) => {
     if (!mastra) throw new Error("Mastra runtime is required for the Qasey Slack workflow");
     const tenantId = options.tenantId ?? slackTenantId(message);
+    const workspaceId = options.slackWorkspaceId ?? slackTenantId(message);
     const scope = scopeFor(thread, message, tenantId, options.installationId);
     requestContext.set("requestId", `slack:${message.id}`);
     requestContext.set("applicationId", "qasey");
@@ -142,56 +151,127 @@ export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions)
     );
     let outcome: "success" | "failure" = "failure";
     let requestError: unknown;
+    const tunnelAvailable = devRuntimeTunnelServerEnabled(config);
+    const tunnelEnabled = tunnelAvailable
+      && (!options.installationId || options.devRuntimeTunnelEnabled === true);
+    let executionSource = tunnelAvailable ? "testing-cloud" : undefined;
+    const tunnel = tunnelEnabled
+      ? getDevRuntimeTunnelService(mastra)
+      : undefined;
+    const pendingApprovalIds: string[] = [];
     try {
-      const result = await runQaseyTaskWorkflow(mastra, context, {
-        requestContext,
-        ...(slackRequestSpan ? { tracingContext: { currentSpan: slackRequestSpan } } : {}),
-        events: {
-          onPhase: async ({ runId, phase }) => {
-            logInfo("slack.request.phase", {
-              requestId: context.requestId,
-              runId,
-              phase,
-              elapsedMs: Date.now() - receivedAt,
-            });
+      const onPhase = async ({ runId, phase }: { runId: string; phase: "agent" | "workflow" | "finalizing" }) => {
+        logInfo("slack.request.phase", {
+          requestId: context.requestId,
+          runId,
+          phase,
+          elapsedMs: Date.now() - receivedAt,
+        });
+      };
+      const onToolStart = async ({ runId, toolName }: { runId: string; toolName: string }) => {
+        const first = firstToolAt === undefined;
+        firstToolAt ??= Date.now();
+        logInfo("slack.request.tool_started", {
+          requestId: context.requestId,
+          runId,
+          toolName,
+          elapsedMs: Date.now() - receivedAt,
+          first,
+        });
+      };
+      const onAgentRuntimeEvent = async (event: QaseyAgentRuntimeEvent) => {
+        await updateStatus(statusProjector.project(event));
+        logInfo("slack.request.agent_event", {
+          requestId: context.requestId,
+          runId: event.runId,
+          eventType: event.type,
+          step: event.step,
+          elapsedMs: Date.now() - receivedAt,
+        });
+      };
+      const onAgentProgress = async (report: {
+        runId?: string;
+        milestone: string;
+        title: string;
+        detail: string;
+        next?: string | undefined;
+        sequence: number;
+      }) => {
+        firstProgressAt ??= Date.now();
+        await thread.post({ markdown: `*${report.title}*\n${report.detail}${report.next ? `\n下一步：${report.next}` : ""}` });
+        logInfo("slack.request.progress_delivered", {
+          requestId: context.requestId,
+          milestone: report.milestone,
+          sequence: report.sequence,
+          elapsedMs: Date.now() - receivedAt,
+        });
+      };
+
+      const binding = tunnel ? await tunnel.bindingFor(workspaceId, message.author.userId) : undefined;
+      let result: QaseyResponse;
+      if (binding) {
+        executionSource = binding.runtimeId;
+        const jobId = crypto.randomUUID();
+        const deadlineAt = new Date(Date.now() + config.QASEY_AGENT_TIMEOUT_MS).toISOString();
+        result = QaseyTaskOutputSchema.parse(await tunnel!.runRemoteJob({
+          type: "job",
+          jobId,
+          runtimeId: binding.runtimeId,
+          deadlineAt,
+          context,
+          resourceId: scope.resourceId,
+          threadId: scope.threadId,
+          delivery: {
+            workspaceId,
+            ...(options.installationId ? { installationId: options.installationId } : {}),
           },
-          onToolStart: async ({ runId, toolName }) => {
-            const first = firstToolAt === undefined;
-            firstToolAt ??= Date.now();
-            logInfo("slack.request.tool_started", {
-              requestId: context.requestId,
-              runId,
-              toolName,
-              elapsedMs: Date.now() - receivedAt,
-              first,
+        }, {
+          onPhase: event => onPhase(event),
+          onToolStarted: event => onToolStart(event),
+          onAgentRuntimeEvent: event => onAgentRuntimeEvent(event.event),
+          onProgress: event => onAgentProgress(event.report),
+          onApprovalRequested: async event => {
+            const approval = await tunnel!.createApproval({
+              approvalId: event.approvalId,
+              jobId,
+              runtimeId: binding.runtimeId,
+              workspaceId,
+              slackUserId: message.author.userId,
+              toolName: event.toolName,
+              argsSummary: event.argsSummary,
+              argsHash: event.argsHash,
+              deadlineAt,
             });
+            const callbackUrl = new URL(`/v1/dev-runtime-approvals/${encodeURIComponent(event.approvalId)}`, config.QASEY_PUBLIC_BASE_URL);
+            callbackUrl.searchParams.set("token", approval.token);
+            const sent = await thread.post(slackTunnelApprovalCard({
+              toolName: event.toolName,
+              argsSummary: event.argsSummary,
+              callbackUrl: callbackUrl.toString(),
+              runtimeId: binding.runtimeId,
+            }));
+            await tunnel!.attachApprovalMessage(event.approvalId, thread.id, sent.id);
+            pendingApprovalIds.push(event.approvalId);
           },
-          onAgentRuntimeEvent: async event => {
-            await updateStatus(statusProjector.project(event));
-            logInfo("slack.request.agent_event", {
-              requestId: context.requestId,
-              runId: event.runId,
-              eventType: event.type,
-              step: event.step,
-              elapsedMs: Date.now() - receivedAt,
-            });
+        })) as QaseyResponse;
+      } else {
+        result = await runQaseyTaskWorkflow(mastra, context, {
+          requestContext,
+          ...(slackRequestSpan ? { tracingContext: { currentSpan: slackRequestSpan } } : {}),
+          events: {
+            onPhase,
+            onToolStart,
+            onAgentRuntimeEvent,
+            onAgentProgress,
           },
-          onAgentProgress: async report => {
-            firstProgressAt ??= Date.now();
-            await thread.post({ markdown: `*${report.title}*\n${report.detail}${report.next ? `\n下一步：${report.next}` : ""}` });
-            logInfo("slack.request.progress_delivered", {
-              requestId: context.requestId,
-              milestone: report.milestone,
-              sequence: report.sequence,
-              elapsedMs: Date.now() - receivedAt,
-            });
-          },
-        },
-      });
+        });
+      }
       const completionCards = slackCaseCompletionCards(result.completionReceipt, {
         baseUrl: config.METERSPHERE_BASE_URL,
         projectId: config.METERSPHERE_PROJECT_ID,
       });
+      const sourceFooter = executionSource ? `\n\n_运行环境：${executionSource}_` : "";
+      const finalText = `${result.text}${sourceFooter}`;
       await traceQaseyOperation(
         slackRequestSpan,
         "qasey slack final delivery",
@@ -200,24 +280,49 @@ export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions)
           if (completionCards.length > 0) {
             try {
               for (const card of completionCards) await thread.post(card);
+              if (sourceFooter) await thread.post({ markdown: sourceFooter.trim() });
             } catch (error) {
               logError("slack.case_table_delivery_failed", error, { requestId: context.requestId });
-              await thread.post({ markdown: result.text });
+              await thread.post({ markdown: finalText });
             }
           } else {
-            await thread.post({ markdown: result.text });
+            await thread.post({ markdown: finalText });
           }
         },
       );
       outcome = "success";
     } catch (error) {
       requestError = error;
-      const detail = config.NODE_ENV === "production" ? "请稍后重试，或联系维护者并提供当前消息链接。" : error instanceof Error ? error.message : String(error);
+      if (tunnel && pendingApprovalIds.length > 0) {
+        const status = error instanceof DevRuntimeTunnelError && error.code === "runtime_disconnected"
+          ? "runtime_disconnected" as const
+          : "expired" as const;
+        for (const approvalId of pendingApprovalIds) {
+          try {
+            const record = await tunnel.expireApproval(approvalId);
+            if (record?.threadId && record.messageId) {
+              await thread.adapter.editMessage(
+                record.threadId,
+                record.messageId,
+                slackTunnelApprovalStatusCard(record, status),
+              );
+            }
+          } catch (approvalError) {
+            logError("slack.tunnel_approval_finalize_failed", approvalError, { requestId: context.requestId, approvalId });
+          }
+        }
+      }
+      const detail = error instanceof DevRuntimeTunnelError
+        ? error.message
+        : config.NODE_ENV === "production"
+          ? "请稍后重试，或联系维护者并提供当前消息链接。"
+          : error instanceof Error ? error.message : String(error);
+      const sourceFooter = executionSource ? `\n运行环境：${executionSource}` : "";
       await traceQaseyOperation(
         slackRequestSpan,
         "qasey slack failure delivery",
         {},
-        () => thread.post(`Qasey 未能完成这次任务。${detail}`).then(() => undefined),
+        () => thread.post(`Qasey 未能完成这次任务。${detail}${sourceFooter}`).then(() => undefined),
       );
     } finally {
       await traceQaseyOperation(
@@ -229,6 +334,9 @@ export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions)
       const durationMs = Date.now() - receivedAt;
       logInfo("slack.request.finished", {
         requestId: context.requestId,
+        workspaceId,
+        slackUserId: message.author.userId,
+        executionSource,
         outcome,
         durationMs,
         timeToFirstToolMs: firstToolAt ? firstToolAt - receivedAt : undefined,

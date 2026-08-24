@@ -76,6 +76,7 @@ describe("managed Slack App repository", () => {
     });
 
     expect(JSON.stringify(created)).not.toContain("xoxb-secret");
+    expect(created.devRuntimeEnabled).toBe(false);
     expect(JSON.stringify(await repository.list("tenant-1"))).not.toContain("signing-secret-value");
     expect(await repository.get("tenant-2", created.id)).toBeUndefined();
     await expect(repository.getRuntimeByWebhookId(created.webhookId)).resolves.toMatchObject({
@@ -129,9 +130,21 @@ describe("Trigger provider registry", () => {
     const manager = new SlackIntegrationManager(repository, "https://qasey.example.com", [
       { applicationId: "qasey", agentId: "qasey-main", name: "Qasey" },
     ], verifier);
-    const registry = new TriggerProviderRegistry([new SlackTriggerProvider(manager)]);
+    const changed = vi.fn();
+    const registry = new TriggerProviderRegistry([new SlackTriggerProvider(manager, changed, {
+      slashCommand: {
+        command: "/qasey-local",
+        description: "绑定本地 Qasey Runtime",
+        usageHint: "bind <runtime-id> | unbind | status",
+        requiredScope: "commands",
+      },
+    })]);
 
-    expect(registry.listProviders()).toEqual([expect.objectContaining({ id: "slack", category: "channel" })]);
+    expect(registry.listProviders()).toEqual([expect.objectContaining({
+      id: "slack",
+      category: "channel",
+      fields: expect.arrayContaining([expect.objectContaining({ key: "devRuntimeEnabled", type: "boolean" })]),
+    })]);
     await expect(registry.targets("slack", "tenant-1")).resolves.toEqual([
       expect.objectContaining({ id: "agent:qasey-main", kind: "agent", resourceId: "qasey-main" }),
     ]);
@@ -139,11 +152,37 @@ describe("Trigger provider registry", () => {
     const created = await registry.create("slack", {
       tenantId: "tenant-1", actorId: "admin-1", displayName: "QA Slack",
       targetId: "agent:qasey-main",
-      configuration: { botToken: "xoxb-secret", signingSecret: "signing-secret-value" },
+      configuration: { botToken: "xoxb-secret", signingSecret: "signing-secret-value", devRuntimeEnabled: "true" },
     });
-    expect(created).toMatchObject({ providerId: "slack", target: { id: "agent:qasey-main" } });
+    expect(created).toMatchObject({
+      providerId: "slack",
+      target: { id: "agent:qasey-main" },
+      configurationValues: { devRuntimeEnabled: "true" },
+    });
+    expect(created.setupFields).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: "slash-command", value: "/qasey-local" }),
+      expect.objectContaining({ key: "slash-command-request-url", value: created.endpoint?.url }),
+      expect.objectContaining({ key: "slash-command-scope", value: "commands" }),
+    ]));
     expect(JSON.stringify(created)).not.toContain("xoxb-secret");
-    await expect(registry.listConnections("tenant-1")).resolves.toEqual([expect.objectContaining({ id: created.id })]);
+    const cloudOnly = await registry.updateConfiguration("slack", {
+      tenantId: "tenant-1",
+      actorId: "admin-1",
+      id: created.id,
+      revision: created.revision,
+      configuration: { devRuntimeEnabled: "false" },
+    });
+    expect(cloudOnly).toMatchObject({
+      id: created.id,
+      status: "awaiting_webhook",
+      configurationValues: { devRuntimeEnabled: "false" },
+    });
+    expect(cloudOnly.setupFields).toBeUndefined();
+    expect(changed).toHaveBeenCalledWith(created.id);
+    await expect(registry.listConnections("tenant-1")).resolves.toEqual([expect.objectContaining({
+      id: created.id,
+      configurationValues: { devRuntimeEnabled: "false" },
+    })]);
   });
 });
 
@@ -169,8 +208,10 @@ describe("managed Slack webhook provider", () => {
       const connection = await manager.create({
         tenantId: "tenant-1", actorId: "admin-1", displayName: "QA Slack", agentId: "qasey-main",
         credentials: { botToken: "xoxb-secret", signingSecret: "signing-secret-value" },
+        devRuntimeEnabled: true,
       });
-      const provider = new ManagedSlackProvider(manager);
+      const bridgeReady = vi.fn();
+      const provider = new ManagedSlackProvider(manager, { onBridgeReady: bridgeReady });
 
       try {
         new Mastra({
@@ -196,6 +237,13 @@ describe("managed Slack webhook provider", () => {
         expect(response.status).toBe(200);
         expect(await response.text()).toContain("challenge-value");
         expect((await repository.get("tenant-1", connection.id))?.status).toBe("active");
+        expect(bridgeReady).toHaveBeenCalledWith(expect.objectContaining({
+          installation: expect.objectContaining({
+            id: connection.id,
+            devRuntimeEnabled: true,
+            identity: expect.objectContaining({ teamId: identity.teamId }),
+          }),
+        }));
       } finally {
         await provider.close();
       }

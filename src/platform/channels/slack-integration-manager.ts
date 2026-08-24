@@ -123,6 +123,7 @@ export class SlackIntegrationManager {
     displayName: string;
     agentId: string;
     credentials: SlackAppCredentials;
+    devRuntimeEnabled?: boolean;
   }): Promise<SlackConnectionView> {
     this.assertTarget(input.agentId);
     assertCredentials(input.credentials);
@@ -133,6 +134,7 @@ export class SlackIntegrationManager {
       displayName: input.displayName.trim(),
       agentId: input.agentId,
       identity,
+      ...(input.devRuntimeEnabled !== undefined ? { devRuntimeEnabled: input.devRuntimeEnabled } : {}),
       ...input.credentials,
     }));
   }
@@ -143,6 +145,7 @@ export class SlackIntegrationManager {
     id: string;
     revision: number;
     credentials: SlackAppCredentials;
+    devRuntimeEnabled?: boolean;
   }): Promise<SlackConnectionView> {
     assertCredentials(input.credentials);
     const identity = await this.verifier.verify(input.credentials.botToken);
@@ -152,6 +155,7 @@ export class SlackIntegrationManager {
       id: input.id,
       expectedRevision: input.revision,
       identity,
+      ...(input.devRuntimeEnabled !== undefined ? { devRuntimeEnabled: input.devRuntimeEnabled } : {}),
       ...input.credentials,
     }));
   }
@@ -159,6 +163,16 @@ export class SlackIntegrationManager {
   async rebind(input: { tenantId: string; actorId: string; id: string; revision: number; agentId: string }): Promise<SlackConnectionView> {
     this.assertTarget(input.agentId);
     return this.view(await this.repository.rebind(input.tenantId, input.id, input.agentId, input.revision, input.actorId));
+  }
+
+  async setDevRuntimeEnabled(input: { tenantId: string; actorId: string; id: string; revision: number; enabled: boolean }): Promise<SlackConnectionView> {
+    return this.view(await this.repository.setDevRuntimeEnabled(
+      input.tenantId,
+      input.id,
+      input.enabled,
+      input.revision,
+      input.actorId,
+    ));
   }
 
   async setEnabled(input: { tenantId: string; actorId: string; id: string; revision: number; enabled: boolean }): Promise<SlackConnectionView> {

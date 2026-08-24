@@ -15,6 +15,18 @@ import { OAuthPrincipalSchema } from "../../../platform/auth/oauth-principal.ts"
 import type { PlatformGoogleUser } from "../../../platform/auth/google-oidc.ts";
 import { runQaseyTaskWorkflow } from "../../workflows/qasey-task-workflow.ts";
 import { runtimeReadiness } from "../../../platform/storage/readiness.ts";
+import { devRuntimeTunnelServerEnabled } from "../../../../packages/adapters/src/config.ts";
+import {
+  bearerToken,
+  DEV_RUNTIME_HEARTBEAT_MS,
+  DevRuntimeApprovalCallbackSchema,
+  DevRuntimeClientEventSchema,
+  DevRuntimeIdSchema,
+  DevRuntimeInstanceIdSchema,
+  secureTokenMatches,
+} from "./dev-runtime-protocol.ts";
+import { DevRuntimeTunnelError, getDevRuntimeTunnelService } from "./dev-runtime-service.ts";
+import { slackTunnelApprovalDecisionCard } from "./slack-tunnel-delivery.ts";
 import {
   SandboxBrowserActionSchema, SandboxBrowserStartSchema, SandboxDesktopActionSchema,
   SandboxDesktopApplicationSchema, SandboxDesktopStartSchema, SandboxDesktopToolSchema,
@@ -49,6 +61,19 @@ function requireSandboxPool() {
   return sandboxPoolClient;
 }
 
+function tunnelAuthorized(authorization: string | undefined): boolean {
+  return devRuntimeTunnelServerEnabled(config)
+    && secureTokenMatches(bearerToken(authorization), config.QASEY_DEV_TUNNEL_TOKEN);
+}
+
+function tunnelErrorResponse(c: { json: (body: unknown, status?: any) => Response }, error: unknown) {
+  if (error instanceof DevRuntimeTunnelError) {
+    return c.json({ error: error.code, message: error.message }, error.status);
+  }
+  if (error instanceof z.ZodError) return c.json({ error: "validation_error", details: error.issues }, 400);
+  return c.json({ error: "dev_runtime_tunnel_failed", message: "The development runtime tunnel request failed" }, 500);
+}
+
 export const apiRoutes = [
   registerApiRoute("/healthz", { method: "GET", requiresAuth: false, handler: async c => c.json({ status: "ok", service: "qasey" }) }),
   registerApiRoute("/readyz", {
@@ -61,6 +86,111 @@ export const apiRoutes = [
         storage: config.DATABASE_URL ? "postgres" : "memory",
         dependencies: snapshot.dependencies,
       }, snapshot.ready ? 200 : 503);
+    },
+  }),
+  registerApiRoute("/v1/dev-runtimes/events", {
+    method: "GET",
+    requiresAuth: false,
+    handler: async c => {
+      if (!devRuntimeTunnelServerEnabled(config)) return c.json({ error: "not_found" }, 404);
+      if (!tunnelAuthorized(c.req.header("authorization"))) return c.json({ error: "unauthorized" }, 401);
+      try {
+        const runtimeId = DevRuntimeIdSchema.parse(c.req.query("runtimeId"));
+        const instanceId = DevRuntimeInstanceIdSchema.parse(c.req.query("instanceId"));
+        const encoder = new TextEncoder();
+        let closeConnection: (() => Promise<void>) | undefined;
+        let heartbeat: ReturnType<typeof setInterval> | undefined;
+        let closed = false;
+        const close = async () => {
+          if (closed) return;
+          closed = true;
+          if (heartbeat) clearInterval(heartbeat);
+          await closeConnection?.();
+        };
+        const body = new ReadableStream<Uint8Array>({
+          start: async controller => {
+            try {
+              closeConnection = await getDevRuntimeTunnelService(c.get("mastra")).openConnection({
+                runtimeId,
+                instanceId,
+                send: async event => {
+                  if (!closed) controller.enqueue(encoder.encode(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`));
+                },
+              });
+              heartbeat = setInterval(() => {
+                if (!closed) controller.enqueue(encoder.encode(`: heartbeat ${Date.now()}\n\n`));
+              }, DEV_RUNTIME_HEARTBEAT_MS);
+              heartbeat.unref?.();
+              c.req.raw.signal.addEventListener("abort", () => { void close(); }, { once: true });
+            } catch (error) {
+              controller.error(error);
+              await close();
+            }
+          },
+          cancel: close,
+        });
+        return new Response(body, {
+          headers: {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-cache, no-transform",
+            connection: "keep-alive",
+            "x-accel-buffering": "no",
+          },
+        });
+      } catch (error) {
+        return tunnelErrorResponse(c, error);
+      }
+    },
+  }),
+  registerApiRoute("/v1/dev-runtimes/:runtimeId/jobs/:jobId/events", {
+    method: "POST",
+    requiresAuth: false,
+    handler: async c => {
+      if (!devRuntimeTunnelServerEnabled(config)) return c.json({ error: "not_found" }, 404);
+      if (!tunnelAuthorized(c.req.header("authorization"))) return c.json({ error: "unauthorized" }, 401);
+      try {
+        const runtimeId = DevRuntimeIdSchema.parse(c.req.param("runtimeId"));
+        const instanceId = DevRuntimeInstanceIdSchema.parse(c.req.header("x-qasey-runtime-instance"));
+        const event = DevRuntimeClientEventSchema.parse(await c.req.json());
+        await getDevRuntimeTunnelService(c.get("mastra")).publishClientEvent({
+          runtimeId,
+          instanceId,
+          jobId: c.req.param("jobId"),
+          event,
+        });
+        return c.json({ accepted: true }, 202);
+      } catch (error) {
+        return tunnelErrorResponse(c, error);
+      }
+    },
+  }),
+  registerApiRoute("/v1/dev-runtime-approvals/:approvalId", {
+    method: "POST",
+    requiresAuth: false,
+    handler: async c => {
+      if (!devRuntimeTunnelServerEnabled(config)) return c.json({ error: "not_found" }, 404);
+      try {
+        const callback = DevRuntimeApprovalCallbackSchema.parse(await c.req.json());
+        const decision = callback.actionId === "qasey_local_approve" ? "approved" : "declined";
+        const record = await getDevRuntimeTunnelService(c.get("mastra")).decideApproval({
+          approvalId: c.req.param("approvalId"),
+          token: c.req.query("token") ?? "",
+          slackUserId: callback.user.id,
+          decision,
+        });
+        if (record.threadId && record.messageId) {
+          const sdk = c.get("mastra").getAgent("qasey-main").getChannels()?.sdk;
+          const thread = sdk?.thread(record.threadId);
+          if (thread) await thread.adapter.editMessage(
+            thread.id,
+            record.messageId,
+            slackTunnelApprovalDecisionCard(record, decision, callback.user.name),
+          );
+        }
+        return c.json({ accepted: true, decision });
+      } catch (error) {
+        return tunnelErrorResponse(c, error);
+      }
     },
   }),
   registerApiRoute("/webhooks/jira", {
@@ -359,6 +489,9 @@ export const apiRoutes = [
 const routePolicies: Record<string, { id: string; access: PrimitiveAccessPolicy; public?: boolean }> = {
   "GET /healthz": { id: "healthz", access: { permission: "platform.health.read", audiences: ["admin-ui", "api", "service", "channel"] }, public: true },
   "GET /readyz": { id: "readyz", access: { permission: "platform.health.read", audiences: ["admin-ui", "api", "service", "channel"] }, public: true },
+  "GET /v1/dev-runtimes/events": { id: "dev-runtime-events", access: { permission: "qasey.channel.receive", audiences: ["channel"] }, public: true },
+  "POST /v1/dev-runtimes/:runtimeId/jobs/:jobId/events": { id: "dev-runtime-job-events", access: { permission: "qasey.channel.receive", audiences: ["channel"] }, public: true },
+  "POST /v1/dev-runtime-approvals/:approvalId": { id: "dev-runtime-approval", access: { permission: "qasey.channel.receive", audiences: ["channel"] }, public: true },
   "POST /webhooks/jira": { id: "jira-webhook", access: { permission: "qasey.channel.receive", audiences: ["channel"] } },
   "POST /v1/qasey/tasks": { id: "qasey-task", access: { permission: "qasey.agent.execute", audiences: ["admin-ui", "api"] } },
   "GET /v1/runs": { id: "run-list", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },

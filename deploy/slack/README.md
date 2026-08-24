@@ -2,6 +2,8 @@
 
 `manifest.json` 是生产 HTTP Events API 配置。导入前确认 `qasey.devops.moego.pet` 已经路由到 Shared Mastra Runtime 的 `/studio/api/agents/qasey-main/channels/slack/webhook`；如果实际域名不同，同时替换 Events 和 Interactivity 两处 URL。签名校验、DM/mention、streaming、thread mapping、attachments 和 approval 均由 Mastra Channels 的 Slack adapter 处理，不再部署独立 Bolt receiver 或 queue worker。
 
+`manifest.testing.json` 仅用于 testing Slack App。它额外注册 `/qasey-local` 和 `commands` scope，所有 Request URL 指向 `qasey.t2.moego.dev`。应用该 manifest 后需要重新安装 testing App；不要把该 Slash Command 合并到生产 manifest。
+
 本地开发建议在 Slack App 设置中临时启用 Socket Mode，并创建带 `connections:write` 的 app-level token，配置：
 
 ```env

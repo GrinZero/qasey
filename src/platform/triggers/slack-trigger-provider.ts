@@ -9,7 +9,7 @@ import type {
 } from "./trigger-provider-registry.ts";
 import { TriggerProviderError } from "./trigger-provider-registry.ts";
 
-const manifest: TriggerProviderManifest = {
+const baseManifest: TriggerProviderManifest = {
   id: "slack",
   name: "Slack",
   description: "用 Slack 消息、提及和交互事件触发 Agent。",
@@ -26,13 +26,34 @@ const manifest: TriggerProviderManifest = {
   capabilities: { configurationUpdate: true, enableDisable: true, rebind: true, delete: true },
 };
 
+export interface SlackTriggerProviderOptions {
+  slashCommand?: {
+    command: string;
+    description: string;
+    usageHint: string;
+    requiredScope: string;
+  };
+}
+
 export class SlackTriggerProvider implements PlatformTriggerProvider {
-  readonly manifest = manifest;
+  readonly manifest: TriggerProviderManifest;
 
   constructor(
     private readonly integrations: SlackIntegrationManager,
     private readonly onChanged?: (installationId: string) => void,
-  ) {}
+    private readonly options: SlackTriggerProviderOptions = {},
+  ) {
+    this.manifest = this.options.slashCommand ? {
+      ...baseManifest,
+      fields: [...baseManifest.fields, {
+        key: "devRuntimeEnabled",
+        label: "启用本地 Runtime 开发隧道",
+        type: "boolean",
+        required: false,
+        help: "仅用于 testing。启用后，这个 Slack App 才会注册 /qasey-local 并按用户绑定路由到本地 Runtime。",
+      }],
+    } : baseManifest;
+  }
 
   async targets(_tenantId: string): Promise<readonly TriggerTarget[]> {
     return this.integrations.targets.map(target => ({
@@ -59,6 +80,9 @@ export class SlackTriggerProvider implements PlatformTriggerProvider {
       displayName: input.displayName,
       agentId: target.resourceId,
       credentials: credentials(input.configuration),
+      devRuntimeEnabled: this.options.slashCommand
+        ? booleanValue(input.configuration.devRuntimeEnabled)
+        : false,
     }));
     return this.connection(connection);
   }
@@ -67,10 +91,24 @@ export class SlackTriggerProvider implements PlatformTriggerProvider {
     tenantId: string; actorId: string; id: string; revision: number;
     configuration: Readonly<Record<string, string>>;
   }): Promise<TriggerConnection> {
-    const connection = await translate(() => this.integrations.updateCredentials({
-      tenantId: input.tenantId, actorId: input.actorId, id: input.id, revision: input.revision,
-      credentials: credentials(input.configuration),
-    }));
+    const devRuntimeEnabled = optionalBooleanValue(input.configuration.devRuntimeEnabled);
+    const configuredCredentials = credentials(input.configuration);
+    const hasCredentialInput = Boolean(configuredCredentials.botToken || configuredCredentials.signingSecret);
+    const connection = await translate(() => this.options.slashCommand
+      && devRuntimeEnabled !== undefined
+      && !hasCredentialInput
+      ? this.integrations.setDevRuntimeEnabled({
+          tenantId: input.tenantId,
+          actorId: input.actorId,
+          id: input.id,
+          revision: input.revision,
+          enabled: devRuntimeEnabled,
+        })
+      : this.integrations.updateCredentials({
+          tenantId: input.tenantId, actorId: input.actorId, id: input.id, revision: input.revision,
+          credentials: configuredCredentials,
+          ...(this.options.slashCommand && devRuntimeEnabled !== undefined ? { devRuntimeEnabled } : {}),
+        }));
     this.onChanged?.(connection.id);
     return this.connection(connection);
   }
@@ -118,13 +156,16 @@ export class SlackTriggerProvider implements PlatformTriggerProvider {
           id: targetId(connection.agentId), applicationId: "unknown",
           kind: "agent", resourceId: connection.agentId, name: connection.agentId,
         };
-    const statusDetail = connection.status === "awaiting_webhook"
+    const localRuntimeDetail = this.options.slashCommand
+      ? ` 本地 Runtime 开发隧道已${connection.devRuntimeEnabled ? "启用" : "关闭"}。`
+      : "";
+    const statusDetail = (connection.status === "awaiting_webhook"
       ? "把 Webhook URL 填入 Slack，验证成功后自动启用。"
       : connection.status === "active"
         ? "Slack 事件会发送给当前绑定目标。"
         : connection.status === "disabled"
           ? "入口地址会保留，但新事件不会进入绑定目标。"
-          : "运行时连接失败，请检查配置或重新保存。";
+          : "运行时连接失败，请检查配置或重新保存。") + localRuntimeDetail;
     return {
       id: connection.id,
       providerId: this.manifest.id,
@@ -140,10 +181,24 @@ export class SlackTriggerProvider implements PlatformTriggerProvider {
         context: `${connection.identity.teamName ?? connection.identity.teamId} · ${connection.identity.appId}`,
       },
       endpoint: { label: "Event Subscriptions / Interactivity URL", url: connection.webhookUrl },
+      ...(this.options.slashCommand ? {
+        configurationValues: { devRuntimeEnabled: String(connection.devRuntimeEnabled) },
+      } : {}),
+      ...(this.options.slashCommand && connection.devRuntimeEnabled ? {
+        setupFields: [
+          { key: "slash-command", label: "Slash Command", value: this.options.slashCommand.command, copyable: true },
+          { key: "slash-command-request-url", label: "Request URL", value: connection.webhookUrl, copyable: true },
+          { key: "slash-command-description", label: "Short Description", value: this.options.slashCommand.description },
+          { key: "slash-command-usage-hint", label: "Usage Hint", value: this.options.slashCommand.usageHint, copyable: true },
+          { key: "slash-command-scope", label: "Required Bot Scope", value: this.options.slashCommand.requiredScope, copyable: true },
+        ],
+      } : {}),
       ...(connection.status === "awaiting_webhook" ? {
         guidance: {
           title: "等待 Slack 验证",
-          body: "在 Slack App 设置中启用 Event Subscriptions；同一个 URL 也用于 Interactivity。",
+          body: this.options.slashCommand && connection.devRuntimeEnabled
+            ? "启用 Event Subscriptions；同一个入口也用于 Interactivity 和 Slash Command。"
+            : "在 Slack App 设置中启用 Event Subscriptions；同一个 URL 也用于 Interactivity。",
           codes: ["app_mention", "message.im"],
         },
       } : {}),
@@ -161,6 +216,15 @@ function credentials(configuration: Readonly<Record<string, string>>) {
     botToken: configuration.botToken?.trim() ?? "",
     signingSecret: configuration.signingSecret?.trim() ?? "",
   };
+}
+
+function optionalBooleanValue(value: string | undefined): boolean | undefined {
+  if (value === undefined) return undefined;
+  return booleanValue(value);
+}
+
+function booleanValue(value: string | undefined): boolean {
+  return value?.trim().toLowerCase() === "true";
 }
 
 async function translate<T>(operation: () => Promise<T>): Promise<T> {

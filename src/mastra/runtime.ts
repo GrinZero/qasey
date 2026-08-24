@@ -29,6 +29,7 @@ import { InMemoryChannelDeliveryInbox, PostgresChannelDeliveryInbox } from "../p
 import { runtimeReadiness } from "../platform/storage/readiness.ts";
 import { InMemorySandboxLeaseStore, PostgresSandboxLeaseStore } from "../platform/workspace/sandbox-lease-store.ts";
 import { SandboxPoolClient } from "../platform/workspace/sandbox-client.ts";
+import { applyDevRuntimeApprovalGate } from "./applications/qasey/dev-runtime-approval-gate.ts";
 
 const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
 const resolveProjectPath = (value: string) => isAbsolute(value) ? value : resolve(projectRoot, value);
@@ -399,7 +400,10 @@ export async function toolsForRequest(requestContext?: RequestContext<any>) {
   // qasey-main may discover case mutation tools for dry-run planning, but the
   // deterministic MeterSphere workflow is the only owner of real writes.
   const ownershipScopedExternal = guardCaseMutationsForWorkflow(external);
-  return { getCurrentTime, ...progressTool, ...readTools, ...ownershipScopedExternal, ...executionTools };
+  return applyDevRuntimeApprovalGate(
+    { getCurrentTime, ...progressTool, ...readTools, ...ownershipScopedExternal, ...executionTools },
+    requestContext,
+  );
 }
 
 /**

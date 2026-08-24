@@ -1,0 +1,91 @@
+{
+  "display_information": {
+    "name": "Qasey Testing",
+    "description": "The new QA colleague (testing)",
+    "background_color": "#845ce0"
+  },
+  "features": {
+    "app_home": {
+      "home_tab_enabled": false,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
+    "bot_user": {
+      "display_name": "Qasey Testing",
+      "always_online": true
+    },
+    "slash_commands": [
+      {
+        "command": "/qasey-local",
+        "description": "Bind this Slack user to a local Qasey runtime",
+        "usage_hint": "bind <runtime-id> | unbind | status",
+        "should_escape": false,
+        "url": "https://qasey.t2.moego.dev/studio/api/agents/qasey-main/channels/slack/webhook"
+      }
+    ],
+    "agent_view": {
+      "agent_description": "Qasey 是你的 AI QA 同事，可以分析 Jira 和飞书需求、评审 GitHub PR、理解 Figma 设计、设计或维护 MeterSphere 测试用例，并生成和验证 Playwright 或 Maestro E2E。",
+      "suggested_prompts": [
+        {
+          "title": "分析需求",
+          "message": "我要分析一个需求。请先让我提供需求链接，然后帮我整理测试范围、风险点和需要澄清的问题。"
+        },
+        {
+          "title": "设计测试用例",
+          "message": "请根据我接下来提供的需求设计测试用例，覆盖主流程、异常流程、边界条件和权限场景。"
+        },
+        {
+          "title": "评审 PR",
+          "message": "我要评审一个 GitHub PR。请先让我提供 PR 链接，然后分析代码变更、测试影响和建议的回归范围。"
+        },
+        {
+          "title": "生成 E2E",
+          "message": "请根据已经验收的测试用例生成 E2E。Web 使用 Playwright，App 使用 Maestro。"
+        }
+      ]
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "user": ["search:read"],
+      "bot": [
+        "app_mentions:read",
+        "assistant:write",
+        "channels:history",
+        "channels:read",
+        "chat:write",
+        "chat:write.public",
+        "commands",
+        "files:read",
+        "files:write",
+        "groups:history",
+        "groups:read",
+        "im:history",
+        "im:read",
+        "im:write",
+        "mpim:history",
+        "mpim:read",
+        "mpim:write",
+        "reactions:write",
+        "users.profile:read",
+        "users:read",
+        "users:read.email"
+      ]
+    },
+    "pkce_enabled": false
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://qasey.t2.moego.dev/studio/api/agents/qasey-main/channels/slack/webhook",
+      "bot_events": ["app_mention", "app_home_opened", "message.im"]
+    },
+    "interactivity": {
+      "is_enabled": true,
+      "request_url": "https://qasey.t2.moego.dev/studio/api/agents/qasey-main/channels/slack/webhook"
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false,
+    "is_mcp_enabled": false
+  }
+}

@@ -304,6 +304,13 @@ textarea::placeholder, input::placeholder { color: #a4aaba; }
 .webhook-field > label { color: #676e7f; font-size: 9px; font-weight: 700; }
 .webhook-field > div { display: grid; grid-template-columns: minmax(0, 1fr) 34px; gap: 7px; margin-top: 7px; }
 .webhook-field input { height: 34px; padding: 0 10px; color: #646b7c; font-family: "SFMono-Regular", Consolas, monospace; font-size: 9px; }
+.setup-fields { margin-top: 14px; padding: 13px; border: 1px solid #e7e8ef; border-radius: 10px; background: #fafbfc; }
+.setup-fields > strong { color: #555d6e; font-size: 9px; }
+.setup-fields > div { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
+.setup-fields label { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.setup-fields label > span { color: #858c9d; font-size: 8px; font-weight: 700; }
+.setup-fields label > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+.setup-fields input { min-width: 0; height: 32px; padding: 0 9px; color: #646b7c; font-family: "SFMono-Regular", Consolas, monospace; font-size: 8px; }
 .webhook-guide { display: flex; align-items: flex-start; gap: 10px; margin-top: 12px; padding: 11px 13px; border-left: 3px solid #d69a4d; border-radius: 0 8px 8px 0; color: #75502d; background: #fff9ef; }
 .webhook-guide strong { flex: 0 0 auto; font-size: 9px; }
 .webhook-guide span { color: #8a6b4e; font-size: 9px; line-height: 1.5; }
@@ -320,6 +327,11 @@ textarea::placeholder, input::placeholder { color: #a4aaba; }
 .integration-dialog::backdrop { background: rgb(25 32 51 / 42%); backdrop-filter: blur(3px); }
 .integration-dialog > label, .integration-form-row label { display: flex; flex-direction: column; gap: 7px; margin-top: 17px; color: #555c6d; font-size: 10px; font-weight: 650; }
 .integration-dialog input, .integration-dialog select { height: 40px; padding: 0 12px; font-size: 11px; }
+.integration-dialog .trigger-checkbox { min-height: 58px; flex-direction: row; align-items: center; gap: 11px; padding: 10px 12px; border: 1px solid #dddff0; border-radius: 10px; background: #faf9ff; }
+.trigger-checkbox input { width: 17px; height: 17px; flex: 0 0 auto; accent-color: var(--indigo); }
+.trigger-checkbox > span { display: flex; flex-direction: column; gap: 4px; }
+.trigger-checkbox strong { color: #4b5263; font-size: 10px; }
+.trigger-checkbox small { color: #7f8697; font-size: 8px; font-weight: 400; line-height: 1.5; }
 .integration-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
 .credential-note { display: flex; align-items: flex-start; gap: 9px; margin-top: 18px; padding: 11px 12px; border: 1px solid #dbeae6; border-radius: 9px; color: var(--teal); background: #f3f9f7; }
 .credential-note svg { flex: 0 0 auto; }
@@ -338,6 +350,7 @@ textarea::placeholder, input::placeholder { color: #a4aaba; }
   .integration-status-detail { margin-left: 0; }
   .binding-lane { grid-template-columns: 1fr; gap: 9px; }
   .binding-lane > svg { transform: rotate(90deg); }
+  .setup-fields > div { grid-template-columns: 1fr; }
   .integration-form-row { grid-template-columns: 1fr; }
   .integration-card > footer { align-items: flex-start; flex-direction: column; padding-top: 9px; }
 }

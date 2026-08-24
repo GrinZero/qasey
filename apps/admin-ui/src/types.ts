@@ -94,7 +94,7 @@ export type TriggerConnectionStatus = "awaiting_webhook" | "active" | "disabled"
 export interface TriggerConfigurationField {
   key: string;
   label: string;
-  type: "text" | "secret";
+  type: "text" | "secret" | "boolean";
   required: boolean;
   placeholder?: string;
   help?: string;
@@ -135,6 +135,8 @@ export interface TriggerConnection {
   target: TriggerTarget;
   identity?: { label: string; value: string; context?: string };
   endpoint?: { label: string; url: string };
+  setupFields?: { key: string; label: string; value: string; copyable?: boolean }[];
+  configurationValues?: Record<string, string>;
   guidance?: { title: string; body: string; codes?: string[] };
   lastVerifiedAt?: string;
   createdAt: string;

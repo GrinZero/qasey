@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS platform_slack_app_installations (
   slack_bot_user_id text NOT NULL,
   slack_bot_id text,
   is_enterprise_install boolean NOT NULL DEFAULT false,
+  dev_runtime_enabled boolean NOT NULL DEFAULT false,
   bot_token_ciphertext text NOT NULL,
   signing_secret_ciphertext text NOT NULL,
   credential_key_id text NOT NULL,
@@ -83,6 +84,8 @@ CREATE TABLE IF NOT EXISTS platform_slack_app_installations (
   updated_at timestamptz NOT NULL DEFAULT now(),
   deleted_at timestamptz
 );
+ALTER TABLE platform_slack_app_installations
+  ADD COLUMN IF NOT EXISTS dev_runtime_enabled boolean NOT NULL DEFAULT false;
 CREATE UNIQUE INDEX IF NOT EXISTS platform_slack_installation_identity_idx
   ON platform_slack_app_installations(slack_app_id, slack_team_id) WHERE deleted_at IS NULL;
 CREATE TABLE IF NOT EXISTS platform_trigger_bindings (
