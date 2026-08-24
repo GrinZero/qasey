@@ -104,7 +104,7 @@ describe("shared runtime configuration", () => {
     expect(config.OBSERVABILITY_DATABASE_URL).toContain("moego_qasey_observability");
   });
 
-  it("reuses the production application database for Editor storage by default", () => {
+  it("leaves production Editor storage on the composite default store", () => {
     const config = loadConfig({
       NODE_ENV: "production",
       ...productionAuth,
@@ -112,7 +112,7 @@ describe("shared runtime configuration", () => {
       OBSERVABILITY_DATABASE_URL: "postgresql://observability.example/moego_qasey_observability",
     } as NodeJS.ProcessEnv);
 
-    expect(config.EDITOR_DATABASE_URL).toBe(config.DATABASE_URL);
+    expect(config.EDITOR_DATABASE_URL).toBeUndefined();
   });
 
   it("requires complete GitHub App installation authentication", () => {

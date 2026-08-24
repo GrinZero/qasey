@@ -42,7 +42,7 @@ describe("split PostgreSQL configuration", () => {
       REDIS_TLS: "true",
     });
     expect(config.DATABASE_URL).toContain("/moego_qasey");
-    expect(config.EDITOR_DATABASE_URL).toBe(config.DATABASE_URL);
+    expect(config.EDITOR_DATABASE_URL).toBeUndefined();
     expect(config.OBSERVABILITY_DATABASE_URL).toContain("/moego_qasey_observability");
   });
 

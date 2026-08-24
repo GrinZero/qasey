@@ -24,9 +24,6 @@ export function createCompositeStore(options: CompositeStoreOptions): CompositeS
   if (options.environment === "production" && !options.observabilityDatabaseUrl) {
     throw new Error("observabilityDatabaseUrl is required in production");
   }
-  if (options.environment === "production" && options.editorEnabled && !options.editorDatabaseUrl) {
-    throw new Error("editorDatabaseUrl is required when the editor is enabled in production");
-  }
   const primary = options.databaseUrl
     ? new PostgresStore({
         id: "shared-mastra-primary",
@@ -41,7 +38,12 @@ export function createCompositeStore(options: CompositeStoreOptions): CompositeS
           connectionString: options.editorDatabaseUrl,
           ...(options.disableInit === undefined ? {} : { disableInit: options.disableInit }),
         })
-      : new FilesystemStore({ dir: resolve(options.projectRoot, ".qasey/mastra-editor") })
+      // In production, Editor-owned domains deliberately fall back to the
+      // default PostgresStore. This is MastraCompositeStore's native routing
+      // model and avoids opening a duplicate pool to the same database.
+      : options.environment === "production"
+        ? undefined
+        : new FilesystemStore({ dir: resolve(options.projectRoot, ".qasey/mastra-editor") })
     : undefined;
   const observability = options.observabilityDatabaseUrl
     ? new ObservabilityStoragePostgresVNext({ connectionString: options.observabilityDatabaseUrl })
@@ -62,4 +64,3 @@ export function createCompositeStore(options: CompositeStoreOptions): CompositeS
     ...(primary ? { primary } : {}),
   };
 }
-
