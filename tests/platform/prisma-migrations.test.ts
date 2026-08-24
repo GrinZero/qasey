@@ -14,6 +14,14 @@ async function typescriptFiles(root: string): Promise<string[]> {
 }
 
 describe("Prisma application database", () => {
+  it("loads the generated client with every runtime dependency available at the application root", async () => {
+    const packageJson = await readFile(join(projectRoot, "package.json"), "utf8")
+      .then(JSON.parse) as { dependencies: Record<string, string> };
+
+    expect(packageJson.dependencies["@prisma/client-runtime-utils"]).toBe(packageJson.dependencies["@prisma/client"]);
+    await expect(import("@prisma/client")).resolves.toBeDefined();
+  });
+
   it("declares every application-owned table in the Prisma schema and baseline migration", async () => {
     const [schema, migration] = await Promise.all([
       readFile(join(projectRoot, "prisma/schema.prisma"), "utf8"),

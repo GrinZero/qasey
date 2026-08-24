@@ -272,6 +272,9 @@ importers:
       '@prisma/client':
         specifier: 7.2.0
         version: 7.2.0(prisma@7.2.0(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(typescript@5.9.3))(typescript@5.9.3)
+      '@prisma/client-runtime-utils':
+        specifier: 7.2.0
+        version: 7.2.0
       '@slack/web-api':
         specifier: ^7.10.0
         version: 7.19.0(debug@4.4.3(supports-color@7.2.0))(supports-color@7.2.0)
