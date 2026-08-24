@@ -1,13 +1,17 @@
 import { createHmac } from "node:crypto";
 import { Agent } from "@mastra/core/agent";
 import { Mastra } from "@mastra/core/mastra";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { decryptSlackCredential, encryptSlackCredential } from "../../src/platform/channels/slack-credentials.ts";
 import {
   InMemorySlackInstallationRepository,
   SlackInstallationRepositoryError,
 } from "../../src/platform/channels/slack-installation-repository.ts";
-import { SlackIntegrationManager, type SlackTokenVerifier } from "../../src/platform/channels/slack-integration-manager.ts";
+import {
+  SlackIntegrationManager,
+  SlackWebApiTokenVerifier,
+  type SlackTokenVerifier,
+} from "../../src/platform/channels/slack-integration-manager.ts";
 import { TriggerProviderRegistry } from "../../src/platform/triggers/trigger-provider-registry.ts";
 import { SlackTriggerProvider } from "../../src/platform/triggers/slack-trigger-provider.ts";
 
@@ -30,6 +34,36 @@ describe("managed Slack App credentials", () => {
     expect(decryptSlackCredential(encrypted, encryptionKey, context)).toBe("xoxb-secret");
     expect(() => decryptSlackCredential(encrypted, encryptionKey, { ...context, tenantId: "tenant-2" })).toThrow();
     expect(() => decryptSlackCredential(encrypted, encryptionKey, { ...context, field: "signing-secret" })).toThrow();
+  });
+});
+
+describe("Slack Web API token verifier", () => {
+  it("resolves the App identity through bots.info when auth.test omits app_id", async () => {
+    const authTest = vi.fn(async () => ({
+      ok: true,
+      team: "MoeGo QA",
+      team_id: "T123",
+      user_id: "U123",
+      bot_id: "B123",
+    }));
+    const botsInfo = vi.fn(async () => ({
+      ok: true,
+      bot: { app_id: "A123", name: "Qasey" },
+    }));
+    const verifier = new SlackWebApiTokenVerifier(() => ({
+      auth: { test: authTest },
+      bots: { info: botsInfo },
+    }));
+
+    await expect(verifier.verify("xoxb-test-token")).resolves.toEqual({
+      appId: "A123",
+      appName: "Qasey",
+      teamId: "T123",
+      teamName: "MoeGo QA",
+      botUserId: "U123",
+      botId: "B123",
+    });
+    expect(botsInfo).toHaveBeenCalledWith({ bot: "B123", team_id: "T123" });
   });
 });
 

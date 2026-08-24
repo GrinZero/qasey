@@ -24,17 +24,56 @@ export interface SlackTokenVerifier {
   verify(botToken: string): Promise<SlackInstallationIdentity>;
 }
 
+interface SlackIdentityWebClient {
+  auth: {
+    test(): Promise<{
+      ok?: boolean;
+      app_id?: string;
+      app_name?: string;
+      bot_id?: string;
+      is_enterprise_install?: boolean;
+      team?: string;
+      team_id?: string;
+      user_id?: string;
+    }>;
+  };
+  bots: {
+    info(input: { bot: string; team_id: string }): Promise<{
+      ok?: boolean;
+      bot?: { app_id?: string; name?: string };
+    }>;
+  };
+}
+
 export class SlackWebApiTokenVerifier implements SlackTokenVerifier {
+  constructor(
+    private readonly createClient: (botToken: string) => SlackIdentityWebClient = botToken =>
+      new WebClient(botToken, { retryConfig: { retries: 1 }, timeout: 10_000 }),
+  ) {}
+
   async verify(botToken: string): Promise<SlackInstallationIdentity> {
     if (!botToken.startsWith("xoxb-")) throw new SlackIntegrationError("invalid_credentials", "请输入 Bot User OAuth Token（xoxb-…）。");
     try {
-      const response = await new WebClient(botToken, { retryConfig: { retries: 1 }, timeout: 10_000 }).auth.test();
-      if (!response.ok || !response.app_id || !response.team_id || !response.user_id) {
+      const client = this.createClient(botToken);
+      const response = await client.auth.test();
+      if (!response.ok || !response.team_id || !response.user_id) {
         throw new SlackIntegrationError("invalid_credentials", "Slack 未返回完整的 App、Workspace 和 Bot 身份。");
       }
-      const appName = response.url ? hostLabel(response.url) : undefined;
+      let appId = response.app_id;
+      let appName = response.app_name;
+      if (!appId) {
+        if (!response.bot_id) {
+          throw new SlackIntegrationError("invalid_credentials", "Slack 未返回完整的 App、Workspace 和 Bot 身份。");
+        }
+        const botResponse = await client.bots.info({ bot: response.bot_id, team_id: response.team_id });
+        if (!botResponse.ok || !botResponse.bot?.app_id) {
+          throw new SlackIntegrationError("invalid_credentials", "Slack 未返回完整的 App、Workspace 和 Bot 身份。");
+        }
+        appId = botResponse.bot.app_id;
+        appName ??= botResponse.bot.name;
+      }
       return {
-        appId: response.app_id,
+        appId,
         ...(appName ? { appName } : {}),
         teamId: response.team_id,
         ...(response.team ? { teamName: response.team } : {}),
@@ -149,8 +188,4 @@ function assertCredentials(credentials: SlackAppCredentials): void {
   if (credentials.signingSecret.trim().length < 16) {
     throw new SlackIntegrationError("invalid_credentials", "Signing Secret 格式不正确。");
   }
-}
-
-function hostLabel(url: string): string | undefined {
-  try { return new URL(url).hostname.split(".")[0] || undefined; } catch { return undefined; }
 }
