@@ -84,6 +84,8 @@ describe("shared runtime architecture boundaries", () => {
     ]);
     expect(packageJson.scripts.build).toContain("mastra build --dir src/mastra --studio");
     expect(mastraSource).toContain("studioUiEnabled: true");
+    expect(runtimeScript).toContain('MASTRA_AUTO_DETECT_URL="${MASTRA_AUTO_DETECT_URL:-true}"');
+    expect(runtimeScript).toContain("export PORT MASTRA_AUTO_DETECT_URL");
     expect(packageJson.scripts.build).toContain("mastra worker build --dir src/mastra --output-dir .mastra/worker");
     expect(runtimeScript).toContain("exec node .mastra/worker/index.mjs");
     await expect(access(join(projectRoot, "src/mastra/worker-entry.ts"))).rejects.toMatchObject({ code: "ENOENT" });

@@ -8,7 +8,11 @@ case "${1:-api}" in
     else
       PORT=4111
     fi
-    export PORT
+    # Studio is served behind the same public origin as its API. Default to
+    # browser-origin discovery so first-time visitors are not sent to the
+    # container-local host and port configuration screen.
+    MASTRA_AUTO_DETECT_URL="${MASTRA_AUTO_DETECT_URL:-true}"
+    export PORT MASTRA_AUTO_DETECT_URL
     exec node .mastra/output/index.mjs
     ;;
   worker)
