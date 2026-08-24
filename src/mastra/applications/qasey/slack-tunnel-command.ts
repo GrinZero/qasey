@@ -23,10 +23,24 @@ export async function registerQaseySlackTunnelCommand(
   suppliedChannels?: AgentChannels,
 ): Promise<void> {
   if (!devRuntimeTunnelServerEnabled(config)) return;
-  const channels = suppliedChannels ?? mastra.getAgent("qasey-main").getChannels();
-  // A provider-managed Slack App may be the only Slack ingress. In that case
-  // the bridge callback will register the command when the installation loads.
-  if (!channels) return;
+  // File-based agents are injected by Mastra's generated entry only after this
+  // source entry has finished evaluating. Do not call getAgent() synchronously
+  // here: a top-level caller would prevent the generated entry from ever
+  // reaching __registerFsAgents().
+  let channels = suppliedChannels;
+  for (let attempt = 0; !channels && attempt < 200; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+    const agent = mastra.listAgents()["qasey-main"];
+    channels = agent?.getChannels() ?? undefined;
+  }
+  if (!channels) {
+    if (!mastra.listAgents()["qasey-main"]) {
+      throw new Error("qasey-main did not register in time for /qasey-local");
+    }
+    // A provider-managed Slack App may be the only Slack ingress. In that case
+    // the bridge callback will register the command when the installation loads.
+    return;
+  }
   if (registered.has(channels)) return;
   let sdk = channels.sdk;
   for (let attempt = 0; !sdk && attempt < 200; attempt += 1) {

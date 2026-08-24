@@ -330,7 +330,17 @@ export const mastra = new Mastra({
     ],
   },
 });
-await registerQaseySlackTunnelCommand(mastra);
+// Mastra's generated entry registers file-based agents after this module has
+// evaluated. Start registration without a top-level await so qasey-main can be
+// injected, and expose failures through readiness instead of crashing during
+// module evaluation with MASTRA_GET_AGENT_BY_NAME_NOT_FOUND.
+const qaseySlackTunnelCommandRegistration = registerQaseySlackTunnelCommand(mastra);
+if (devRuntimeTunnelServerEnabled(config)) {
+  runtimeReadiness.register("slack-tunnel-command", () => qaseySlackTunnelCommandRegistration);
+  void qaseySlackTunnelCommandRegistration.catch(error => {
+    mastra.getLogger().error("Failed to register /qasey-local", error);
+  });
+}
 const devRuntimeTunnelClient = startDevRuntimeTunnelClient(mastra, config);
 if (devRuntimeTunnelClient) lifecycle.own({ close: () => devRuntimeTunnelClient.close() });
 export const applicationCatalog = sharedRuntime.catalog;

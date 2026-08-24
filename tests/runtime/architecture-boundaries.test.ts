@@ -32,13 +32,18 @@ describe("shared runtime architecture boundaries", () => {
   });
 
   it("uses Mastra file discovery as the only Qasey Agent registration source", async () => {
-    const [applicationSource, runtimeSource, serviceSource] = await Promise.all([
+    const [applicationSource, runtimeSource, serviceSource, slackTunnelSource] = await Promise.all([
       readFile(join(projectRoot, "src/mastra/applications/qasey/application.ts"), "utf8"),
       readFile(join(projectRoot, "src/mastra/index.ts"), "utf8"),
       readFile(join(projectRoot, "src/mastra/applications/qasey/service.ts"), "utf8"),
+      readFile(join(projectRoot, "src/mastra/applications/qasey/slack-tunnel-command.ts"), "utf8"),
     ]);
     expect(applicationSource).toContain('filesystemAgents: ["qasey-main"]');
     expect(runtimeSource).not.toMatch(/agents\/qasey-(?:main|intent-router)\/agent/u);
+    expect(runtimeSource).not.toContain("await registerQaseySlackTunnelCommand(mastra)");
+    expect(runtimeSource).toContain("runtimeReadiness.register(\"slack-tunnel-command\"");
+    expect(slackTunnelSource).toContain('mastra.listAgents()["qasey-main"]');
+    expect(slackTunnelSource).not.toContain('mastra.getAgent("qasey-main")');
     expect(serviceSource).toContain('mastra.getAgent("qasey-main")');
     expect(serviceSource).not.toContain('mastra.getAgent("qasey-intent-router")');
   });
