@@ -32,6 +32,7 @@ RUN pnpm build
 
 FROM mcr.microsoft.com/playwright:v1.62.1-noble AS runtime
 ENV NODE_ENV=production
+ENV PATH="/app/node_modules/.bin:${PATH}"
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     at-spi2-core \

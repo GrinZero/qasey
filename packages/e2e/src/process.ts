@@ -17,11 +17,17 @@ export interface CommandResult {
 
 export async function runSafeCommand(command: SafeCommand): Promise<CommandResult> {
   const started = Date.now();
+  const playwrightBrowsersPath = process.env.PLAYWRIGHT_BROWSERS_PATH?.trim();
   return await new Promise((resolve, reject) => {
     const child = spawn(command.executable, command.args, {
       cwd: command.cwd,
       shell: false,
-      env: { PATH: process.env.PATH ?? "", LANG: process.env.LANG ?? "C.UTF-8", ...command.env },
+      env: {
+        PATH: process.env.PATH ?? "",
+        LANG: process.env.LANG ?? "C.UTF-8",
+        ...(playwrightBrowsersPath ? { PLAYWRIGHT_BROWSERS_PATH: playwrightBrowsersPath } : {}),
+        ...command.env,
+      },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -37,4 +43,3 @@ export async function runSafeCommand(command: SafeCommand): Promise<CommandResul
     });
   });
 }
-

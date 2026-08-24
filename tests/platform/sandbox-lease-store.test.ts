@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { InMemorySandboxLeaseStore, SandboxCapacityError } from "../../src/platform/workspace/sandbox-lease-store.ts";
+import type { PrismaClient } from "@prisma/client";
+import { InMemorySandboxLeaseStore, PrismaSandboxLeaseStore, SandboxCapacityError } from "../../src/platform/workspace/sandbox-lease-store.ts";
 import { decryptSandboxSecret, encryptSandboxSecret } from "../../src/platform/workspace/sandbox-secrets.ts";
 
 describe("sandbox lease store", () => {
@@ -41,5 +42,48 @@ describe("sandbox lease store", () => {
     expect(encrypted).not.toContain("secret-token");
     expect(decryptSandboxSecret(encrypted, "master-key")).toBe("secret-token");
     expect(() => decryptSandboxSecret(encrypted, "wrong-key")).toThrow();
+  });
+
+  it("casts the PostgreSQL advisory lock result to a Prisma-supported type", async () => {
+    const lockQueries: string[] = [];
+    const tx = {
+      $queryRaw: async (strings: TemplateStringsArray) => {
+        const sql = strings.join("?");
+        if (sql.includes("pg_advisory_xact_lock")) {
+          lockQueries.push(sql);
+          if (!sql.includes("::text")) throw new Error("Failed to deserialize column of type 'void'");
+          return [{ lock: "" }];
+        }
+        return [];
+      },
+      qaseySandboxLease: {
+        updateMany: async () => ({ count: 0 }),
+        groupBy: async () => [],
+        upsert: async ({ create }: { create: Record<string, unknown> }) => ({
+          id: "lease-id",
+          ...create,
+          createdAt: new Date(),
+        }),
+      },
+    };
+    const prisma = {
+      $connect: async () => undefined,
+      $transaction: async (operation: (client: typeof tx) => unknown) => operation(tx),
+    } as unknown as PrismaClient;
+    const store = new PrismaSandboxLeaseStore(prisma, {
+      replicas: 1,
+      maxSessionsPerReplica: 1,
+      idleTtlMs: 60_000,
+      encryptionKey: "test-key",
+    });
+
+    await store.init();
+    await expect(store.acquire({ applicationId: "qasey", tenantId: "tenant", sessionId: "session" })).resolves.toMatchObject({
+      applicationId: "qasey",
+      tenantId: "tenant",
+      sessionId: "session",
+      ordinal: 0,
+    });
+    expect(lockQueries).toHaveLength(1);
   });
 });

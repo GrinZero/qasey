@@ -732,6 +732,7 @@ function sessionEnvironment(home: string, repository: {
   brokerToken: string;
   githubToken?: string;
 }): NodeJS.ProcessEnv {
+  const playwrightBrowsersPath = process.env.PLAYWRIGHT_BROWSERS_PATH?.trim();
   return {
     PATH: `${join(home, ".local", "bin")}:${join(home, ".npm-global", "bin")}:${process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin"}`,
     HOME: home,
@@ -745,6 +746,7 @@ function sessionEnvironment(home: string, repository: {
     QASEY_GH_BROKER_TOKEN: repository.brokerToken,
     GH_PROMPT_DISABLED: "1",
     GIT_TERMINAL_PROMPT: "0",
+    ...(playwrightBrowsersPath ? { PLAYWRIGHT_BROWSERS_PATH: playwrightBrowsersPath } : {}),
     ...(repository.githubToken ? {
       GH_TOKEN: repository.githubToken,
       GITHUB_TOKEN: repository.githubToken,

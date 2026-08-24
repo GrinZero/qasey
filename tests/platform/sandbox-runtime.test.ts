@@ -1,14 +1,17 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { InMemorySandboxLeaseStore } from "../../src/platform/workspace/sandbox-lease-store.ts";
 import { SandboxPoolClient } from "../../src/platform/workspace/sandbox-client.ts";
 import { SandboxRepositoryCloneSchema } from "../../src/platform/workspace/sandbox-protocol.ts";
 import { QaseySandboxRuntime } from "../../src/sandbox/runtime.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => { await Promise.allSettled(cleanups.splice(0).map(cleanup => cleanup())); });
+afterEach(async () => {
+  vi.unstubAllEnvs();
+  await Promise.allSettled(cleanups.splice(0).map(cleanup => cleanup()));
+});
 
 describe("sandbox runtime protocol", () => {
   it("rejects repository dot segments before resolving a clone destination", () => {
@@ -17,6 +20,7 @@ describe("sandbox runtime protocol", () => {
   });
 
   it("persists contained files and executes commands for an authenticated session", async () => {
+    vi.stubEnv("PLAYWRIGHT_BROWSERS_PATH", "/ms-playwright");
     const dataRoot = await mkdtemp(join(tmpdir(), "qasey-sandbox-runtime-"));
     const runtime = new QaseySandboxRuntime({ dataRoot, port: 0, host: "127.0.0.1", maxSessions: 2, idleTtlMs: 60_000, isolation: "none", commandTimeoutMs: 10_000, workspaceRetentionMs: 7 * 24 * 60 * 60_000 });
     const server = await runtime.start();
@@ -38,6 +42,10 @@ describe("sandbox runtime protocol", () => {
     await sandbox.start();
     await expect(sandbox.executeCommand?.("sh", ["-c", "printf command-ok"])).resolves.toMatchObject({ exitCode: 0, stdout: "command-ok" });
     await expect(sandbox.executeCommand?.("sh", ["-c", "test -n \"$GH_TOKEN\" && test -n \"$GIT_CONFIG_VALUE_0\""])).resolves.toMatchObject({ exitCode: 0 });
+    await expect(sandbox.executeCommand?.("sh", ["-c", "printf %s \"$PLAYWRIGHT_BROWSERS_PATH\""])).resolves.toMatchObject({
+      exitCode: 0,
+      stdout: "/ms-playwright",
+    });
 
     const session = await pool.session(scope);
     await expect(session.claim()).resolves.toMatchObject({

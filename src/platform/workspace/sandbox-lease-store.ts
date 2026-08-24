@@ -129,7 +129,7 @@ export class PrismaSandboxLeaseStore implements SandboxLeaseStore {
   async acquire(scope: SandboxLeaseScope): Promise<SandboxLease> {
     await this.ready();
     return this.prisma.$transaction(async tx => {
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext('qasey-sandbox-capacity-v1'))`;
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext('qasey-sandbox-capacity-v1'))::text AS lock`;
       const cutoff = new Date(Date.now() - this.options.idleTtlMs);
       await tx.qaseySandboxLease.updateMany({
         where: { state: "active", lastActivityAt: { lte: cutoff } },
@@ -173,7 +173,7 @@ export class PrismaSandboxLeaseStore implements SandboxLeaseStore {
   async reassign(scope: SandboxLeaseScope, failedOrdinal: number): Promise<SandboxLease> {
     await this.ready();
     return this.prisma.$transaction(async tx => {
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext('qasey-sandbox-capacity-v1'))`;
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext('qasey-sandbox-capacity-v1'))::text AS lock`;
       const cutoff = new Date(Date.now() - this.options.idleTtlMs);
       await tx.qaseySandboxLease.updateMany({
         where: { state: "active", lastActivityAt: { lte: cutoff } },
