@@ -225,10 +225,29 @@ function apiTokenRoutes(options: {
   ];
 }
 
+const STUDIO_API_TOKEN_SCOPES = [
+  "platform.background-tasks.read",
+  "platform.catalog.read",
+  "platform.internal-workflow.read",
+  "platform.runtime.inspect",
+  "platform.schedules.read",
+] as const;
+
+const HIDDEN_API_TOKEN_SCOPES = new Set([
+  "qasey.task.execute",
+  "qasey.e2e.execute",
+  "qasey.case-workflow.execute",
+  "qasey.scorers.read",
+]);
+
 export function availableApiTokenScopes(catalog: readonly CatalogEntry[]): readonly string[] {
-  return [...new Set(catalog
-    .filter(entry => entry.audiences.includes("api") && !entry.permission.startsWith("platform."))
-    .map(entry => entry.permission))].sort();
+  return [...new Set([
+    ...STUDIO_API_TOKEN_SCOPES,
+    ...catalog
+      .filter(entry => entry.audiences.includes("api") && !entry.permission.startsWith("platform."))
+      .map(entry => entry.permission)
+      .filter(permission => !HIDDEN_API_TOKEN_SCOPES.has(permission)),
+  ])].sort();
 }
 
 function triggerRoutes(options: {

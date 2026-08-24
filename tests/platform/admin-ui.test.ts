@@ -90,12 +90,16 @@ describe("same-origin Admin UI", () => {
     expect(routes.map(route => `${route.route.method} ${route.route.path}`)).toContain("DELETE /admin/api/triggers/connections/:providerId/:id");
   });
 
-  it("exposes tenant API Token lifecycle routes and only API-safe application scopes", () => {
+  it("exposes tenant API Token lifecycle routes with read-only Studio scopes and filtered application scopes", () => {
     const app = createAdminUiApplication({
       publicBaseUrl: "https://runtime.test",
       applicationCatalog: [
         { applicationId: "qasey", resourceType: "route", resourceId: "read", permission: "qasey.runs.read", audiences: ["admin-ui", "api"] },
-        { applicationId: "qasey", resourceType: "workflow", resourceId: "worker", permission: "qasey.worker.execute", audiences: ["service"] },
+        { applicationId: "qasey", resourceType: "workflow", resourceId: "task", permission: "qasey.task.execute", audiences: ["api"] },
+        { applicationId: "qasey", resourceType: "workflow", resourceId: "e2e", permission: "qasey.e2e.execute", audiences: ["api"] },
+        { applicationId: "qasey", resourceType: "workflow", resourceId: "case", permission: "qasey.case-workflow.execute", audiences: ["api"] },
+        { applicationId: "qasey", resourceType: "scorer", resourceId: "quality", permission: "qasey.scorers.read", audiences: ["api"] },
+        { applicationId: "qasey", resourceType: "agent", resourceId: "main", permission: "qasey.agent.execute", audiences: ["api"] },
         { applicationId: "platform", resourceType: "route", resourceId: "manage", permission: "platform.runtime.manage", audiences: ["api"] },
       ],
       permissions: new PermissionService(new InMemoryPermissionStore()),
@@ -109,9 +113,21 @@ describe("same-origin Admin UI", () => {
     )).toBe(true);
     expect(availableApiTokenScopes(app.routes ? [
       { applicationId: "qasey", resourceType: "route", resourceId: "read", permission: "qasey.runs.read", audiences: ["admin-ui", "api"] },
-      { applicationId: "qasey", resourceType: "workflow", resourceId: "worker", permission: "qasey.worker.execute", audiences: ["service"] },
+      { applicationId: "qasey", resourceType: "workflow", resourceId: "task", permission: "qasey.task.execute", audiences: ["api"] },
+      { applicationId: "qasey", resourceType: "workflow", resourceId: "e2e", permission: "qasey.e2e.execute", audiences: ["api"] },
+      { applicationId: "qasey", resourceType: "workflow", resourceId: "case", permission: "qasey.case-workflow.execute", audiences: ["api"] },
+      { applicationId: "qasey", resourceType: "scorer", resourceId: "quality", permission: "qasey.scorers.read", audiences: ["api"] },
+      { applicationId: "qasey", resourceType: "agent", resourceId: "main", permission: "qasey.agent.execute", audiences: ["api"] },
       { applicationId: "platform", resourceType: "route", resourceId: "manage", permission: "platform.runtime.manage", audiences: ["api"] },
-    ] : [])).toEqual(["qasey.runs.read"]);
+    ] : [])).toEqual([
+      "platform.background-tasks.read",
+      "platform.catalog.read",
+      "platform.internal-workflow.read",
+      "platform.runtime.inspect",
+      "platform.schedules.read",
+      "qasey.agent.execute",
+      "qasey.runs.read",
+    ]);
   });
 
   it("creates and revokes an audited tenant API Token without returning its secret from the list", async () => {
@@ -130,17 +146,18 @@ describe("same-origin Admin UI", () => {
     if (!createRoute || !("handler" in createRoute)) throw new Error("api-token-create handler is missing");
     const request = new Request("https://runtime.test/admin/api/tokens", {
       method: "POST", headers: { origin: "https://runtime.test", "content-type": "application/json" },
-      body: JSON.stringify({ name: "CI runner", scopes: ["qasey.runs.read"] }),
+      body: JSON.stringify({ name: "Trace debugger", scopes: ["platform.runtime.inspect", "qasey.runs.read"] }),
     });
     const response = await (createRoute.handler as any)({
       req: { raw: request, json: () => request.clone().json() },
       get: (key: string) => key === "requestContext" ? requestContext : undefined,
       json: (body: unknown, status = 200) => Response.json(body, { status }),
     });
-    const created = await response.json() as { token: string; record: { id: string } };
+    const created = await response.json() as { token: string; record: { id: string; scopes: string[] } };
 
     expect(response.status).toBe(201);
     expect(created.token).toMatch(/^qsy_/u);
+    expect(created.record.scopes).toEqual(["platform.runtime.inspect", "qasey.runs.read"]);
     expect(await apiTokens.list("tenant-1")).toEqual([expect.not.objectContaining({ token: expect.anything() })]);
     expect(audit.records.at(-1)).toMatchObject({ resourceType: "api-token", action: "create", reason: "api_token_created" });
 

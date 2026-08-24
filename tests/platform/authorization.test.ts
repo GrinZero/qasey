@@ -100,6 +100,40 @@ describe("permission route coverage", () => {
     expect(studioLoginRedirect(request(asset))).toBeUndefined();
   });
 
+  it("lets API Tokens with platform.runtime.inspect read Studio observability traces", async () => {
+    const next = vi.fn(async () => undefined);
+    const middleware = createAuthorizationMiddleware({
+      catalog: entries,
+      permissions: new PermissionService(new InMemoryPermissionStore()),
+      audit: { write: vi.fn(async () => undefined) },
+      studioUiEnabled: true,
+      resolvePrincipal: () => OAuthPrincipalSchema.parse({
+        subjectId: "api-token:trace-debugger",
+        tenantId: "tenant-1",
+        roles: [],
+        audience: "api",
+        scopes: ["platform.runtime.inspect"],
+      }),
+    });
+    const raw = new Request("http://localhost:4111/studio/api/observability/traces");
+    const requestContext = new RequestContext();
+
+    await (middleware as Exclude<typeof middleware, { path: string }>)({
+      req: {
+        path: new URL(raw.url).pathname,
+        method: raw.method,
+        raw,
+        header: (name: string) => raw.headers.get(name) ?? undefined,
+      },
+      get: (key: string) => key === "requestContext" ? requestContext : undefined,
+      json: vi.fn(),
+    } as never, next);
+
+    expect(next).toHaveBeenCalledOnce();
+    expect(requestContext.get("applicationId")).toBe("platform");
+    expect(requestContext.get("ingressSource")).toBe("api");
+  });
+
   it("hydrates a verified session user before Mastra core auth populates request context", async () => {
     const values = new Map<string, unknown>();
     const requestContext = {
