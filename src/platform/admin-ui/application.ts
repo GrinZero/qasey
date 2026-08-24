@@ -10,6 +10,7 @@ import { loadAdminUiHtml } from "./shell.ts";
 import { TriggerProviderError, type TriggerProviderRegistry } from "../triggers/trigger-provider-registry.ts";
 
 export function createAdminUiApplication(options: {
+  publicBaseUrl: string;
   applicationCatalog: readonly CatalogEntry[];
   applications?: readonly { id: string; ui?: ApplicationUiManifest }[];
   permissions: PermissionService;
@@ -17,6 +18,7 @@ export function createAdminUiApplication(options: {
   googleOidc: GoogleOidcService;
   triggerProviders?: TriggerProviderRegistry;
 }): AgentApplicationBundle {
+  const trustedOrigin = new URL(options.publicBaseUrl).origin;
   const routes: OwnedApiRoute[] = [
     owned("shell", "platform.admin-ui.access", registerApiRoute("/admin", {
       method: "GET",
@@ -67,7 +69,8 @@ export function createAdminUiApplication(options: {
       method: "POST",
       requiresAuth: false,
       handler: async c => {
-        assertSameOrigin(c.req.raw);
+        const csrfFailure = rejectCrossOriginRequest(c, trustedOrigin);
+        if (csrfFailure) return csrfFailure;
         c.header("set-cookie", options.googleOidc.clearSessionCookie());
         c.header("cache-control", "no-store");
         return c.json({ success: true });
@@ -102,7 +105,8 @@ export function createAdminUiApplication(options: {
       return c.json({ records: await options.audit.list?.(principal.tenantId, 100) ?? [] });
     } })),
     owned("permission-grant", "platform.permissions.manage", registerApiRoute("/admin/api/permissions/grants", { method: "POST", handler: async c => {
-      assertSameOrigin(c.req.raw);
+      const csrfFailure = rejectCrossOriginRequest(c, trustedOrigin);
+      if (csrfFailure) return csrfFailure;
       const principal = OAuthPrincipalSchema.parse(c.get("requestContext").get("platform-principal"));
       const input = z.object({ role: z.string().min(1), permission: z.string().min(1) }).parse(await c.req.json());
       await options.permissions.grantRolePermission(principal.tenantId, input.role, input.permission);
@@ -112,7 +116,8 @@ export function createAdminUiApplication(options: {
       return c.json({ granted: true });
     } })),
     owned("permission-binding", "platform.permissions.manage", registerApiRoute("/admin/api/permissions/bindings", { method: "POST", handler: async c => {
-      assertSameOrigin(c.req.raw);
+      const csrfFailure = rejectCrossOriginRequest(c, trustedOrigin);
+      if (csrfFailure) return csrfFailure;
       const principal = OAuthPrincipalSchema.parse(c.get("requestContext").get("platform-principal"));
       const input = z.object({ subjectId: z.string().min(1), role: z.string().min(1) }).parse(await c.req.json());
       await options.permissions.bindSubjectRole(principal.tenantId, input.subjectId, input.role);
@@ -121,7 +126,11 @@ export function createAdminUiApplication(options: {
         action: "bind", decision: "allow", reason: "permission_mutation", metadata: { role: input.role } });
       return c.json({ bound: true });
     } })),
-    ...(options.triggerProviders ? triggerRoutes({ triggerProviders: options.triggerProviders, audit: options.audit }) : []),
+    ...(options.triggerProviders ? triggerRoutes({
+      triggerProviders: options.triggerProviders,
+      audit: options.audit,
+      trustedOrigin,
+    }) : []),
   ];
   return { id: "platform", agents: {}, workflows: {}, access: { agents: {}, workflows: {} }, routes };
 }
@@ -129,6 +138,7 @@ export function createAdminUiApplication(options: {
 function triggerRoutes(options: {
   triggerProviders: TriggerProviderRegistry;
   audit: AuditLog;
+  trustedOrigin: string;
 }): OwnedApiRoute[] {
   const configuration = z.record(z.string(), z.string());
   const revision = z.number().int().positive();
@@ -220,7 +230,7 @@ function adminPrincipal(c: { get(key: string): unknown }): OAuthPrincipal {
 
 async function triggerMutation(
   c: any,
-  options: { audit: AuditLog },
+  options: { audit: AuditLog; trustedOrigin: string },
   action: string,
   execute: (principal: OAuthPrincipal) => Promise<Record<string, unknown> & {
     connection?: { id: string; providerId: string; target?: { id: string } };
@@ -228,7 +238,8 @@ async function triggerMutation(
   }>,
 ): Promise<Response> {
   try {
-    assertSameOrigin(c.req.raw);
+    const csrfFailure = rejectCrossOriginRequest(c, options.trustedOrigin);
+    if (csrfFailure) return csrfFailure;
     const principal = adminPrincipal(c);
     const result = await execute(principal);
     const connection = result.connection;
@@ -285,7 +296,30 @@ function owned(id: string, permission: string, route: OwnedApiRoute["route"], pu
   return { id, route, access: { permission, audiences: ["admin-ui"] }, ...(publicRoute ? { public: true } : {}) };
 }
 
-export function assertSameOrigin(request: Request): void {
+class CsrfOriginError extends Error {
+  constructor() {
+    super("CSRF origin check failed");
+    this.name = "CsrfOriginError";
+  }
+}
+
+function rejectCrossOriginRequest(c: any, trustedOrigin: string): Response | undefined {
+  try {
+    assertSameOrigin(c.req.raw, trustedOrigin);
+    return undefined;
+  } catch (error) {
+    if (!(error instanceof CsrfOriginError)) throw error;
+    return c.json({ error: "forbidden", message: "请求来源验证失败。" }, 403);
+  }
+}
+
+export function assertSameOrigin(request: Request, trustedOrigin: string): void {
   const origin = request.headers.get("origin");
-  if (!origin || origin !== new URL(request.url).origin) throw new Error("CSRF origin check failed");
+  if (!origin) throw new CsrfOriginError();
+  try {
+    if (new URL(origin).origin !== new URL(trustedOrigin).origin) throw new CsrfOriginError();
+  } catch (error) {
+    if (error instanceof CsrfOriginError) throw error;
+    throw new CsrfOriginError();
+  }
 }

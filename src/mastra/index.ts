@@ -130,6 +130,7 @@ const qaseyApplication = createQaseyApplication({
 });
 const qaseyCatalog = flattenApplicationRegistry([qaseyApplication]).catalog;
 const adminUiApplication = createAdminUiApplication({
+  publicBaseUrl: config.QASEY_PUBLIC_BASE_URL,
   applicationCatalog: qaseyCatalog,
   applications: [qaseyApplication],
   permissions: permissionService,

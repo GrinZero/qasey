@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -35,7 +35,7 @@ describe("same-origin Admin UI", () => {
   });
 
   it("exposes metadata BFF routes while execution goes through domain-safe handlers", async () => {
-    const app = createAdminUiApplication({ applicationCatalog: [], permissions: new PermissionService(new InMemoryPermissionStore()), audit: new InMemoryAuditLog(), googleOidc });
+    const app = createAdminUiApplication({ publicBaseUrl: "https://runtime.test", applicationCatalog: [], permissions: new PermissionService(new InMemoryPermissionStore()), audit: new InMemoryAuditLog(), googleOidc });
     expect(app.routes?.map(route => route.route.path)).toEqual([
       "/admin", "/auth/google/login", "/auth/google/callback", "/auth/logout", "/admin/api/session", "/admin/api/catalog", "/admin/api/applications", "/admin/api/audit", "/admin/api/permissions/grants", "/admin/api/permissions/bindings",
     ]);
@@ -54,9 +54,10 @@ describe("same-origin Admin UI", () => {
   });
 
   it("requires a same-origin browser mutation request", () => {
-    expect(() => assertSameOrigin(new Request("https://runtime.test/admin/api/permissions/grants", { headers: { origin: "https://runtime.test" } }))).not.toThrow();
-    expect(() => assertSameOrigin(new Request("https://runtime.test/admin/api/permissions/grants", { headers: { origin: "https://evil.test" } }))).toThrow(/CSRF/u);
-    expect(() => assertSameOrigin(new Request("https://runtime.test/admin/api/permissions/grants"))).toThrow(/CSRF/u);
+    expect(() => assertSameOrigin(new Request("http://internal:8080/admin/api/permissions/grants", { headers: { origin: "https://runtime.test" } }), "https://runtime.test/app")).not.toThrow();
+    expect(() => assertSameOrigin(new Request("http://internal:8080/admin/api/permissions/grants", { headers: { origin: "https://evil.test" } }), "https://runtime.test")).toThrow(/CSRF/u);
+    expect(() => assertSameOrigin(new Request("http://internal:8080/admin/api/permissions/grants"), "https://runtime.test")).toThrow(/CSRF/u);
+    expect(() => assertSameOrigin(new Request("http://internal:8080/admin/api/permissions/grants", { headers: { origin: "not-an-origin" } }), "https://runtime.test")).toThrow(/CSRF/u);
   });
 
   it("exposes provider-neutral Trigger management routes only when configured", () => {
@@ -68,6 +69,7 @@ describe("same-origin Admin UI", () => {
     );
     const triggerProviders = new TriggerProviderRegistry([new SlackTriggerProvider(slackIntegrations)]);
     const app = createAdminUiApplication({
+      publicBaseUrl: "https://runtime.test",
       applicationCatalog: [], permissions: new PermissionService(new InMemoryPermissionStore()),
       audit: new InMemoryAuditLog(), googleOidc, triggerProviders,
     });
@@ -76,6 +78,40 @@ describe("same-origin Admin UI", () => {
     expect(routes.find(route => route.id === "trigger-create")?.access.permission).toBe("platform.triggers.manage");
     expect(routes.map(route => `${route.route.method} ${route.route.path}`)).toContain("POST /admin/api/triggers/connections/:providerId/:id/rebind");
     expect(routes.map(route => `${route.route.method} ${route.route.path}`)).toContain("DELETE /admin/api/triggers/connections/:providerId/:id");
+  });
+
+  it("returns 403 instead of 500 when a Trigger mutation fails the origin check", async () => {
+    const slackIntegrations = new SlackIntegrationManager(
+      new InMemorySlackInstallationRepository("test-key"),
+      "https://qasey.example.com",
+      [{ applicationId: "qasey", agentId: "qasey-main", name: "Qasey" }],
+      { verify: async () => ({ appId: "A1", teamId: "T1", botUserId: "U1" }) },
+    );
+    const triggerProviders = new TriggerProviderRegistry([new SlackTriggerProvider(slackIntegrations)]);
+    const create = vi.spyOn(triggerProviders, "create");
+    const app = createAdminUiApplication({
+      publicBaseUrl: "https://runtime.test",
+      applicationCatalog: [], permissions: new PermissionService(new InMemoryPermissionStore()),
+      audit: new InMemoryAuditLog(), googleOidc, triggerProviders,
+    });
+    const route = app.routes?.find(candidate => candidate.id === "trigger-create")?.route;
+    expect(route && "handler" in route).toBe(true);
+    if (!route || !("handler" in route)) throw new Error("trigger-create handler is missing");
+    const handler = route.handler as unknown as (context: any) => Promise<Response>;
+
+    const response = await handler({
+      req: {
+        raw: new Request("http://internal:8080/admin/api/triggers/connections", {
+          method: "POST",
+          headers: { origin: "https://evil.test" },
+        }),
+      },
+      json: (body: unknown, status = 200) => Response.json(body, { status }),
+    });
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({ error: "forbidden", message: "请求来源验证失败。" });
+    expect(create).not.toHaveBeenCalled();
   });
 
   it.each(["src/mastra/public", ".mastra/output"])("finds the Admin UI target from %s", async workingDirectory => {
