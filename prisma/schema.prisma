@@ -1,0 +1,186 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model AgentApplicationRun {
+  applicationId String                     @map("application_id")
+  tenantId      String                     @map("tenant_id")
+  id            String
+  payload       Json
+  createdAt     DateTime                   @default(now()) @map("created_at")
+  updatedAt     DateTime                   @default(now()) @map("updated_at")
+  events        AgentApplicationRunEvent[]
+
+  @@id([applicationId, tenantId, id])
+  @@map("agent_application_runs")
+}
+
+model AgentApplicationRunEvent {
+  applicationId String              @map("application_id")
+  tenantId      String              @map("tenant_id")
+  id            String
+  runId         String              @map("run_id")
+  payload       Json
+  createdAt     DateTime            @default(now()) @map("created_at")
+  run           AgentApplicationRun @relation(fields: [applicationId, tenantId, runId], references: [applicationId, tenantId, id], onDelete: Cascade)
+
+  @@id([applicationId, tenantId, id])
+  @@index([applicationId, tenantId, runId, createdAt], map: "agent_application_run_events_owner_idx")
+  @@map("agent_application_run_events")
+}
+
+model PlatformChannelDelivery {
+  applicationId String   @map("application_id")
+  tenantId      String   @map("tenant_id")
+  deliveryId    String   @map("delivery_id")
+  acceptedAt    DateTime @default(now()) @map("accepted_at")
+
+  @@id([applicationId, tenantId, deliveryId])
+  @@map("platform_channel_deliveries")
+}
+
+model PlatformRole {
+  tenantId       String                   @map("tenant_id")
+  roleId         String                   @map("role_id")
+  permissions    PlatformRolePermission[]
+  subjectRoles   PlatformSubjectRole[]
+
+  @@id([tenantId, roleId])
+  @@map("platform_roles")
+}
+
+model PlatformRolePermission {
+  tenantId   String       @map("tenant_id")
+  roleId     String       @map("role_id")
+  permission String
+  role       PlatformRole @relation(fields: [tenantId, roleId], references: [tenantId, roleId], onDelete: Cascade)
+
+  @@id([tenantId, roleId, permission])
+  @@map("platform_role_permissions")
+}
+
+model PlatformSubjectRole {
+  tenantId  String       @map("tenant_id")
+  subjectId String       @map("subject_id")
+  roleId    String       @map("role_id")
+  role      PlatformRole @relation(fields: [tenantId, roleId], references: [tenantId, roleId], onDelete: Cascade)
+
+  @@id([tenantId, subjectId, roleId])
+  @@map("platform_subject_roles")
+}
+
+model PlatformAuditLog {
+  id            BigInt   @id @default(autoincrement())
+  requestId     String   @map("request_id")
+  tenantId      String?  @map("tenant_id")
+  subjectId     String?  @map("subject_id")
+  applicationId String?  @map("application_id")
+  resourceType  String   @map("resource_type")
+  resourceId    String   @map("resource_id")
+  action        String
+  decision      String
+  reason        String
+  metadata      Json     @default("{}")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, id(sort: Desc)], map: "platform_audit_log_tenant_id_idx")
+  @@map("platform_audit_log")
+}
+
+model PlatformApiToken {
+  id          String    @id @db.Uuid
+  tenantId    String    @map("tenant_id")
+  name        String
+  tokenPrefix String    @map("token_prefix")
+  tokenHash   Bytes     @map("token_hash")
+  scopes      String[]
+  createdBy   String    @map("created_by")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  expiresAt   DateTime? @map("expires_at")
+  lastUsedAt  DateTime? @map("last_used_at")
+  revokedAt   DateTime? @map("revoked_at")
+
+  @@index([tenantId, createdAt(sort: Desc)], map: "platform_api_tokens_tenant_created_idx")
+  @@map("platform_api_tokens")
+}
+
+model PlatformSlackAppInstallation {
+  id                      String   @id @db.Uuid
+  tenantId                String   @map("tenant_id")
+  webhookId               String   @unique @map("webhook_id") @db.Uuid
+  displayName             String   @map("display_name")
+  slackAppId              String   @map("slack_app_id")
+  slackAppName            String?  @map("slack_app_name")
+  slackTeamId             String   @map("slack_team_id")
+  slackTeamName           String?  @map("slack_team_name")
+  slackBotUserId          String   @map("slack_bot_user_id")
+  slackBotId              String?  @map("slack_bot_id")
+  isEnterpriseInstall     Boolean  @default(false) @map("is_enterprise_install")
+  devRuntimeEnabled       Boolean  @default(false) @map("dev_runtime_enabled")
+  devRuntimeCommand       String   @default("/qasey-local") @map("dev_runtime_command")
+  botTokenCiphertext      String   @map("bot_token_ciphertext")
+  signingSecretCiphertext String   @map("signing_secret_ciphertext")
+  credentialKeyId         String   @map("credential_key_id")
+  credentialFingerprint   String   @map("credential_fingerprint")
+  status                  String
+  webhookVerifiedAt       DateTime? @map("webhook_verified_at")
+  lastTokenVerifiedAt     DateTime @map("last_token_verified_at")
+  lastErrorCode           String?  @map("last_error_code")
+  revision                BigInt   @default(1)
+  createdBy               String   @map("created_by")
+  updatedBy               String   @map("updated_by")
+  createdAt               DateTime @default(now()) @map("created_at")
+  updatedAt               DateTime @default(now()) @map("updated_at")
+  deletedAt               DateTime? @map("deleted_at")
+
+  @@map("platform_slack_app_installations")
+}
+
+model PlatformTriggerBinding {
+  id            String    @id @db.Uuid
+  tenantId      String    @map("tenant_id")
+  providerId    String    @map("provider_id")
+  connectionId  String    @map("connection_id")
+  applicationId String    @map("application_id")
+  targetKind    String    @map("target_kind")
+  targetId      String    @map("target_id")
+  status        String
+  revision      BigInt    @default(1)
+  boundBy       String    @map("bound_by")
+  boundAt       DateTime  @default(now()) @map("bound_at")
+  unboundAt     DateTime? @map("unbound_at")
+
+  @@map("platform_trigger_bindings")
+}
+
+model QaseySandboxLease {
+  applicationId   String   @map("application_id")
+  tenantId        String   @map("tenant_id")
+  sessionId       String   @map("session_id")
+  workspaceId     String   @map("workspace_id")
+  sandboxOrdinal  Int      @map("sandbox_ordinal")
+  leaseGeneration Int      @map("lease_generation")
+  encryptedToken  String   @map("encrypted_token")
+  state           String
+  lastActivityAt  DateTime @default(now()) @map("last_activity_at")
+  updatedAt       DateTime @default(now()) @map("updated_at")
+
+  @@id([applicationId, tenantId, sessionId])
+  @@index([state, sandboxOrdinal, lastActivityAt], map: "qasey_sandbox_leases_capacity_idx")
+  @@map("qasey_sandbox_leases")
+}
+
+model QaseyMcpOAuthCredential {
+  namespace      String
+  storageKey     String   @map("storage_key")
+  encryptedValue String   @map("encrypted_value")
+  updatedAt      DateTime @default(now()) @map("updated_at")
+
+  @@id([namespace, storageKey])
+  @@map("qasey_mcp_oauth_credentials")
+}

@@ -8,6 +8,8 @@ export const OAuthPrincipalSchema = z.object({
   audience: z.enum(["admin-ui", "api", "service", "channel"]),
   email: z.email().optional(),
   service: z.boolean().default(false),
+  scopes: z.array(z.string().min(1)).optional(),
+  tokenId: z.uuid().optional(),
 });
 
 export type OAuthPrincipal = z.infer<typeof OAuthPrincipalSchema>;
@@ -40,4 +42,3 @@ export function createServicePrincipal(input: {
 }): OAuthPrincipal {
   return OAuthPrincipalSchema.parse({ ...input, roles: [...input.roles], audience: "service", service: true });
 }
-

@@ -8,6 +8,7 @@ import type { OAuthPrincipal } from "../auth/oauth-principal.ts";
 import { GoogleOidcError, type GoogleOidcService } from "../auth/google-oidc.ts";
 import { loadAdminUiHtml } from "./shell.ts";
 import { TriggerProviderError, type TriggerProviderRegistry } from "../triggers/trigger-provider-registry.ts";
+import type { ApiTokenStore } from "../auth/api-token-store.ts";
 
 export function createAdminUiApplication(options: {
   publicBaseUrl: string;
@@ -16,6 +17,7 @@ export function createAdminUiApplication(options: {
   permissions: PermissionService;
   audit: AuditLog;
   googleOidc: GoogleOidcService;
+  apiTokens?: ApiTokenStore;
   triggerProviders?: TriggerProviderRegistry;
 }): AgentApplicationBundle {
   const trustedOrigin = new URL(options.publicBaseUrl).origin;
@@ -104,6 +106,12 @@ export function createAdminUiApplication(options: {
       const principal = OAuthPrincipalSchema.parse(c.get("requestContext").get("platform-principal"));
       return c.json({ records: await options.audit.list?.(principal.tenantId, 100) ?? [] });
     } })),
+    ...(options.apiTokens ? apiTokenRoutes({
+      apiTokens: options.apiTokens,
+      applicationCatalog: options.applicationCatalog,
+      audit: options.audit,
+      trustedOrigin,
+    }) : []),
     owned("permission-grant", "platform.permissions.manage", registerApiRoute("/admin/api/permissions/grants", { method: "POST", handler: async c => {
       const csrfFailure = rejectCrossOriginRequest(c, trustedOrigin);
       if (csrfFailure) return csrfFailure;
@@ -145,6 +153,82 @@ export function createAdminUiApplication(options: {
     }), true),
   ];
   return { id: "platform", agents: {}, workflows: {}, access: { agents: {}, workflows: {} }, routes };
+}
+
+function apiTokenRoutes(options: {
+  apiTokens: ApiTokenStore;
+  applicationCatalog: readonly CatalogEntry[];
+  audit: AuditLog;
+  trustedOrigin: string;
+}): OwnedApiRoute[] {
+  const availableScopes = availableApiTokenScopes(options.applicationCatalog);
+  const scopeSet = new Set(availableScopes);
+  return [
+    owned("api-token-list", "platform.api-tokens.manage", registerApiRoute("/admin/api/tokens", {
+      method: "GET",
+      handler: async c => {
+        const principal = adminPrincipal(c);
+        return c.json({ tokens: await options.apiTokens.list(principal.tenantId), availableScopes });
+      },
+    })),
+    owned("api-token-create", "platform.api-tokens.manage", registerApiRoute("/admin/api/tokens", {
+      method: "POST",
+      handler: async c => {
+        const csrfFailure = rejectCrossOriginRequest(c, options.trustedOrigin);
+        if (csrfFailure) return csrfFailure;
+        const principal = adminPrincipal(c);
+        const input = z.object({
+          name: z.string().trim().min(1).max(80),
+          scopes: z.array(z.string().min(1)).min(1).max(50),
+          expiresAt: z.iso.datetime().optional(),
+        }).parse(await c.req.json());
+        const scopes = [...new Set(input.scopes)];
+        if (scopes.some(scope => !scopeSet.has(scope))) {
+          return c.json({ error: "invalid_scope", message: "Token 包含不可用于 API 的权限。" }, 400);
+        }
+        if (input.expiresAt && Date.parse(input.expiresAt) <= Date.now()) {
+          return c.json({ error: "invalid_expiration", message: "过期时间必须晚于当前时间。" }, 400);
+        }
+        const created = await options.apiTokens.create({
+          tenantId: principal.tenantId,
+          name: input.name,
+          scopes,
+          createdBy: principal.subjectId,
+          ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
+        });
+        await options.audit.write({
+          requestId: String(c.get("requestContext").get("requestId")), tenantId: principal.tenantId,
+          subjectId: principal.subjectId, applicationId: "platform", resourceType: "api-token",
+          resourceId: created.record.id, action: "create", decision: "allow", reason: "api_token_created",
+          metadata: { name: created.record.name, scopes: created.record.scopes, expiresAt: created.record.expiresAt },
+        });
+        return c.json(created, 201);
+      },
+    })),
+    owned("api-token-revoke", "platform.api-tokens.manage", registerApiRoute("/admin/api/tokens/:tokenId", {
+      method: "DELETE",
+      handler: async c => {
+        const csrfFailure = rejectCrossOriginRequest(c, options.trustedOrigin);
+        if (csrfFailure) return csrfFailure;
+        const principal = adminPrincipal(c);
+        const tokenId = z.uuid().parse(c.req.param("tokenId"));
+        const revoked = await options.apiTokens.revoke(principal.tenantId, tokenId);
+        if (!revoked) return c.json({ error: "not_found" }, 404);
+        await options.audit.write({
+          requestId: String(c.get("requestContext").get("requestId")), tenantId: principal.tenantId,
+          subjectId: principal.subjectId, applicationId: "platform", resourceType: "api-token",
+          resourceId: tokenId, action: "revoke", decision: "allow", reason: "api_token_revoked",
+        });
+        return c.json({ revoked: true });
+      },
+    })),
+  ];
+}
+
+export function availableApiTokenScopes(catalog: readonly CatalogEntry[]): readonly string[] {
+  return [...new Set(catalog
+    .filter(entry => entry.audiences.includes("api") && !entry.permission.startsWith("platform."))
+    .map(entry => entry.permission))].sort();
 }
 
 function triggerRoutes(options: {

@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { Pool } from "pg";
+import type { PrismaClient, QaseySandboxLease } from "@prisma/client";
 import type { SandboxLease, SandboxLeaseScope } from "./sandbox-protocol.ts";
 import { decryptSandboxSecret, encryptSandboxSecret } from "./sandbox-secrets.ts";
 
@@ -111,167 +111,116 @@ interface LeaseRow {
   last_activity_at: Date;
 }
 
-export class PostgresSandboxLeaseStore implements SandboxLeaseStore {
-  private readonly pool: Pool;
+export class PrismaSandboxLeaseStore implements SandboxLeaseStore {
   private initialized?: Promise<void>;
 
-  constructor(connectionString: string, private readonly options: LeaseStoreOptions) {
-    this.pool = new Pool({ connectionString, max: 5 });
-  }
+  constructor(private readonly prisma: PrismaClient, private readonly options: LeaseStoreOptions) {}
 
   init(): Promise<void> {
-    this.initialized ??= this.pool.query(`CREATE TABLE IF NOT EXISTS qasey_sandbox_leases (
-      application_id text NOT NULL,
-      tenant_id text NOT NULL,
-      session_id text NOT NULL,
-      workspace_id text NOT NULL,
-      sandbox_ordinal integer NOT NULL,
-      lease_generation integer NOT NULL,
-      encrypted_token text NOT NULL,
-      state text NOT NULL CHECK (state IN ('active', 'idle')),
-      last_activity_at timestamptz NOT NULL DEFAULT now(),
-      updated_at timestamptz NOT NULL DEFAULT now(),
-      PRIMARY KEY (application_id, tenant_id, session_id),
-      CHECK (sandbox_ordinal >= 0),
-      CHECK (lease_generation > 0)
-    );
-    CREATE INDEX IF NOT EXISTS qasey_sandbox_leases_capacity_idx
-      ON qasey_sandbox_leases(state, sandbox_ordinal, last_activity_at);
-    `).then(() => undefined);
+    this.initialized ??= this.prisma.$connect();
     return this.initialized;
   }
 
   async healthCheck(): Promise<void> {
     await this.ready();
-    await this.pool.query("SELECT 1");
+    await this.prisma.$queryRaw`SELECT 1`;
   }
 
   async acquire(scope: SandboxLeaseScope): Promise<SandboxLease> {
     await this.ready();
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock(hashtext('qasey-sandbox-capacity-v1'))");
-      await client.query(
-        "UPDATE qasey_sandbox_leases SET state = 'idle', updated_at = now() WHERE state = 'active' AND last_activity_at <= now() - ($1 * interval '1 millisecond')",
-        [this.options.idleTtlMs],
-      );
-      const currentResult = await client.query<LeaseRow>(
-        `SELECT * FROM qasey_sandbox_leases
-         WHERE application_id = $1 AND tenant_id = $2 AND session_id = $3 FOR UPDATE`,
-        [scope.applicationId, scope.tenantId, scope.sessionId],
-      );
-      const current = currentResult.rows[0];
+    return this.prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext('qasey-sandbox-capacity-v1'))`;
+      const cutoff = new Date(Date.now() - this.options.idleTtlMs);
+      await tx.qaseySandboxLease.updateMany({
+        where: { state: "active", lastActivityAt: { lte: cutoff } },
+        data: { state: "idle", updatedAt: new Date() },
+      });
+      const currentRows = await tx.$queryRaw<LeaseRow[]>`
+        SELECT * FROM qasey_sandbox_leases
+        WHERE application_id = ${scope.applicationId} AND tenant_id = ${scope.tenantId}
+          AND session_id = ${scope.sessionId} FOR UPDATE`;
+      const current = currentRows[0];
       if (current?.state === "active") {
-        await client.query(
-          `UPDATE qasey_sandbox_leases SET last_activity_at = now(), updated_at = now()
-           WHERE application_id = $1 AND tenant_id = $2 AND session_id = $3`,
-          [scope.applicationId, scope.tenantId, scope.sessionId],
-        );
-        await client.query("COMMIT");
-        return rowToLease(current, this.options.encryptionKey, new Date().toISOString());
+        const now = new Date();
+        await tx.qaseySandboxLease.update({
+          where: { applicationId_tenantId_sessionId: scope },
+          data: { lastActivityAt: now, updatedAt: now },
+        });
+        return rowToLease(current, this.options.encryptionKey, now.toISOString());
       }
-      const counts = await client.query<{ sandbox_ordinal: number; count: string }>(
-        "SELECT sandbox_ordinal, count(*)::text AS count FROM qasey_sandbox_leases WHERE state = 'active' GROUP BY sandbox_ordinal",
-      );
-      const active = new Map(counts.rows.map(row => [row.sandbox_ordinal, Number(row.count)]));
+      const counts = await tx.qaseySandboxLease.groupBy({
+        by: ["sandboxOrdinal"], where: { state: "active" }, _count: true,
+      });
+      const active = new Map(counts.map(row => [row.sandboxOrdinal, row._count]));
       const ordinal = chooseOrdinal(active, this.options, current?.sandbox_ordinal);
       const token = randomBytes(32).toString("base64url");
       const generation = (current?.lease_generation ?? 0) + 1;
       const id = workspaceId(scope);
-      const result = await client.query<LeaseRow>(
-        `INSERT INTO qasey_sandbox_leases(
-           application_id, tenant_id, session_id, workspace_id, sandbox_ordinal,
-           lease_generation, encrypted_token, state, last_activity_at, updated_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', now(), now())
-         ON CONFLICT(application_id, tenant_id, session_id) DO UPDATE SET
-           workspace_id = EXCLUDED.workspace_id,
-           sandbox_ordinal = EXCLUDED.sandbox_ordinal,
-           lease_generation = EXCLUDED.lease_generation,
-           encrypted_token = EXCLUDED.encrypted_token,
-           state = 'active', last_activity_at = now(), updated_at = now()
-         RETURNING *`,
-        [scope.applicationId, scope.tenantId, scope.sessionId, id, ordinal, generation,
-          encryptSandboxSecret(token, this.options.encryptionKey)],
-      );
-      const row = result.rows[0];
-      if (!row) throw new Error("Sandbox lease upsert returned no row");
-      await client.query("COMMIT");
-      return rowToLease(row, this.options.encryptionKey);
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
-    }
+      const now = new Date();
+      const row = await tx.qaseySandboxLease.upsert({
+        where: { applicationId_tenantId_sessionId: scope },
+        create: { ...scope, workspaceId: id, sandboxOrdinal: ordinal, leaseGeneration: generation,
+          encryptedToken: encryptSandboxSecret(token, this.options.encryptionKey), state: "active",
+          lastActivityAt: now, updatedAt: now },
+        update: { workspaceId: id, sandboxOrdinal: ordinal, leaseGeneration: generation,
+          encryptedToken: encryptSandboxSecret(token, this.options.encryptionKey), state: "active",
+          lastActivityAt: now, updatedAt: now },
+      });
+      return prismaLeaseToLease(row, this.options.encryptionKey);
+    });
   }
 
   async reassign(scope: SandboxLeaseScope, failedOrdinal: number): Promise<SandboxLease> {
     await this.ready();
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock(hashtext('qasey-sandbox-capacity-v1'))");
-      await client.query(
-        "UPDATE qasey_sandbox_leases SET state = 'idle', updated_at = now() WHERE state = 'active' AND last_activity_at <= now() - ($1 * interval '1 millisecond')",
-        [this.options.idleTtlMs],
-      );
-      const currentResult = await client.query<LeaseRow>(
-        `SELECT * FROM qasey_sandbox_leases
-         WHERE application_id = $1 AND tenant_id = $2 AND session_id = $3 FOR UPDATE`,
-        [scope.applicationId, scope.tenantId, scope.sessionId],
-      );
-      const current = currentResult.rows[0];
+    return this.prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext('qasey-sandbox-capacity-v1'))`;
+      const cutoff = new Date(Date.now() - this.options.idleTtlMs);
+      await tx.qaseySandboxLease.updateMany({
+        where: { state: "active", lastActivityAt: { lte: cutoff } },
+        data: { state: "idle", updatedAt: new Date() },
+      });
+      const currentRows = await tx.$queryRaw<LeaseRow[]>`
+        SELECT * FROM qasey_sandbox_leases
+        WHERE application_id = ${scope.applicationId} AND tenant_id = ${scope.tenantId}
+          AND session_id = ${scope.sessionId} FOR UPDATE`;
+      const current = currentRows[0];
       if (!current) throw new Error("Cannot reassign a sandbox lease that does not exist");
-      const counts = await client.query<{ sandbox_ordinal: number; count: string }>(
-        "SELECT sandbox_ordinal, count(*)::text AS count FROM qasey_sandbox_leases WHERE state = 'active' GROUP BY sandbox_ordinal",
-      );
-      const active = new Map(counts.rows.map(row => [row.sandbox_ordinal, Number(row.count)]));
+      const counts = await tx.qaseySandboxLease.groupBy({
+        by: ["sandboxOrdinal"], where: { state: "active" }, _count: true,
+      });
+      const active = new Map(counts.map(row => [row.sandboxOrdinal, row._count]));
       const ordinal = chooseOrdinal(active, this.options, undefined, new Set([failedOrdinal]));
       const token = randomBytes(32).toString("base64url");
-      const result = await client.query<LeaseRow>(
-        `UPDATE qasey_sandbox_leases SET
-           sandbox_ordinal = $4, lease_generation = lease_generation + 1,
-           encrypted_token = $5, state = 'active', last_activity_at = now(), updated_at = now()
-         WHERE application_id = $1 AND tenant_id = $2 AND session_id = $3
-         RETURNING *`,
-        [scope.applicationId, scope.tenantId, scope.sessionId, ordinal,
-          encryptSandboxSecret(token, this.options.encryptionKey)],
-      );
-      const row = result.rows[0];
-      if (!row) throw new Error("Sandbox lease reassignment returned no row");
-      await client.query("COMMIT");
-      return rowToLease(row, this.options.encryptionKey);
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
-    }
+      const now = new Date();
+      const row = await tx.qaseySandboxLease.update({
+        where: { applicationId_tenantId_sessionId: scope },
+        data: { sandboxOrdinal: ordinal, leaseGeneration: { increment: 1 },
+          encryptedToken: encryptSandboxSecret(token, this.options.encryptionKey), state: "active",
+          lastActivityAt: now, updatedAt: now },
+      });
+      return prismaLeaseToLease(row, this.options.encryptionKey);
+    });
   }
 
   async touch(scope: SandboxLeaseScope): Promise<void> {
     await this.ready();
-    await this.pool.query(
-      `UPDATE qasey_sandbox_leases SET last_activity_at = now(), updated_at = now()
-       WHERE application_id = $1 AND tenant_id = $2 AND session_id = $3 AND state = 'active'`,
-      [scope.applicationId, scope.tenantId, scope.sessionId],
-    );
+    const now = new Date();
+    await this.prisma.qaseySandboxLease.updateMany({
+      where: { ...scope, state: "active" }, data: { lastActivityAt: now, updatedAt: now },
+    });
   }
 
   async release(scope: SandboxLeaseScope): Promise<void> {
     await this.ready();
-    await this.pool.query(
-      `UPDATE qasey_sandbox_leases SET state = 'idle', updated_at = now()
-       WHERE application_id = $1 AND tenant_id = $2 AND session_id = $3`,
-      [scope.applicationId, scope.tenantId, scope.sessionId],
-    );
+    await this.prisma.qaseySandboxLease.updateMany({
+      where: scope, data: { state: "idle", updatedAt: new Date() },
+    });
   }
 
-  async close(): Promise<void> { await this.pool.end(); }
+  async close(): Promise<void> {}
 
   private ready(): Promise<void> {
-    return this.initialized ?? Promise.reject(new Error("PostgresSandboxLeaseStore has not been initialized"));
+    return this.initialized ?? Promise.reject(new Error("PrismaSandboxLeaseStore has not been initialized"));
   }
 }
 
@@ -326,5 +275,19 @@ function rowToLease(row: LeaseRow, encryptionKey: string, lastActivityAt = row.l
     token: decryptSandboxSecret(row.encrypted_token, encryptionKey),
     state: row.state,
     lastActivityAt,
+  };
+}
+
+function prismaLeaseToLease(row: QaseySandboxLease, encryptionKey: string): SandboxLease {
+  return {
+    applicationId: row.applicationId,
+    tenantId: row.tenantId,
+    sessionId: row.sessionId,
+    workspaceId: row.workspaceId,
+    ordinal: row.sandboxOrdinal,
+    generation: row.leaseGeneration,
+    token: decryptSandboxSecret(row.encryptedToken, encryptionKey),
+    state: row.state as "active" | "idle",
+    lastActivityAt: row.lastActivityAt.toISOString(),
   };
 }

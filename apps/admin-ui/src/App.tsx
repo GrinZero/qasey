@@ -48,7 +48,7 @@ import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-
 import { api, ApiError, errorMessage } from "./api";
 import { canRunQaseyTask } from "./catalog";
 import { adminPaths, legacyAdminPath, viewForAdminPath, type View } from "./routes";
-import type { AgentApplication, AuditRecord, CatalogEntry, QaseyRun, RunStatus, SandboxSessionState, Session, TriggerConnection, TriggerConnectionStatus, TriggerProvider, TriggerTarget } from "./types";
+import type { AgentApplication, ApiTokenRecord, AuditRecord, CatalogEntry, QaseyRun, RunStatus, SandboxSessionState, Session, TriggerConnection, TriggerConnectionStatus, TriggerProvider, TriggerTarget } from "./types";
 
 type AuthState = { kind: "loading" } | { kind: "anonymous"; message?: string } | { kind: "authenticated"; session: Session };
 
@@ -67,6 +67,7 @@ const statusMeta: Record<RunStatus, { label: string; tone: string; step: number 
 
 const activeStatuses: RunStatus[] = ["queued", "preparing_workspace", "authoring", "author_running", "repairing", "clean_verifying"];
 const shortDateFormatter = new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric" });
+const tokenDateFormatter = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "short", day: "numeric" });
 const evidenceStages = [
   [FileSearch, "需求"], [Settings2, "环境"], [Bot, "设计"], [Play, "执行"], [ShieldCheck, "验证"], [ClipboardCheck, "审阅"],
 ] as const;
@@ -694,6 +695,62 @@ function TriggerConfigurationDialog({ mode, connection, providers, targets, onCl
   return <dialog ref={dialogRef} className="integration-dialog" aria-labelledby="trigger-dialog-title" onCancel={event => { event.preventDefault(); onClose(); }}><div className="dialog-head"><div><p className="eyebrow">Trigger Provider · {provider?.name ?? "Select"}</p><h2 id="trigger-dialog-title">{mode === "create" ? "新增 Trigger" : `更新 ${connection?.displayName}`}</h2><p>{provider?.configurationDescription ?? "选择事件来源和它要启动的目标。"}</p></div><button className="icon-button bordered" onClick={onClose} aria-label="关闭"><X size={18} /></button></div>{mode === "create" && <><label>Provider<select autoFocus value={providerId} onChange={event => { const nextProviderId = event.target.value; setProviderId(nextProviderId); setTargetId(targets[nextProviderId]?.[0]?.id ?? ""); setConfiguration({}); }}>{providers.map(item => <option key={item.id} value={item.id}>{item.name} · {item.category}</option>)}</select></label><div className="integration-form-row"><label>Trigger 名称<input value={displayName} onChange={event => setDisplayName(event.target.value)} placeholder="例如 QA Team mentions" /></label><label>绑定目标<select value={targetId} onChange={event => setTargetId(event.target.value)}>{availableTargets.map(target => <option key={target.id} value={target.id}>{target.name} · {target.kind}</option>)}</select></label></div></>}{provider?.fields.map(field => field.type === "boolean" ? <label className="trigger-checkbox" key={field.key}><input type="checkbox" checked={configuration[field.key] === "true"} onChange={event => setConfiguration(current => ({ ...current, [field.key]: String(event.target.checked) }))} /><span><strong>{field.label}</strong>{field.help && <small>{field.help}</small>}</span></label> : <label key={field.key}>{field.label}<input type={field.type === "secret" ? "password" : "text"} autoComplete={field.type === "secret" ? "new-password" : "off"} value={configuration[field.key] ?? ""} onChange={event => setConfiguration(current => ({ ...current, [field.key]: event.target.value }))} placeholder={field.placeholder} />{field.help && <small>{field.help}</small>}</label>)}<div className="credential-note"><ShieldCheck size={17} /><span>敏感字段会在服务端加密保存，之后不会回传到浏览器。{mode === "configuration" ? "仅切换非敏感选项时，无需重新填写 Token 或 Signing Secret。" : "每个 Provider 独立验证和运行自己的配置。"}</span></div>{error && <p className="field-error" role="alert"><CircleAlert size={15} />{error}</p>}<div className="dialog-actions"><button className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={busy} onClick={() => void save()}>{busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}{mode === "create" ? "保存 Trigger" : "保存配置"}</button></div></dialog>;
 }
 
+function ApiTokenVault({ onAuditChanged, onError }: { onAuditChanged: () => void; onError: (message: string) => void }) {
+  const [tokens, setTokens] = useState<ApiTokenRecord[]>([]);
+  const [availableScopes, setAvailableScopes] = useState<string[]>([]);
+  const [name, setName] = useState("");
+  const [scopes, setScopes] = useState<string[]>([]);
+  const [expiry, setExpiry] = useState("90");
+  const [createdToken, setCreatedToken] = useState<{ token: string; record: ApiTokenRecord }>();
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const selectedScopes = useMemo(() => new Set(scopes), [scopes]);
+  const load = useCallback(async () => {
+    try {
+      const response = await api.apiTokens();
+      setTokens(response.tokens);
+      setAvailableScopes(response.availableScopes);
+    } catch (cause) { onError(errorMessage(cause)); }
+  }, [onError]);
+  useEffect(() => { void load(); }, [load]);
+  const toggleScope = (scope: string) => setScopes(current => current.includes(scope)
+    ? current.filter(item => item !== scope)
+    : [...current, scope]);
+  const create = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!name.trim()) { onError("请填写 Token 名称。"); return; }
+    if (scopes.length === 0) { onError("请至少选择一项 API 权限。"); return; }
+    setBusy(true); onError(""); setCreatedToken(undefined); setCopied(false);
+    try {
+      const expiresAt = expiry === "never" ? undefined : new Date(Date.now() + Number(expiry) * 86_400_000).toISOString();
+      const created = await api.createApiToken({ name: name.trim(), scopes, ...(expiresAt ? { expiresAt } : {}) });
+      setCreatedToken(created);
+      setName(""); setScopes([]);
+      await load(); onAuditChanged();
+    } catch (cause) { onError(errorMessage(cause)); }
+    finally { setBusy(false); }
+  };
+  const copyToken = async () => {
+    if (!createdToken) return;
+    await navigator.clipboard.writeText(createdToken.token);
+    setCopied(true);
+  };
+  const revoke = async (token: ApiTokenRecord) => {
+    if (!window.confirm(`确认吊销 ${token.name}？所有使用该 Token 的请求会立即失效。`)) return;
+    setBusy(true); onError("");
+    try { await api.revokeApiToken(token.id); await load(); onAuditChanged(); }
+    catch (cause) { onError(errorMessage(cause)); }
+    finally { setBusy(false); }
+  };
+  return <section className="surface token-vault"><div className="list-heading"><div><h2>API Token</h2><p>为自动化和外部客户端签发最小权限凭证</p></div><span className="vault-mark"><KeyRound size={16} />Bearer</span></div><div className="token-vault-layout"><form className="token-issuer" onSubmit={event => void create(event)}><div className="token-step"><span>1</span><div><strong>标记用途</strong><small>名称会显示在审计和吊销确认中。</small></div></div><label>Token 名称<input value={name} onChange={event => setName(event.target.value)} placeholder="例如 nightly-e2e-runner" maxLength={80} /></label><label>有效期<select value={expiry} onChange={event => setExpiry(event.target.value)}><option value="30">30 天</option><option value="90">90 天</option><option value="365">1 年</option><option value="never">永不过期</option></select></label><div className="token-step scope-step"><span>2</span><div><strong>限定权限</strong><small>Token 只会获得勾选的 API 权限。</small></div></div><div className="scope-grid">{availableScopes.map(scope => <label className="scope-option" key={scope}><input type="checkbox" checked={selectedScopes.has(scope)} onChange={() => toggleScope(scope)} /><span>{scope}</span></label>)}</div>{availableScopes.length === 0 && <p className="token-empty">当前没有可签发的 API 权限。</p>}<button className="primary-button token-create" disabled={busy || availableScopes.length === 0} type="submit">{busy ? <LoaderCircle className="spin" size={16} /> : <KeyRound size={16} />}创建 Token</button></form><div className="token-registry">{createdToken && <div className="token-reveal" role="status"><div><span>仅显示一次</span><strong>{createdToken.record.name}</strong><p>请现在复制并保存。关闭或刷新页面后无法再次查看。</p></div><div className="secret-strip"><code>{createdToken.token}</code><button className="icon-button" onClick={() => void copyToken()} aria-label="复制新 Token" title="复制新 Token">{copied ? <Check size={16} /> : <Copy size={16} />}</button></div></div>}<div className="token-registry-head"><strong>已签发</strong><span>{tokens.filter(token => tokenStatus(token) === "active").length} 个有效</span></div>{tokens.length === 0 ? <div className="token-empty-state"><KeyRound size={19} /><span>还没有 API Token</span><small>创建后，凭证指纹会出现在这里。</small></div> : <div className="token-list">{tokens.map(token => { const status = tokenStatus(token); return <article key={token.id} className={`token-row token-row--${status}`}><span className="token-fingerprint"><i /><code>{token.prefix}…</code></span><div className="token-row-body"><div><strong>{token.name}</strong><span className={`token-status token-status--${status}`}>{status === "active" ? "有效" : status === "expired" ? "已过期" : "已吊销"}</span></div><p>{token.scopes.join(" · ")}</p><small>{token.lastUsedAt ? `最近使用 ${formatRelative(token.lastUsedAt)}` : "尚未使用"} · {token.expiresAt ? `${tokenDateFormatter.format(new Date(token.expiresAt))} 到期` : "永不过期"}</small></div>{status === "active" && <button className="icon-button bordered danger-text" disabled={busy} onClick={() => void revoke(token)} aria-label={`吊销 ${token.name}`} title="吊销 Token"><Trash2 size={15} /></button>}</article>; })}</div>}</div></div></section>;
+}
+
+function tokenStatus(token: ApiTokenRecord): "active" | "expired" | "revoked" {
+  if (token.revokedAt) return "revoked";
+  if (token.expiresAt && Date.parse(token.expiresAt) <= Date.now()) return "expired";
+  return "active";
+}
+
 function AccessView({ session }: { session: Session }) {
   const [records, setRecords] = useState<AuditRecord[]>([]);
   const [error, setError] = useState("");
@@ -714,7 +771,7 @@ function AccessView({ session }: { session: Session }) {
     if (!window.confirm(`确认在租户 ${session.tenantId} 中为 ${subject} 绑定 ${bindingRole}？`)) return;
     try { await api.bind(subject.trim(), bindingRole.trim()); setNotice("成员角色已绑定，并已写入审计记录。"); setError(""); await load(); } catch (cause) { setError(errorMessage(cause)); }
   };
-  return <><PageHeading eyebrow="平台管理" title="访问与审计" description={`所有变更仅作用于 ${session.tenantId}，并记录操作人与请求 ID。`} />{error && <InlineError message={error} />}{notice && <div className="success-notice"><CheckCircle2 size={17} />{notice}</div>}<div className="access-grid"><section className="surface access-card"><div className="section-title"><div><span className="section-icon"><KeyRound size={18} /></span><div><h2>角色权限</h2><p>为已有或新的角色授予一项权限。</p></div></div></div><label>角色<input value={role} onChange={event => setRole(event.target.value)} placeholder="例如 qa-lead" /></label><label>权限<input value={permission} onChange={event => setPermission(event.target.value)} placeholder="例如 qasey.runs.approve" /></label><button className="secondary-button" onClick={() => void grant()}>预览并授予</button></section><section className="surface access-card"><div className="section-title"><div><span className="section-icon"><UserRound size={18} /></span><div><h2>成员角色</h2><p>将组织成员绑定到一个角色。</p></div></div></div><label>成员标识<input value={subject} onChange={event => setSubject(event.target.value)} placeholder="Google subject ID" /></label><label>角色<input value={bindingRole} onChange={event => setBindingRole(event.target.value)} placeholder="例如 qa-lead" /></label><button className="secondary-button" onClick={() => void bind()}>预览并绑定</button></section></div><section className="surface audit-section"><div className="list-heading"><div><h2>最近审计</h2><p>访问判定与权限变更</p></div><button className="icon-button bordered" onClick={() => void load()} aria-label="刷新审计"><RefreshCw size={17} /></button></div>{records.length === 0 ? <p className="empty-row">暂无审计记录</p> : <div className="audit-list">{records.slice(0,50).map(record => <div key={`${record.requestId}-${record.resourceType}-${record.resourceId}-${record.action}`}><span className={`decision ${record.decision}`}>{record.decision === "allow" ? "允许" : "拒绝"}</span><div><strong>{record.action} · {record.resourceId}</strong><span>{record.subjectId ?? "匿名请求"} · {record.reason}</span></div><code>{compactId(record.requestId)}</code></div>)}</div>}</section></>;
+  return <><PageHeading eyebrow="平台管理" title="访问与审计" description={`所有变更仅作用于 ${session.tenantId}，并记录操作人与请求 ID。`} />{error && <InlineError message={error} />}{notice && <div className="success-notice"><CheckCircle2 size={17} />{notice}</div>}<ApiTokenVault onAuditChanged={() => void load()} onError={setError} /><div className="access-grid"><section className="surface access-card"><div className="section-title"><div><span className="section-icon"><KeyRound size={18} /></span><div><h2>角色权限</h2><p>为已有或新的角色授予一项权限。</p></div></div></div><label>角色<input value={role} onChange={event => setRole(event.target.value)} placeholder="例如 qa-lead" /></label><label>权限<input value={permission} onChange={event => setPermission(event.target.value)} placeholder="例如 qasey.runs.approve" /></label><button className="secondary-button" onClick={() => void grant()}>预览并授予</button></section><section className="surface access-card"><div className="section-title"><div><span className="section-icon"><UserRound size={18} /></span><div><h2>成员角色</h2><p>将组织成员绑定到一个角色。</p></div></div></div><label>成员标识<input value={subject} onChange={event => setSubject(event.target.value)} placeholder="Google subject ID" /></label><label>角色<input value={bindingRole} onChange={event => setBindingRole(event.target.value)} placeholder="例如 qa-lead" /></label><button className="secondary-button" onClick={() => void bind()}>预览并绑定</button></section></div><section className="surface audit-section"><div className="list-heading"><div><h2>最近审计</h2><p>访问判定与权限变更</p></div><button className="icon-button bordered" onClick={() => void load()} aria-label="刷新审计"><RefreshCw size={17} /></button></div>{records.length === 0 ? <p className="empty-row">暂无审计记录</p> : <div className="audit-list">{records.slice(0,50).map(record => <div key={`${record.requestId}-${record.resourceType}-${record.resourceId}-${record.action}`}><span className={`decision ${record.decision}`}>{record.decision === "allow" ? "允许" : "拒绝"}</span><div><strong>{record.action} · {record.resourceId}</strong><span>{record.subjectId ?? "匿名请求"} · {record.reason}</span></div><code>{compactId(record.requestId)}</code></div>)}</div>}</section></>;
 }
 
 function EvidenceRail({ run, compact = false }: { run: QaseyRun; compact?: boolean }) {

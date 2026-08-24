@@ -2,11 +2,13 @@ packages:
   - apps/*
   - packages/*
 allowBuilds:
+  '@prisma/engines': true
   '@datadog/native-appsec': true
   '@datadog/native-iast-taint-tracking': true
   '@datadog/native-metrics': true
   bufferutil: true
   esbuild: true
+  prisma: true
   utf-8-validate: true
 minimumReleaseAgeExclude:
   - '@moego/aws-secret-env@0.1.0'

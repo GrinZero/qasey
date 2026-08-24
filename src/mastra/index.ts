@@ -8,7 +8,7 @@ import { RedisServerCache } from "@mastra/redis";
 import { RedisStreamsPubSub } from "@mastra/redis-streams";
 import Redis from "ioredis";
 import { QASEY_TRACE_REQUEST_CONTEXT_KEYS } from "./applications/qasey/observability.ts";
-import { closeQaseyInfrastructure, config, createMastraRuntimeStorage, initializeQaseyInfrastructure, sandboxPoolClient, studioEditorEnabled } from "./runtime.ts";
+import { applicationDatabase, closeQaseyInfrastructure, config, createMastraRuntimeStorage, initializeQaseyInfrastructure, sandboxPoolClient, studioEditorEnabled } from "./runtime.ts";
 import { createQaseyApplication } from "./applications/qasey/application.ts";
 import * as taskWorkflowModule from "./workflows/qasey-task-workflow.ts";
 import * as e2eModule from "./workflows/e2e-workflow.ts";
@@ -17,8 +17,8 @@ import * as caseWorkflowModule from "./workflows/metersphere-case-workflow.ts";
 import * as routeModule from "./applications/qasey/routes.ts";
 import { createSharedMastraConfig } from "../runtime/create-runtime.ts";
 import { createAuthorizationMiddleware, isMastraStudioRequest, resolveRequestUser } from "../platform/auth/authorization-middleware.ts";
-import { InMemoryAuditLog, PostgresAuditLog } from "../platform/auth/audit-log.ts";
-import { InMemoryPermissionStore, PermissionService, PostgresPermissionStore } from "../platform/auth/permission-store.ts";
+import { InMemoryAuditLog, PrismaAuditLog } from "../platform/auth/audit-log.ts";
+import { InMemoryPermissionStore, PermissionService, PrismaPermissionStore } from "../platform/auth/permission-store.ts";
 import { OAuthPrincipalSchema, createServicePrincipal, mapOAuthPrincipal } from "../platform/auth/oauth-principal.ts";
 import { devRuntimeTunnelServerEnabled, resolveRedisDurabilityEnabled, verifyWebhookToken } from "../../packages/adapters/src/index.ts";
 import { createScopedWorkspace } from "../platform/workspace/create-workspace.ts";
@@ -33,6 +33,7 @@ import { applyStudioNetworkPolicy } from "../platform/http/studio-network-policy
 import { seedServiceRolePermissions } from "../platform/auth/service-role-permissions.ts";
 import { runtimeReadiness } from "../platform/storage/readiness.ts";
 import { resolveDevelopmentPrincipal } from "../platform/auth/development-principal.ts";
+import { InMemoryApiTokenStore, PrismaApiTokenStore } from "../platform/auth/api-token-store.ts";
 import { GLOBAL_SKILLS_PATH } from "./skill-paths.ts";
 import { startDevRuntimeTunnelClient } from "./applications/qasey/dev-runtime-client.ts";
 import {
@@ -41,7 +42,7 @@ import {
 } from "./applications/qasey/slack-tunnel-command.ts";
 import {
   InMemorySlackInstallationRepository,
-  PostgresSlackInstallationRepository,
+  PrismaSlackInstallationRepository,
 } from "../platform/channels/slack-installation-repository.ts";
 import { SlackIntegrationManager } from "../platform/channels/slack-integration-manager.ts";
 import { ManagedSlackProvider } from "./managed-slack-provider.ts";
@@ -94,17 +95,20 @@ const datadogBridge = config.QASEY_ENABLE_DATADOG
   : undefined;
 
 const permissionStore = config.NODE_ENV === "production" && config.DATABASE_URL
-  ? new PostgresPermissionStore(config.DATABASE_URL)
+  ? new PrismaPermissionStore(applicationDatabase!.client)
   : new InMemoryPermissionStore();
 const permissionService = new PermissionService(permissionStore);
+const apiTokenStore = config.NODE_ENV === "production" && config.DATABASE_URL
+  ? new PrismaApiTokenStore(applicationDatabase!.client)
+  : new InMemoryApiTokenStore();
 const auditLog = config.NODE_ENV === "production" && config.DATABASE_URL
-  ? new PostgresAuditLog(config.DATABASE_URL)
+  ? new PrismaAuditLog(applicationDatabase!.client)
   : new InMemoryAuditLog();
 const slackCredentialKey = config.MASTRA_ENCRYPTION_KEY
   ?? config.GOOGLE_COOKIE_PASSWORD
   ?? "qasey-local-managed-slack-credentials";
 const slackInstallationRepository = config.NODE_ENV === "production" && config.DATABASE_URL
-  ? new PostgresSlackInstallationRepository(config.DATABASE_URL, slackCredentialKey)
+  ? new PrismaSlackInstallationRepository(applicationDatabase!.client, slackCredentialKey)
   : new InMemorySlackInstallationRepository(slackCredentialKey);
 const slackIntegrations = new SlackIntegrationManager(
   slackInstallationRepository,
@@ -124,11 +128,13 @@ const triggerProviders = new TriggerProviderRegistry([
   ),
 ]);
 runtimeReadiness.register("permission-store", () => permissionStore.healthCheck?.() ?? Promise.resolve());
+runtimeReadiness.register("api-token-store", () => apiTokenStore.healthCheck?.() ?? Promise.resolve());
 runtimeReadiness.register("audit-log", () => auditLog.healthCheck?.() ?? Promise.resolve());
 runtimeReadiness.register("slack-installations", () => slackInstallationRepository.healthCheck?.() ?? Promise.resolve());
 await Promise.all([
   initializeQaseyInfrastructure(),
   permissionStore.init?.(),
+  apiTokenStore.init?.(),
   auditLog.init?.(),
   slackInstallationRepository.init?.(),
 ]);
@@ -151,11 +157,13 @@ const adminUiApplication = createAdminUiApplication({
   permissions: permissionService,
   audit: auditLog,
   googleOidc,
+  apiTokens: apiTokenStore,
   triggerProviders,
 });
 const lifecycle = new LifecycleContainer();
 lifecycle.own({ close: closeQaseyInfrastructure });
 if (permissionStore.close) lifecycle.own({ close: () => permissionStore.close!() });
+if (apiTokenStore.close) lifecycle.own({ close: () => apiTokenStore.close!() });
 if (auditLog.close) lifecycle.own({ close: () => auditLog.close!() });
 if (slackInstallationRepository.close) lifecycle.own({ close: () => slackInstallationRepository.close!() });
 lifecycle.own(managedSlackProvider);
@@ -289,6 +297,11 @@ const sharedRuntime = createSharedMastraConfig({
           audience: request.path.startsWith("/admin") || isMastraStudioRequest(request) ? "admin-ui" : "api",
         });
         if (developmentPrincipal) return developmentPrincipal;
+        const presentedBearer = request.header("authorization")?.match(/^Bearer\s+([^\s]+)$/iu)?.[1];
+        if (presentedBearer) {
+          const apiTokenPrincipal = await apiTokenStore.authenticate(presentedBearer);
+          if (apiTokenPrincipal) return apiTokenPrincipal;
+        }
         const ingressToken = request.header("authorization")?.replace(/^Bearer\s+/iu, "")
           ?? request.header("x-qasey-webhook-token");
         const jiraIngress = request.path.includes("jira");
@@ -320,6 +333,9 @@ export const mastra = new Mastra({
   recovery: { durableAgents: "auto" },
   bundler: {
     externals: [
+      // Prisma's generated client and driver adapter load native/runtime files
+      // from node_modules and must remain external in the Mastra worker bundle.
+      "@prisma",
       "@duckdb/node-bindings",
       "dd-trace",
       "@datadog/native-metrics",

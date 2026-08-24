@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { Pool } from "pg";
+import { Prisma, type PrismaClient } from "@prisma/client";
 import type { E2ERun, OwnerScope, RunEvent, RunStatus } from "../../contracts/src/index.ts";
 
 export interface RunRepository {
@@ -69,113 +69,89 @@ export class InMemoryRunRepository implements RunRepository {
   async close(): Promise<void> {}
 }
 
-export class PostgresRunRepository implements RunRepository {
-  private readonly pool: Pool;
+export class PrismaRunRepository implements RunRepository {
   private initialized?: Promise<void>;
 
-  constructor(connectionString: string) {
-    this.pool = new Pool({ connectionString, max: 10 });
-  }
+  constructor(private readonly prisma: PrismaClient) {}
 
   init(): Promise<void> {
-    this.initialized ??= this.pool.query(`
-      CREATE TABLE IF NOT EXISTS agent_application_runs (
-        application_id text NOT NULL,
-        tenant_id text NOT NULL,
-        id text NOT NULL,
-        payload jsonb NOT NULL,
-        created_at timestamptz NOT NULL DEFAULT now(),
-        updated_at timestamptz NOT NULL DEFAULT now(),
-        PRIMARY KEY (application_id, tenant_id, id)
-      );
-      CREATE TABLE IF NOT EXISTS agent_application_run_events (
-        application_id text NOT NULL,
-        tenant_id text NOT NULL,
-        id text NOT NULL,
-        run_id text NOT NULL,
-        payload jsonb NOT NULL,
-        created_at timestamptz NOT NULL DEFAULT now(),
-        PRIMARY KEY (application_id, tenant_id, id),
-        FOREIGN KEY (application_id, tenant_id, run_id)
-          REFERENCES agent_application_runs(application_id, tenant_id, id) ON DELETE CASCADE
-      );
-      CREATE INDEX IF NOT EXISTS agent_application_run_events_owner_idx
-        ON agent_application_run_events(application_id, tenant_id, run_id, created_at);
-    `).then(() => undefined);
+    this.initialized ??= this.prisma.$connect();
     return this.initialized;
   }
 
   private ready(): Promise<void> {
-    if (!this.initialized) return Promise.reject(new Error("PostgresRunRepository has not been initialized"));
+    if (!this.initialized) return Promise.reject(new Error("PrismaRunRepository has not been initialized"));
     return this.initialized;
   }
 
   async healthCheck(): Promise<void> {
     await this.ready();
-    await this.pool.query("SELECT 1");
+    await this.prisma.$queryRaw`SELECT 1`;
   }
 
   async create(owner: OwnerScope, run: E2ERun): Promise<E2ERun> {
     assertOwner(owner, run);
     await this.ready();
-    await this.pool.query(
-      "INSERT INTO agent_application_runs(application_id, tenant_id, id, payload) VALUES ($1, $2, $3, $4::jsonb)",
-      [owner.applicationId, owner.tenantId, run.id, JSON.stringify(run)],
-    );
+    await this.prisma.agentApplicationRun.create({ data: {
+      applicationId: owner.applicationId,
+      tenantId: owner.tenantId,
+      id: run.id,
+      payload: run as unknown as Prisma.InputJsonValue,
+    } });
     return structuredClone(run);
   }
 
   async get(owner: OwnerScope, id: string): Promise<E2ERun | undefined> {
     await this.ready();
-    const result = await this.pool.query<{ payload: E2ERun }>(
-      "SELECT payload FROM agent_application_runs WHERE application_id = $1 AND tenant_id = $2 AND id = $3",
-      [owner.applicationId, owner.tenantId, id],
-    );
-    return result.rows[0]?.payload;
+    const result = await this.prisma.agentApplicationRun.findUnique({
+      where: { applicationId_tenantId_id: { applicationId: owner.applicationId, tenantId: owner.tenantId, id } },
+      select: { payload: true },
+    });
+    return result?.payload as unknown as E2ERun | undefined;
   }
 
   async list(owner: OwnerScope, limit = 100): Promise<E2ERun[]> {
     await this.ready();
-    const result = await this.pool.query<{ payload: E2ERun }>(
-      `SELECT payload FROM agent_application_runs
-       WHERE application_id = $1 AND tenant_id = $2
-       ORDER BY created_at DESC, id LIMIT $3`,
-      [owner.applicationId, owner.tenantId, Math.min(Math.max(limit, 1), 500)],
-    );
-    return result.rows.map(row => row.payload);
+    const result = await this.prisma.agentApplicationRun.findMany({
+      where: { applicationId: owner.applicationId, tenantId: owner.tenantId },
+      orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+      take: Math.min(Math.max(limit, 1), 500),
+      select: { payload: true },
+    });
+    return result.map(row => row.payload as unknown as E2ERun);
   }
 
   async update(owner: OwnerScope, id: string, patch: Partial<Pick<E2ERun, "status" | "branch" | "baseSha" | "pullRequestUrl" | "error" | "artifacts">>): Promise<E2ERun> {
     const current = await this.get(owner, id);
     if (!current) throw new Error(`Run ${id} not found`);
     const updated = { ...current, ...patch, updatedAt: new Date().toISOString() };
-    await this.pool.query(
-      "UPDATE agent_application_runs SET payload = $4::jsonb, updated_at = now() WHERE application_id = $1 AND tenant_id = $2 AND id = $3",
-      [owner.applicationId, owner.tenantId, id, JSON.stringify(updated)],
-    );
+    await this.prisma.agentApplicationRun.update({
+      where: { applicationId_tenantId_id: { applicationId: owner.applicationId, tenantId: owner.tenantId, id } },
+      data: { payload: updated as unknown as Prisma.InputJsonValue, updatedAt: new Date() },
+    });
     return updated;
   }
 
   async addEvent(owner: OwnerScope, runId: string, type: string, message: string, metadata: Record<string, unknown> = {}): Promise<RunEvent> {
     await this.ready();
     const event = { id: randomUUID(), runId, at: new Date().toISOString(), type, message, metadata };
-    await this.pool.query(
-      "INSERT INTO agent_application_run_events(application_id, tenant_id, id, run_id, payload) VALUES ($1, $2, $3, $4, $5::jsonb)",
-      [owner.applicationId, owner.tenantId, event.id, runId, JSON.stringify(event)],
-    );
+    await this.prisma.agentApplicationRunEvent.create({ data: {
+      applicationId: owner.applicationId, tenantId: owner.tenantId,
+      id: event.id, runId, payload: event as unknown as Prisma.InputJsonValue,
+    } });
     return event;
   }
 
   async events(owner: OwnerScope, runId: string): Promise<RunEvent[]> {
     await this.ready();
-    const result = await this.pool.query<{ payload: RunEvent }>(
-      "SELECT payload FROM agent_application_run_events WHERE application_id = $1 AND tenant_id = $2 AND run_id = $3 ORDER BY created_at, id",
-      [owner.applicationId, owner.tenantId, runId],
-    );
-    return result.rows.map(row => row.payload);
+    const result = await this.prisma.agentApplicationRunEvent.findMany({
+      where: { applicationId: owner.applicationId, tenantId: owner.tenantId, runId },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }], select: { payload: true },
+    });
+    return result.map(row => row.payload as unknown as RunEvent);
   }
 
-  async close(): Promise<void> { await this.pool.end(); }
+  async close(): Promise<void> {}
 }
 
 function ownerKey(owner: OwnerScope, id: string): string {

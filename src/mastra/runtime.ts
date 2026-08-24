@@ -15,7 +15,7 @@ import type { E2ERun, QaseyRequestContext } from "../../packages/contracts/src/i
 import { AgentProgressSession } from "../../packages/domain/src/index.ts";
 import type { ToolsInput } from "@mastra/core/agent";
 import {
-  InMemoryRunRepository, PostgresRunRepository,
+  InMemoryRunRepository, PrismaRunRepository,
 } from "../../packages/domain/src/index.ts";
 import { assertOpenAICompatibleToolSchemas, createGitHubClient, GitHubInstallationTokenProvider, GitHubPublisher, loadConfig, QaseyMcpCatalog, JiraClient, ReadConnectorCatalog } from "../../packages/adapters/src/index.ts";
 import {
@@ -25,11 +25,12 @@ import {
 import type { WorkspaceRef } from "../../packages/e2e/src/index.ts";
 import { ownerScopeFromRequestContext } from "../platform/context/owner-scope.ts";
 import { createCompositeStore } from "../platform/storage/create-composite-store.ts";
-import { InMemoryChannelDeliveryInbox, PostgresChannelDeliveryInbox } from "../platform/channels/delivery-inbox.ts";
+import { InMemoryChannelDeliveryInbox, PrismaChannelDeliveryInbox } from "../platform/channels/delivery-inbox.ts";
 import { runtimeReadiness } from "../platform/storage/readiness.ts";
-import { InMemorySandboxLeaseStore, PostgresSandboxLeaseStore } from "../platform/workspace/sandbox-lease-store.ts";
+import { InMemorySandboxLeaseStore, PrismaSandboxLeaseStore } from "../platform/workspace/sandbox-lease-store.ts";
 import { SandboxPoolClient } from "../platform/workspace/sandbox-client.ts";
 import { applyDevRuntimeApprovalGate } from "./applications/qasey/dev-runtime-approval-gate.ts";
+import { createApplicationDatabase } from "../platform/storage/prisma.ts";
 
 const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
 const resolveProjectPath = (value: string) => isAbsolute(value) ? value : resolve(projectRoot, value);
@@ -49,6 +50,7 @@ export const studioEditorEnabled = config.QASEY_ENABLE_STUDIO_EDITOR
 export const studioMcpPreviewEnabled = config.QASEY_ENABLE_STUDIO_MCP_PREVIEW
   ?? false;
 export const QASEY_REQUEST_CONTEXT_REQUIRED_MESSAGE = "Qasey request context has not been initialized";
+export const applicationDatabase = config.DATABASE_URL ? createApplicationDatabase(config.DATABASE_URL) : undefined;
 
 /**
  * Compose Mastra domains explicitly: application state, editor definitions,
@@ -65,9 +67,9 @@ const runtimeStore = createCompositeStore({
 });
 export const mastraStorage = runtimeStore.primary;
 export function createMastraRuntimeStorage(): MastraCompositeStore { return runtimeStore.storage; }
-export const runRepository = config.DATABASE_URL ? new PostgresRunRepository(config.DATABASE_URL) : new InMemoryRunRepository();
+export const runRepository = applicationDatabase ? new PrismaRunRepository(applicationDatabase.client) : new InMemoryRunRepository();
 export const channelDeliveryInbox = config.DATABASE_URL
-  ? new PostgresChannelDeliveryInbox(config.DATABASE_URL)
+  ? new PrismaChannelDeliveryInbox(applicationDatabase!.client)
   : new InMemoryChannelDeliveryInbox();
 export const githubReadTokens = config.GITHUB_APP_ID && config.GITHUB_APP_INSTALLATION_ID && config.GITHUB_APP_PRIVATE_KEY
   ? new GitHubInstallationTokenProvider(config)
@@ -80,7 +82,7 @@ const sandboxLeaseOptions = {
 };
 export const sandboxLeaseStore = config.QASEY_SANDBOX_ENABLED
   ? config.DATABASE_URL
-    ? new PostgresSandboxLeaseStore(config.DATABASE_URL, sandboxLeaseOptions)
+    ? new PrismaSandboxLeaseStore(applicationDatabase!.client, sandboxLeaseOptions)
     : new InMemorySandboxLeaseStore(sandboxLeaseOptions)
   : undefined;
 export const sandboxPoolClient = sandboxLeaseStore
@@ -96,10 +98,13 @@ runtimeReadiness.markInitializationStarted();
 runtimeReadiness.register("mastra-storage", async () => {
   if (mastraStorage) await mastraStorage.db.one("SELECT 1");
 });
+if (applicationDatabase) runtimeReadiness.register("application-database", () => applicationDatabase.healthCheck());
 runtimeReadiness.register("run-repository", () => runRepository.healthCheck?.() ?? Promise.resolve());
 runtimeReadiness.register("channel-delivery-inbox", () => channelDeliveryInbox.healthCheck?.() ?? Promise.resolve());
 if (sandboxLeaseStore) runtimeReadiness.register("sandbox-lease-store", () => sandboxLeaseStore.healthCheck());
-export const mcpCatalog = new QaseyMcpCatalog(config);
+export const mcpCatalog = new QaseyMcpCatalog(config, {
+  ...(applicationDatabase ? { database: applicationDatabase.client } : {}),
+});
 runtimeReadiness.register("mcp-oauth-storage", () => mcpCatalog.healthCheck());
 runtimeReadiness.register("metersphere-mcp-tools", () => mcpCatalog.healthCheckRequiredMeterSphereTools());
 export const githubClient = createGitHubClient(config);
@@ -144,6 +149,7 @@ let infrastructureInitialization: Promise<void> | undefined;
 export function initializeQaseyInfrastructure(): Promise<void> {
   infrastructureInitialization ??= Promise.all([
     runtimeStore.storage.init(),
+    applicationDatabase?.init(),
     runRepository.init?.(),
     channelDeliveryInbox.init?.(),
     sandboxLeaseStore?.init(),
@@ -156,6 +162,7 @@ export async function closeQaseyInfrastructure(): Promise<void> {
   const resources: Array<{ close(): Promise<void> }> = [
     mcpCatalog, channelDeliveryInbox, runRepository, runtimeStore.storage,
     ...(sandboxLeaseStore ? [sandboxLeaseStore] : []),
+    ...(applicationDatabase ? [applicationDatabase] : []),
   ];
   const results = await Promise.allSettled(resources.map(resource => resource.close()));
   const errors = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);

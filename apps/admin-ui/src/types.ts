@@ -71,6 +71,19 @@ export interface AuditRecord {
   reason: string;
 }
 
+export interface ApiTokenRecord {
+  id: string;
+  tenantId: string;
+  name: string;
+  prefix: string;
+  scopes: string[];
+  createdBy: string;
+  createdAt: string;
+  expiresAt?: string;
+  lastUsedAt?: string;
+  revokedAt?: string;
+}
+
 export interface SandboxSessionState {
   sessionId: string;
   workspaceId: string;

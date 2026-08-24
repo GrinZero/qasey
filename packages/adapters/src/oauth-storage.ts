@@ -1,7 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { Pool } from "pg";
+import type { PrismaClient } from "@prisma/client";
 import type { OAuthStorage } from "@mastra/mcp";
 
 export class FileOAuthStorage implements OAuthStorage {
@@ -60,62 +60,55 @@ function decrypt(value: string, masterKey: string): string {
   return Buffer.concat([decipher.update(Buffer.from(ciphertext, "base64url")), decipher.final()]).toString("utf8");
 }
 
-export class PostgresOAuthStorageBackend {
-  private readonly pool: Pool;
+export class PrismaOAuthStorageBackend {
   private initialized?: Promise<void>;
 
-  constructor(connectionString: string) {
-    this.pool = new Pool({ connectionString, max: 2 });
-  }
+  constructor(private readonly prisma: PrismaClient) {}
 
   init(): Promise<void> {
-    this.initialized ??= this.pool.query(`CREATE TABLE IF NOT EXISTS qasey_mcp_oauth_credentials (
-      namespace text NOT NULL,
-      storage_key text NOT NULL,
-      encrypted_value text NOT NULL,
-      updated_at timestamptz NOT NULL DEFAULT now(),
-      PRIMARY KEY(namespace, storage_key)
-    )`).then(() => undefined);
+    this.initialized ??= this.prisma.$connect();
     return this.initialized;
   }
 
   private ready(): Promise<void> {
-    if (!this.initialized) return Promise.reject(new Error("PostgresOAuthStorageBackend has not been initialized"));
+    if (!this.initialized) return Promise.reject(new Error("PrismaOAuthStorageBackend has not been initialized"));
     return this.initialized;
   }
 
   async healthCheck(): Promise<void> {
     await this.ready();
-    await this.pool.query("SELECT 1");
+    await this.prisma.$queryRaw`SELECT 1`;
   }
 
   async set(namespace: string, key: string, encryptedValue: string): Promise<void> {
     await this.ready();
-    await this.pool.query(`INSERT INTO qasey_mcp_oauth_credentials(namespace, storage_key, encrypted_value)
-      VALUES($1,$2,$3) ON CONFLICT(namespace, storage_key) DO UPDATE SET encrypted_value=EXCLUDED.encrypted_value, updated_at=now()`,
-    [namespace, key, encryptedValue]);
+    await this.prisma.qaseyMcpOAuthCredential.upsert({
+      where: { namespace_storageKey: { namespace, storageKey: key } },
+      create: { namespace, storageKey: key, encryptedValue },
+      update: { encryptedValue, updatedAt: new Date() },
+    });
   }
 
   async get(namespace: string, key: string): Promise<string | undefined> {
     await this.ready();
-    const result = await this.pool.query<{ encrypted_value: string }>(
-      "SELECT encrypted_value FROM qasey_mcp_oauth_credentials WHERE namespace=$1 AND storage_key=$2",
-      [namespace, key],
-    );
-    return result.rows[0]?.encrypted_value;
+    const result = await this.prisma.qaseyMcpOAuthCredential.findUnique({
+      where: { namespace_storageKey: { namespace, storageKey: key } },
+      select: { encryptedValue: true },
+    });
+    return result?.encryptedValue;
   }
 
   async delete(namespace: string, key: string): Promise<void> {
     await this.ready();
-    await this.pool.query("DELETE FROM qasey_mcp_oauth_credentials WHERE namespace=$1 AND storage_key=$2", [namespace, key]);
+    await this.prisma.qaseyMcpOAuthCredential.deleteMany({ where: { namespace, storageKey: key } });
   }
 
-  async close(): Promise<void> { await this.pool.end(); }
+  async close(): Promise<void> {}
 }
 
-export class PostgresOAuthStorage implements OAuthStorage {
+export class PrismaOAuthStorage implements OAuthStorage {
   constructor(
-    private readonly backend: PostgresOAuthStorageBackend,
+    private readonly backend: PrismaOAuthStorageBackend,
     private readonly masterKey: string,
     private readonly namespace: string,
   ) {}

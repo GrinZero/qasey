@@ -1,67 +1,60 @@
+import type { PrismaClient } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { PrismaRunRepository } from "../../packages/domain/src/run-repository.ts";
+import { PrismaAuditLog } from "../../src/platform/auth/audit-log.ts";
+import { PrismaPermissionStore } from "../../src/platform/auth/permission-store.ts";
+import { PrismaChannelDeliveryInbox } from "../../src/platform/channels/delivery-inbox.ts";
 
-const pg = vi.hoisted(() => ({
-  query: vi.fn(async (_sql: unknown, _params?: unknown[]) => ({ rows: [], rowCount: 0 })),
-  connect: vi.fn(),
-  end: vi.fn(async () => undefined),
-}));
+const database = {
+  $connect: vi.fn(async () => undefined),
+  $queryRaw: vi.fn(async () => [{ value: 1 }]),
+  agentApplicationRun: { findMany: vi.fn(async () => []) },
+  platformChannelDelivery: { create: vi.fn(async () => ({})) },
+  platformAuditLog: { create: vi.fn(async () => ({})) },
+  platformRolePermission: { findMany: vi.fn(async () => []) },
+} as unknown as PrismaClient;
 
-vi.mock("pg", () => ({
-  Pool: class {
-    query = pg.query;
-    connect = pg.connect;
-    end = pg.end;
-  },
-}));
-
-import { PostgresRunRepository } from "../../packages/domain/src/run-repository.ts";
-import { PostgresAuditLog } from "../../src/platform/auth/audit-log.ts";
-import { PostgresPermissionStore } from "../../src/platform/auth/permission-store.ts";
-import { PostgresChannelDeliveryInbox } from "../../src/platform/channels/delivery-inbox.ts";
-
-describe("explicit Postgres initialization", () => {
-  beforeEach(() => {
-    pg.query.mockClear();
-    pg.connect.mockClear();
-    pg.end.mockClear();
-  });
+describe("Prisma repository initialization", () => {
+  beforeEach(() => vi.clearAllMocks());
 
   it.each([
     {
       name: "run repository",
-      create: () => new PostgresRunRepository("postgres://example"),
-      request: (store: PostgresRunRepository) => store.list({ applicationId: "qasey", tenantId: "tenant-1" }),
+      create: () => new PrismaRunRepository(database),
+      request: (store: PrismaRunRepository) => store.list({ applicationId: "qasey", tenantId: "tenant-1" }),
+      operation: () => database.agentApplicationRun.findMany,
     },
     {
       name: "delivery inbox",
-      create: () => new PostgresChannelDeliveryInbox("postgres://example"),
-      request: (store: PostgresChannelDeliveryInbox) => store.accept({ applicationId: "qasey", tenantId: "tenant-1" }, "delivery-1"),
+      create: () => new PrismaChannelDeliveryInbox(database),
+      request: (store: PrismaChannelDeliveryInbox) => store.accept({ applicationId: "qasey", tenantId: "tenant-1" }, "delivery-1"),
+      operation: () => database.platformChannelDelivery.create,
     },
     {
       name: "audit log",
-      create: () => new PostgresAuditLog("postgres://example"),
-      request: (store: PostgresAuditLog) => store.write({
+      create: () => new PrismaAuditLog(database),
+      request: (store: PrismaAuditLog) => store.write({
         requestId: "request-1", resourceType: "agent", resourceId: "qasey-main",
         action: "execute", decision: "allow", reason: "test",
       }),
+      operation: () => database.platformAuditLog.create,
     },
     {
       name: "permission store",
-      create: () => new PostgresPermissionStore("postgres://example"),
-      request: (store: PostgresPermissionStore) => store.permissionsForRoles("tenant-1", ["user"]),
+      create: () => new PrismaPermissionStore(database),
+      request: (store: PrismaPermissionStore) => store.permissionsForRoles("tenant-1", ["user"]),
+      operation: () => database.platformRolePermission.findMany,
     },
-  ])("never runs DDL from a $name request", async ({ create, request }) => {
+  ])("connects explicitly and delegates $name queries to Prisma without runtime DDL", async ({ create, request, operation }) => {
     const store = create();
 
     await expect(request(store as never)).rejects.toThrow("has not been initialized");
-    expect(pg.query).not.toHaveBeenCalled();
+    expect(operation()).not.toHaveBeenCalled();
 
     await store.init();
-    expect(pg.query).toHaveBeenCalledTimes(1);
-    expect(String(pg.query.mock.calls[0]?.[0])).toContain("CREATE TABLE IF NOT EXISTS");
+    expect(database.$connect).toHaveBeenCalledTimes(1);
 
     await request(store as never);
-    expect(pg.query).toHaveBeenCalledTimes(2);
-    expect(String(pg.query.mock.calls[1]?.[0])).not.toContain("CREATE TABLE");
+    expect(operation()).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,4 +1,4 @@
-import { Pool } from "pg";
+import type { PrismaClient } from "@prisma/client";
 import type { OAuthPrincipal } from "./oauth-principal.ts";
 
 export interface PermissionCheck {
@@ -27,6 +27,9 @@ export class PermissionService {
   async authorize(check: PermissionCheck): Promise<boolean> {
     if (check.principal.roles.includes("platform-admin")) return true;
     if (check.principal.tenantId !== check.principal.tenantId.trim()) return false;
+    if (check.principal.scopes) {
+      return check.principal.scopes.includes("*") || check.principal.scopes.includes(check.permission);
+    }
     const boundRoles = await this.store.rolesForSubject(check.principal.tenantId, check.principal.subjectId);
     const permissions = await this.store.permissionsForRoles(check.principal.tenantId, [...check.principal.roles, ...boundRoles]);
     return permissions.has("*") || permissions.has(check.permission);
@@ -97,66 +100,41 @@ export class InMemoryPermissionStore implements PermissionStore {
 
 }
 
-export class PostgresPermissionStore implements PermissionStore {
-  private readonly pool: Pool;
+export class PrismaPermissionStore implements PermissionStore {
   private initialized?: Promise<void>;
 
-  constructor(connectionString: string) {
-    this.pool = new Pool({ connectionString, max: 5 });
-  }
+  constructor(private readonly prisma: PrismaClient) {}
 
   init(): Promise<void> {
-    this.initialized ??= this.pool.query(`
-      CREATE TABLE IF NOT EXISTS platform_roles (
-        tenant_id text NOT NULL,
-        role_id text NOT NULL,
-        PRIMARY KEY (tenant_id, role_id)
-      );
-      CREATE TABLE IF NOT EXISTS platform_role_permissions (
-        tenant_id text NOT NULL,
-        role_id text NOT NULL,
-        permission text NOT NULL,
-        PRIMARY KEY (tenant_id, role_id, permission),
-        FOREIGN KEY (tenant_id, role_id) REFERENCES platform_roles(tenant_id, role_id) ON DELETE CASCADE
-      );
-      CREATE TABLE IF NOT EXISTS platform_subject_roles (
-        tenant_id text NOT NULL,
-        subject_id text NOT NULL,
-        role_id text NOT NULL,
-        PRIMARY KEY (tenant_id, subject_id, role_id),
-        FOREIGN KEY (tenant_id, role_id) REFERENCES platform_roles(tenant_id, role_id) ON DELETE CASCADE
-      );
-    `).then(() => undefined);
+    this.initialized ??= this.prisma.$connect();
     return this.initialized;
   }
 
   private ready(): Promise<void> {
-    if (!this.initialized) return Promise.reject(new Error("PostgresPermissionStore has not been initialized"));
+    if (!this.initialized) return Promise.reject(new Error("PrismaPermissionStore has not been initialized"));
     return this.initialized;
   }
 
   async healthCheck(): Promise<void> {
     await this.ready();
-    await this.pool.query("SELECT 1");
+    await this.prisma.$queryRaw`SELECT 1`;
   }
 
   async permissionsForRoles(tenantId: string, roles: readonly string[]): Promise<ReadonlySet<string>> {
     if (roles.length === 0) return new Set();
     await this.ready();
-    const result = await this.pool.query<{ permission: string }>(
-      "SELECT permission FROM platform_role_permissions WHERE tenant_id = $1 AND role_id = ANY($2::text[])",
-      [tenantId, roles],
-    );
-    return new Set(result.rows.map(row => row.permission));
+    const result = await this.prisma.platformRolePermission.findMany({
+      where: { tenantId, roleId: { in: [...roles] } }, select: { permission: true },
+    });
+    return new Set(result.map(row => row.permission));
   }
 
   async rolesForSubject(tenantId: string, subjectId: string): Promise<ReadonlySet<string>> {
     await this.ready();
-    const result = await this.pool.query<{ role_id: string }>(
-      "SELECT role_id FROM platform_subject_roles WHERE tenant_id = $1 AND subject_id = $2",
-      [tenantId, subjectId],
-    );
-    return new Set(result.rows.map(row => row.role_id));
+    const result = await this.prisma.platformSubjectRole.findMany({
+      where: { tenantId, subjectId }, select: { roleId: true },
+    });
+    return new Set(result.map(row => row.roleId));
   }
 
   async grantRolePermission(tenantId: string, role: string, permission: string): Promise<void> {
@@ -166,48 +144,34 @@ export class PostgresPermissionStore implements PermissionStore {
   async grantRolePermissions(tenantId: string, role: string, permissions: readonly string[]): Promise<void> {
     if (permissions.length === 0) return;
     await this.ready();
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      await client.query(
-        "INSERT INTO platform_roles(tenant_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-        [tenantId, role],
-      );
-      await client.query(
-        `INSERT INTO platform_role_permissions(tenant_id, role_id, permission)
-         SELECT $1, $2, permission FROM unnest($3::text[]) AS permission
-         ON CONFLICT DO NOTHING`,
-        [tenantId, role, [...new Set(permissions)]],
-      );
-      await client.query("COMMIT");
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
+    const uniquePermissions = [...new Set(permissions)];
+    await this.prisma.$transaction(async tx => {
+      await tx.platformRole.upsert({
+        where: { tenantId_roleId: { tenantId, roleId: role } },
+        create: { tenantId, roleId: role }, update: {},
+      });
+      await tx.platformRolePermission.createMany({
+        data: uniquePermissions.map(permission => ({ tenantId, roleId: role, permission })),
+        skipDuplicates: true,
+      });
+    });
   }
 
   async bindSubjectRole(tenantId: string, subjectId: string, role: string): Promise<void> {
     await this.ready();
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      await client.query("INSERT INTO platform_roles(tenant_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [tenantId, role]);
-      await client.query(
-        "INSERT INTO platform_subject_roles(tenant_id, subject_id, role_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-        [tenantId, subjectId, role],
-      );
-      await client.query("COMMIT");
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
+    await this.prisma.$transaction(async tx => {
+      await tx.platformRole.upsert({
+        where: { tenantId_roleId: { tenantId, roleId: role } },
+        create: { tenantId, roleId: role }, update: {},
+      });
+      await tx.platformSubjectRole.upsert({
+        where: { tenantId_subjectId_roleId: { tenantId, subjectId, roleId: role } },
+        create: { tenantId, subjectId, roleId: role }, update: {},
+      });
+    });
   }
 
   async close(): Promise<void> {
-    await this.pool.end();
+    // The shared Prisma client is owned by the runtime lifecycle.
   }
 }

@@ -69,6 +69,9 @@ COPY --from=build /app/.mastra/output ./.mastra/output
 COPY --from=build /app/.mastra/worker ./.mastra/worker
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/apps/admin-ui/dist ./apps/admin-ui/dist
+COPY --from=build /app/package.json /app/prisma.config.ts ./
+COPY --from=build /app/pnpm-workspace.yaml ./pnpm-workspace.yaml
+COPY --from=build /app/prisma ./prisma
 # MCP endpoint metadata is owned and versioned by this application.
 COPY --from=build /app/config/mcp.json ./config/mcp.json
 COPY .env .env.testing .env.devops ./

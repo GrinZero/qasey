@@ -4,12 +4,13 @@ import { MCPClient, MCPOAuthClientProvider } from "@mastra/mcp";
 import type { MastraMCPServerDefinition, OAuthStorage } from "@mastra/mcp";
 import type { ToolsInput } from "@mastra/core/agent";
 import { z } from "zod";
+import type { PrismaClient } from "@prisma/client";
 import type { QaseyChannel } from "../../contracts/src/index.ts";
 import { authorizeDiscoveredToolAccess, TOOL_POLICIES } from "../../domain/src/index.ts";
 import type { QaseyConfig } from "./config.ts";
 import { logError, logInfo } from "./logging.ts";
 import { loadMcpServerConfigs, type McpServerConfig, type McpServerConfigs, type McpServerName } from "./mcp-config.ts";
-import { FileOAuthStorage, PostgresOAuthStorage, PostgresOAuthStorageBackend } from "./oauth-storage.ts";
+import { FileOAuthStorage, PrismaOAuthStorage, PrismaOAuthStorageBackend } from "./oauth-storage.ts";
 import { SubjectMcpClientPool } from "../../../src/platform/mcp/create-clients.ts";
 import { sanitizeOpenAIToolInputSchema } from "./tool-schema-compat.ts";
 
@@ -153,12 +154,12 @@ function storageFor(
   config: QaseyConfig,
   serverName: McpServerName,
   subjectKey: string,
-  postgresBackend?: PostgresOAuthStorageBackend,
+  prismaBackend?: PrismaOAuthStorageBackend,
 ): OAuthStorage {
   const namespace = `qasey:${subjectKey}:${serverName}`;
   if (config.DATABASE_URL && config.MASTRA_ENCRYPTION_KEY) {
-    if (!postgresBackend) throw new Error("Postgres OAuth storage backend has not been configured");
-    return new PostgresOAuthStorage(postgresBackend, config.MASTRA_ENCRYPTION_KEY, namespace);
+    if (!prismaBackend) throw new Error("Prisma OAuth storage backend has not been configured");
+    return new PrismaOAuthStorage(prismaBackend, config.MASTRA_ENCRYPTION_KEY, namespace);
   }
   if (config.NODE_ENV === "production") {
     throw new Error(`OAuth MCP ${serverName} requires DATABASE_URL and MASTRA_ENCRYPTION_KEY in production`);
@@ -173,7 +174,7 @@ function serverDefinition(
   config: QaseyConfig,
   subjectKey?: string,
   onAuthorizationUrl?: (server: McpServerName, url: URL) => void | Promise<void>,
-  postgresBackend?: PostgresOAuthStorageBackend,
+  prismaBackend?: PrismaOAuthStorageBackend,
 ): MastraMCPServerDefinition {
   const endpoint = new URL(spec.url);
   const allowedHosts = [...new Set([endpoint.host, ...spec.allowedHosts])];
@@ -206,7 +207,7 @@ function serverDefinition(
   const clientSecret = spec.auth.clientSecretEnv ? process.env[spec.auth.clientSecretEnv] : undefined;
   if (spec.auth.clientIdEnv && !clientId) throw new Error(`MCP ${name} expects OAuth client ID in ${spec.auth.clientIdEnv}`);
   if (spec.auth.clientSecretEnv && !clientSecret) throw new Error(`MCP ${name} expects OAuth client secret in ${spec.auth.clientSecretEnv}`);
-  const storage = storageFor(config, name, subjectKey, postgresBackend);
+  const storage = storageFor(config, name, subjectKey, prismaBackend);
   const authProvider = new MCPOAuthClientProvider({
     redirectUrl: spec.auth.redirectUrl,
     clientMetadata: {
@@ -226,6 +227,11 @@ function serverDefinition(
 
 export interface QaseyMcpCatalogOptions {
   onAuthorizationUrl?: (server: McpServerName, url: URL) => void | Promise<void>;
+  database?: PrismaClient;
+}
+
+function missingPrismaClient(): never {
+  throw new Error("QaseyMcpCatalog requires the shared Prisma client when DATABASE_URL is configured");
 }
 
 export interface McpCredentialSubject {
@@ -268,13 +274,13 @@ export class QaseyMcpCatalog {
   private sharedClient?: MCPClient;
   private readonly subjectClients: SubjectMcpClientPool;
   private readonly toolDiscovery = new McpToolDiscoveryCache();
-  private readonly oauthBackend: PostgresOAuthStorageBackend | undefined;
+  private readonly oauthBackend: PrismaOAuthStorageBackend | undefined;
   private readonly servers: McpServerConfigs;
 
   constructor(private readonly config: QaseyConfig, private readonly options: QaseyMcpCatalogOptions = {}) {
     this.servers = loadMcpServerConfigs(config);
     this.oauthBackend = config.DATABASE_URL && config.MASTRA_ENCRYPTION_KEY && this.oauthServerNames().length > 0
-      ? new PostgresOAuthStorageBackend(config.DATABASE_URL)
+      ? new PrismaOAuthStorageBackend(options.database ?? missingPrismaClient())
       : undefined;
     this.subjectClients = new SubjectMcpClientPool(subjectKey => new MCPClient({
       id: `qasey-oauth-${createHash("sha256").update(subjectKey).digest("hex").slice(0, 16)}`,

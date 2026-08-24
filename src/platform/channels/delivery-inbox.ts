@@ -1,4 +1,4 @@
-import { Pool } from "pg";
+import type { PrismaClient } from "@prisma/client";
 import type { OwnerScope } from "../../../packages/contracts/src/index.ts";
 
 export interface ChannelDeliveryInbox {
@@ -24,42 +24,38 @@ export class InMemoryChannelDeliveryInbox implements ChannelDeliveryInbox {
   async close(): Promise<void> {}
 }
 
-export class PostgresChannelDeliveryInbox implements ChannelDeliveryInbox {
-  private readonly pool: Pool;
+export class PrismaChannelDeliveryInbox implements ChannelDeliveryInbox {
   private initialized?: Promise<void>;
 
-  constructor(connectionString: string) { this.pool = new Pool({ connectionString, max: 5 }); }
+  constructor(private readonly prisma: PrismaClient) {}
 
   init(): Promise<void> {
-    this.initialized ??= this.pool.query(`CREATE TABLE IF NOT EXISTS platform_channel_deliveries (
-      application_id text NOT NULL,
-      tenant_id text NOT NULL,
-      delivery_id text NOT NULL,
-      accepted_at timestamptz NOT NULL DEFAULT now(),
-      PRIMARY KEY (application_id, tenant_id, delivery_id)
-    )`).then(() => undefined);
+    this.initialized ??= this.prisma.$connect();
     return this.initialized;
   }
 
   private ready(): Promise<void> {
-    if (!this.initialized) return Promise.reject(new Error("PostgresChannelDeliveryInbox has not been initialized"));
+    if (!this.initialized) return Promise.reject(new Error("PrismaChannelDeliveryInbox has not been initialized"));
     return this.initialized;
   }
 
   async healthCheck(): Promise<void> {
     await this.ready();
-    await this.pool.query("SELECT 1");
+    await this.prisma.$queryRaw`SELECT 1`;
   }
 
   async accept(owner: OwnerScope, deliveryId: string): Promise<boolean> {
     await this.ready();
-    const result = await this.pool.query(
-      `INSERT INTO platform_channel_deliveries(application_id, tenant_id, delivery_id)
-       VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
-      [owner.applicationId, owner.tenantId, deliveryId],
-    );
-    return result.rowCount === 1;
+    try {
+      await this.prisma.platformChannelDelivery.create({ data: {
+        applicationId: owner.applicationId, tenantId: owner.tenantId, deliveryId,
+      } });
+      return true;
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error && error.code === "P2002") return false;
+      throw error;
+    }
   }
 
-  async close(): Promise<void> { await this.pool.end(); }
+  async close(): Promise<void> {}
 }

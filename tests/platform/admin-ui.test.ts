@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { createAdminUiApplication, assertSameOrigin, listVisibleApplicationManifests } from "../../src/platform/admin-ui/application.ts";
+import { createAdminUiApplication, assertSameOrigin, availableApiTokenScopes, listVisibleApplicationManifests } from "../../src/platform/admin-ui/application.ts";
 import { loadAdminUiHtml, resolveAdminUiHtmlPath } from "../../src/platform/admin-ui/shell.ts";
 import { InMemoryAuditLog } from "../../src/platform/auth/audit-log.ts";
 import { InMemoryPermissionStore, PermissionService } from "../../src/platform/auth/permission-store.ts";
@@ -13,6 +13,7 @@ import { InMemorySlackInstallationRepository } from "../../src/platform/channels
 import { SlackIntegrationManager } from "../../src/platform/channels/slack-integration-manager.ts";
 import { TriggerProviderRegistry } from "../../src/platform/triggers/trigger-provider-registry.ts";
 import { SlackTriggerProvider } from "../../src/platform/triggers/slack-trigger-provider.ts";
+import { InMemoryApiTokenStore } from "../../src/platform/auth/api-token-store.ts";
 
 const googleOidc = new GoogleOidcService({ callbackUrl: "http://localhost:4111/auth/google/callback", secureCookies: false });
 
@@ -87,6 +88,75 @@ describe("same-origin Admin UI", () => {
     expect(routes.find(route => route.id === "trigger-create")?.access.permission).toBe("platform.triggers.manage");
     expect(routes.map(route => `${route.route.method} ${route.route.path}`)).toContain("POST /admin/api/triggers/connections/:providerId/:id/rebind");
     expect(routes.map(route => `${route.route.method} ${route.route.path}`)).toContain("DELETE /admin/api/triggers/connections/:providerId/:id");
+  });
+
+  it("exposes tenant API Token lifecycle routes and only API-safe application scopes", () => {
+    const app = createAdminUiApplication({
+      publicBaseUrl: "https://runtime.test",
+      applicationCatalog: [
+        { applicationId: "qasey", resourceType: "route", resourceId: "read", permission: "qasey.runs.read", audiences: ["admin-ui", "api"] },
+        { applicationId: "qasey", resourceType: "workflow", resourceId: "worker", permission: "qasey.worker.execute", audiences: ["service"] },
+        { applicationId: "platform", resourceType: "route", resourceId: "manage", permission: "platform.runtime.manage", audiences: ["api"] },
+      ],
+      permissions: new PermissionService(new InMemoryPermissionStore()),
+      audit: new InMemoryAuditLog(), googleOidc, apiTokens: new InMemoryApiTokenStore(),
+    });
+    expect(app.routes?.map(route => `${route.route.method} ${route.route.path}`)).toEqual(expect.arrayContaining([
+      "GET /admin/api/tokens", "POST /admin/api/tokens", "DELETE /admin/api/tokens/:tokenId",
+    ]));
+    expect(app.routes?.filter(route => route.id.startsWith("api-token-")).every(route =>
+      route.access.permission === "platform.api-tokens.manage" && route.access.audiences.includes("admin-ui"),
+    )).toBe(true);
+    expect(availableApiTokenScopes(app.routes ? [
+      { applicationId: "qasey", resourceType: "route", resourceId: "read", permission: "qasey.runs.read", audiences: ["admin-ui", "api"] },
+      { applicationId: "qasey", resourceType: "workflow", resourceId: "worker", permission: "qasey.worker.execute", audiences: ["service"] },
+      { applicationId: "platform", resourceType: "route", resourceId: "manage", permission: "platform.runtime.manage", audiences: ["api"] },
+    ] : [])).toEqual(["qasey.runs.read"]);
+  });
+
+  it("creates and revokes an audited tenant API Token without returning its secret from the list", async () => {
+    const apiTokens = new InMemoryApiTokenStore();
+    const audit = new InMemoryAuditLog();
+    const app = createAdminUiApplication({
+      publicBaseUrl: "https://runtime.test",
+      applicationCatalog: [
+        { applicationId: "qasey", resourceType: "route", resourceId: "read", permission: "qasey.runs.read", audiences: ["api"] },
+      ],
+      permissions: new PermissionService(new InMemoryPermissionStore()), audit, googleOidc, apiTokens,
+    });
+    const principal = { subjectId: "admin-1", tenantId: "tenant-1", roles: ["platform-admin"], audience: "admin-ui", service: false };
+    const requestContext = { get: (key: string) => key === "platform-principal" ? principal : key === "requestId" ? "request-1" : undefined };
+    const createRoute = app.routes?.find(route => route.id === "api-token-create")?.route;
+    if (!createRoute || !("handler" in createRoute)) throw new Error("api-token-create handler is missing");
+    const request = new Request("https://runtime.test/admin/api/tokens", {
+      method: "POST", headers: { origin: "https://runtime.test", "content-type": "application/json" },
+      body: JSON.stringify({ name: "CI runner", scopes: ["qasey.runs.read"] }),
+    });
+    const response = await (createRoute.handler as any)({
+      req: { raw: request, json: () => request.clone().json() },
+      get: (key: string) => key === "requestContext" ? requestContext : undefined,
+      json: (body: unknown, status = 200) => Response.json(body, { status }),
+    });
+    const created = await response.json() as { token: string; record: { id: string } };
+
+    expect(response.status).toBe(201);
+    expect(created.token).toMatch(/^qsy_/u);
+    expect(await apiTokens.list("tenant-1")).toEqual([expect.not.objectContaining({ token: expect.anything() })]);
+    expect(audit.records.at(-1)).toMatchObject({ resourceType: "api-token", action: "create", reason: "api_token_created" });
+
+    const revokeRoute = app.routes?.find(route => route.id === "api-token-revoke")?.route;
+    if (!revokeRoute || !("handler" in revokeRoute)) throw new Error("api-token-revoke handler is missing");
+    const revokeRequest = new Request(`https://runtime.test/admin/api/tokens/${created.record.id}`, {
+      method: "DELETE", headers: { origin: "https://runtime.test" },
+    });
+    const revokeResponse = await (revokeRoute.handler as any)({
+      req: { raw: revokeRequest, param: () => created.record.id },
+      get: (key: string) => key === "requestContext" ? requestContext : undefined,
+      json: (body: unknown, status = 200) => Response.json(body, { status }),
+    });
+    expect(revokeResponse.status).toBe(200);
+    await expect(apiTokens.authenticate(created.token)).resolves.toBeUndefined();
+    expect(audit.records.at(-1)).toMatchObject({ resourceType: "api-token", action: "revoke", reason: "api_token_revoked" });
   });
 
   it("returns 403 instead of 500 when a Trigger mutation fails the origin check", async () => {

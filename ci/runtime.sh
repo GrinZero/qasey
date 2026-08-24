@@ -1,8 +1,16 @@
 #!/bin/sh
 set -eu
 
+migrate_database() {
+  if [ "${NODE_ENV:-development}" = "production" ]; then
+    echo "Applying Prisma database migrations..."
+    pnpm db:migrate:deploy
+  fi
+}
+
 case "${1:-api}" in
   api)
+    migrate_database
     if [ "${NODE_ENV:-development}" = "production" ]; then
       PORT=8080
     else
@@ -16,6 +24,7 @@ case "${1:-api}" in
     exec node .mastra/output/index.mjs
     ;;
   worker)
+    migrate_database
     : "${MASTRA_WORKER_AUTH_TOKEN:?MASTRA_WORKER_AUTH_TOKEN is required for the orchestration worker}"
     exec node .mastra/worker/index.mjs
     ;;

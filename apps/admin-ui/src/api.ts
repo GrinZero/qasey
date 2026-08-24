@@ -1,4 +1,4 @@
-import type { AgentApplication, AuditRecord, CatalogEntry, QaseyRun, SandboxSessionState, Session, TriggerConnection, TriggerProvider, TriggerTarget } from "./types";
+import type { AgentApplication, ApiTokenRecord, AuditRecord, CatalogEntry, QaseyRun, SandboxSessionState, Session, TriggerConnection, TriggerProvider, TriggerTarget } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -91,6 +91,16 @@ export const api = {
     { method: "POST", body: JSON.stringify({ verdict, ...(feedback ? { feedback } : {}) }) },
   ),
   audit: () => requestJson<{ records: AuditRecord[] }>("/admin/api/audit"),
+  apiTokens: () => requestJson<{ tokens: ApiTokenRecord[]; availableScopes: string[] }>("/admin/api/tokens"),
+  createApiToken: (input: { name: string; scopes: string[]; expiresAt?: string }) =>
+    requestJson<{ token: string; record: ApiTokenRecord }>("/admin/api/tokens", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  revokeApiToken: (tokenId: string) => requestJson<{ revoked: true }>(
+    `/admin/api/tokens/${encodeURIComponent(tokenId)}`,
+    { method: "DELETE" },
+  ),
   grant: (role: string, permission: string) => requestJson<{ granted: boolean }>("/admin/api/permissions/grants", {
     method: "POST",
     body: JSON.stringify({ role, permission }),
