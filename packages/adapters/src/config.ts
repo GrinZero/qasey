@@ -70,7 +70,7 @@ export const ConfigSchema = z.object({
   GITHUB_ORG: z.string().default("MoeGolibrary"),
   QASEY_ENABLE_DRAFT_PR: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
   QASEY_PUBLIC_BASE_URL: z.url().default("http://localhost:4111"),
-  QASEY_MCP_CONFIG_FILE: z.string().default(".qasey/mcp.json"),
+  QASEY_MCP_CONFIG_FILE: z.string().default("config/mcp.json"),
   QASEY_MCP_OAUTH_DIR: z.string().default(".qasey/oauth"),
   QASEY_ENABLE_STUDIO_EDITOR: optionalBoolean,
   QASEY_ENABLE_STUDIO_MCP_PREVIEW: optionalBoolean,

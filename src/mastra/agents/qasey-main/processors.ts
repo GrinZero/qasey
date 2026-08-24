@@ -7,7 +7,13 @@ import {
 } from "@mastra/core/processors";
 import type { Processor, ProcessInputStepArgs, ProcessInputStepResult } from "@mastra/core/processors";
 import { QASEY_REQUIRED_METERSPHERE_TOOL_NAMES } from "../../../../packages/adapters/src/index.ts";
-import { config, toolsForRequest } from "../../runtime.ts";
+import {
+  config,
+  getRuntimeContext,
+  QASEY_REQUEST_CONTEXT_REQUIRED_MESSAGE,
+  studioMcpPreviewEnabled,
+  toolsForRequest,
+} from "../../runtime.ts";
 
 /** Time is the primary run limit; this only protects against an unexpectedly hot loop. */
 export const QASEY_AGENT_SAFETY_MAX_STEPS = 10_000;
@@ -53,6 +59,24 @@ class QaseyDirectToolsProcessor implements Processor {
 
   async processInputStep({ tools }: ProcessInputStepArgs): Promise<ProcessInputStepResult> {
     return { tools: { ...tools, ...this.directTools } };
+  }
+}
+
+/**
+ * Mastra resolves dynamic processors with an empty context while serializing
+ * Agent metadata. Keep that path side-effect free, but preserve strict context
+ * validation when the resulting processor workflow actually executes.
+ */
+class RequireQaseyRequestContextProcessor implements Processor {
+  readonly id = "qasey-require-request-context";
+
+  processInputStep({ requestContext }: ProcessInputStepArgs): ProcessInputStepResult {
+    const studioRequest = requestContext?.get("ingressSource") === "mastra-studio";
+    getRuntimeContext(requestContext, {
+      allowNativeContext: true,
+      allowStudioPreview: studioRequest && studioMcpPreviewEnabled,
+    });
+    return {};
   }
 }
 
@@ -103,7 +127,15 @@ export async function resolveQaseyMainInputProcessors({
 }: {
   requestContext: RequestContext<any>;
 }) {
-  const tools = await toolsForRequest(requestContext);
+  let tools: Awaited<ReturnType<typeof toolsForRequest>>;
+  try {
+    tools = await toolsForRequest(requestContext);
+  } catch (error) {
+    if (!(error instanceof Error) || error.message !== QASEY_REQUEST_CONTEXT_REQUIRED_MESSAGE) throw error;
+    // `Agent.getConfiguredProcessorWorkflows()` deliberately supplies a fresh,
+    // empty RequestContext. It needs the stable processor topology, not tools.
+    tools = {} as Awaited<ReturnType<typeof toolsForRequest>>;
+  }
   const { directTools, searchableTools } = partitionQaseyDirectTools(tools);
   const modelOutputToolNames = Object.entries(tools)
     .filter(([, tool]) => {
@@ -111,6 +143,7 @@ export async function resolveQaseyMainInputProcessors({
     })
     .map(([toolName]) => toolName);
   return [
+    new RequireQaseyRequestContextProcessor(),
     new ToolSearchProcessor({
       tools: searchableTools,
       storage: "context",

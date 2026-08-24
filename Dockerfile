@@ -26,8 +26,8 @@ RUN npx npm-cli-login \
 
 FROM dependencies AS build
 COPY . .
-# The tracked MCP catalogue contains endpoint metadata only. Credentials stay
-# in environment variables populated at runtime.
+# MCP endpoint metadata is business-owned and versioned with the application.
+# Credentials remain runtime-injected environment variables.
 RUN pnpm build
 
 FROM mcr.microsoft.com/playwright:v1.62.1-noble AS runtime
@@ -69,7 +69,8 @@ COPY --from=build /app/.mastra/output ./.mastra/output
 COPY --from=build /app/.mastra/worker ./.mastra/worker
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/apps/admin-ui/dist ./apps/admin-ui/dist
-COPY --from=build /app/.qasey/mcp.json ./.qasey/mcp.json
+# MCP endpoint metadata is owned and versioned by this application.
+COPY --from=build /app/config/mcp.json ./config/mcp.json
 COPY .env .env.testing .env.devops ./
 COPY ci ./ci
 RUN corepack enable \

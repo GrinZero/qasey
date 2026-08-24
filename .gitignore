@@ -9,7 +9,6 @@ playwright-report/
 test-results/
 *.log
 .DS_Store
-!.qasey/mcp.json
 .playwright-cli
 
 # @moego/aws-secret-env

@@ -47,6 +47,7 @@ export const studioEditorEnabled = config.QASEY_ENABLE_STUDIO_EDITOR
   ?? config.NODE_ENV === "development";
 export const studioMcpPreviewEnabled = config.QASEY_ENABLE_STUDIO_MCP_PREVIEW
   ?? false;
+export const QASEY_REQUEST_CONTEXT_REQUIRED_MESSAGE = "Qasey request context has not been initialized";
 
 /**
  * Compose Mastra domains explicitly: application state, editor definitions,
@@ -280,7 +281,7 @@ export function getRuntimeContext(
     };
   }
   if (!context.success && options.allowStudioPreview) return studioPreviewRuntime;
-  if (!context.success) throw new Error("Qasey request context has not been initialized");
+  if (!context.success) throw new Error(QASEY_REQUEST_CONTEXT_REQUIRED_MESSAGE);
   return { "qasey-context": context.data };
 }
 

@@ -3,7 +3,6 @@
 .env.local
 .env.*.local
 .qasey/*
-!.qasey/mcp.json
 .mastra
 dist
 node_modules
