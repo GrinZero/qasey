@@ -17,7 +17,7 @@ describe("shared runtime configuration", () => {
   it("uses native workflow and memory defaults", () => {
     const config = loadConfig({ NODE_ENV: "test" } as NodeJS.ProcessEnv);
     expect(config.QASEY_INTENT_TIMEOUT_MS).toBe(60_000);
-    expect(config.QASEY_AGENT_TIMEOUT_MS).toBe(1_800_000);
+    expect(config.QASEY_AGENT_TIMEOUT_MS).toBe(3_000_000);
     expect(config.QASEY_MEMORY_MODEL).toBe("gpt-5.6-luna");
     expect(config.QASEY_MEMORY_MESSAGE_TOKENS).toBe(30_000);
     expect(config.QASEY_MEMORY_OBSERVATION_TOKENS).toBe(40_000);

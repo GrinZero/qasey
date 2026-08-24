@@ -92,7 +92,7 @@ export const ConfigSchema = z.object({
   QASEY_MAX_REPAIRS: z.coerce.number().int().min(0).max(5).default(2),
   QASEY_SHADOW_MODE: z.enum(["true", "false"]).default("true").transform(value => value === "true"),
   QASEY_INTENT_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(300_000).default(60_000),
-  QASEY_AGENT_TIMEOUT_MS: z.coerce.number().int().min(10_000).default(1_800_000),
+  QASEY_AGENT_TIMEOUT_MS: z.coerce.number().int().min(10_000).default(50 * 60_000),
   QASEY_MEMORY_MODEL: z.string().min(1).default("gpt-5.6-luna"),
   QASEY_MEMORY_MESSAGE_TOKENS: z.coerce.number().int().min(5_000).default(30_000),
   QASEY_MEMORY_OBSERVATION_TOKENS: z.coerce.number().int().min(5_000).default(40_000),

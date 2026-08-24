@@ -360,19 +360,19 @@ export async function toolsForRequest(requestContext?: RequestContext<any>) {
   const contextProvided = QaseyRequestContextSchema.safeParse(
     requestContext?.get("qasey-context"),
   ).success;
+  const studioRequest = requestContext?.get("ingressSource") === "mastra-studio";
   const runtimeContext = getRuntimeContext(requestContext, {
     allowNativeContext: true,
-    allowStudioPreview: config.NODE_ENV === "development",
+    allowStudioPreview: studioRequest && studioMcpPreviewEnabled,
   });
   const { "qasey-context": context } = runtimeContext;
   // Agent detail/chat requests from Studio do not carry Qasey's ingress
-  // context. Development Studio may discover MCP tools, but previews are
+  // context. Flag-enabled Studio previews may discover MCP tools, but they are
   // deliberately read-only so write-capable MCP tools remain filtered out.
   if (!contextProvided) {
     const subject = mcpSubject(requestContext);
-    const studioRequest = requestContext?.get("ingressSource") === "mastra-studio";
     const discoverExternal = studioRequest
-      ? config.NODE_ENV === "development" && studioMcpPreviewEnabled
+      ? studioMcpPreviewEnabled
       : runtimeContext.native;
     const external = discoverExternal
       ? await mcpCatalog.toolsForDiscovery(context.channel, subject, {

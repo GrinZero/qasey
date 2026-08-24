@@ -8,21 +8,67 @@ import {
 import type { Processor, ProcessInputStepArgs, ProcessInputStepResult } from "@mastra/core/processors";
 import { config, toolsForRequest } from "../../runtime.ts";
 
-export const QASEY_AGENT_MAX_STEPS = 80;
+/** Time is the primary run limit; this only protects against an unexpectedly hot loop. */
+export const QASEY_AGENT_SAFETY_MAX_STEPS = 10_000;
+export const QASEY_AGENT_FINAL_RESPONSE_GRACE_MS = 5 * 60_000;
 
-/** Durable-safe final-turn policy configured on the Agent instead of a per-call closure. */
-export class EnsureQaseyFinalResponseProcessor implements Processor {
+const QASEY_RUN_STARTED_AT_STATE_KEY = "qasey-run-started-at";
+const QASEY_DIRECT_TOOL_NAMES = new Set([
+  "metersphere_ms_bulk_upsert_test_cases",
+  "metersphere_ms_get_test_case_detail",
+  "metersphere_ms_list_modules",
+  "metersphere_ms_list_test_cases",
+]);
+
+/** Reserve time for a final answer before the wall-clock abort signal fires. */
+export class EnsureQaseyDeadlineResponseProcessor implements Processor {
   readonly id = "qasey-ensure-final-response";
 
-  async processInputStep({ stepNumber, sendSignal }: ProcessInputStepArgs): Promise<ProcessInputStepResult> {
-    if (stepNumber !== QASEY_AGENT_MAX_STEPS - 1) return {};
+  constructor(
+    private readonly timeoutMs = config.QASEY_AGENT_TIMEOUT_MS,
+    private readonly finalResponseGraceMs = QASEY_AGENT_FINAL_RESPONSE_GRACE_MS,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  async processInputStep({ state, sendSignal }: ProcessInputStepArgs): Promise<ProcessInputStepResult> {
+    const currentTime = this.now();
+    const storedStartedAt = state[QASEY_RUN_STARTED_AT_STATE_KEY];
+    const startedAt = typeof storedStartedAt === "number" ? storedStartedAt : currentTime;
+    state[QASEY_RUN_STARTED_AT_STATE_KEY] = startedAt;
+    const remainingMs = this.timeoutMs - (currentTime - startedAt);
+    if (remainingMs > this.finalResponseGraceMs) return {};
     await sendSignal?.({
       type: "reactive",
-      contents: "这是最后一步。不要再调用工具；请基于已经取得的结果给出完整最终回答。",
-      attributes: { reason: "max-steps-reached", step: stepNumber + 1 },
+      contents: "运行即将达到时间上限。不要再调用工具；请基于已经取得的结果给出完整最终回答，并明确尚未完成的事项。",
+      attributes: {
+        reason: "deadline-approaching",
+        deadlineMs: this.timeoutMs,
+        remainingMs: Math.max(0, remainingMs),
+      },
     });
     return { toolChoice: "none" };
   }
+}
+
+class QaseyDirectToolsProcessor implements Processor {
+  readonly id = "qasey-direct-tools";
+
+  constructor(private readonly directTools: Record<string, unknown>) {}
+
+  async processInputStep({ tools }: ProcessInputStepArgs): Promise<ProcessInputStepResult> {
+    return { tools: { ...tools, ...this.directTools } };
+  }
+}
+
+export function partitionQaseyDirectTools<T extends Record<string, unknown>>(tools: T): {
+  directTools: T;
+  searchableTools: T;
+} {
+  const entries = Object.entries(tools);
+  return {
+    directTools: Object.fromEntries(entries.filter(([toolName]) => QASEY_DIRECT_TOOL_NAMES.has(toolName))) as T,
+    searchableTools: Object.fromEntries(entries.filter(([toolName]) => !QASEY_DIRECT_TOOL_NAMES.has(toolName))) as T,
+  };
 }
 
 export function createQaseyContextProcessors(modelOutputToolNames: string[] = []) {
@@ -36,7 +82,7 @@ export function createQaseyContextProcessors(modelOutputToolNames: string[] = []
       exclude: modelOutputToolNames,
       preserveModelOutput: true,
     }),
-    new EnsureQaseyFinalResponseProcessor(),
+    new EnsureQaseyDeadlineResponseProcessor(),
     new TokenLimiter({ limit: config.QASEY_MEMORY_INPUT_TOKEN_LIMIT }),
   ];
 }
@@ -51,9 +97,10 @@ export function createQaseyStreamBatcher() {
 }
 
 /**
- * Resolve the caller-bound capability catalog once per request. The catalog is
- * kept out of the model prompt until qasey-main discovers a relevant tool.
- * Agent-level Skill tools remain framework-managed and are not hidden here.
+ * Resolve the caller-bound capability catalog once per request. Stable
+ * MeterSphere case-management tools are injected directly; optional tools stay
+ * out of the prompt until qasey-main discovers them. Agent-level Skill tools
+ * remain framework-managed and are not hidden here.
  */
 export async function resolveQaseyMainInputProcessors({
   requestContext,
@@ -61,6 +108,7 @@ export async function resolveQaseyMainInputProcessors({
   requestContext: RequestContext<any>;
 }) {
   const tools = await toolsForRequest(requestContext);
+  const { directTools, searchableTools } = partitionQaseyDirectTools(tools);
   const modelOutputToolNames = Object.entries(tools)
     .filter(([, tool]) => {
       return Boolean(tool && typeof tool === "object" && "toModelOutput" in tool && typeof tool.toModelOutput === "function");
@@ -68,13 +116,14 @@ export async function resolveQaseyMainInputProcessors({
     .map(([toolName]) => toolName);
   return [
     new ToolSearchProcessor({
-      tools,
+      tools: searchableTools,
       storage: "context",
       search: {
         topK: 8,
         autoLoad: true,
       },
     }),
+    new QaseyDirectToolsProcessor(directTools),
     ...createQaseyContextProcessors(modelOutputToolNames),
   ];
 }

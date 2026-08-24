@@ -25,7 +25,7 @@ import {
 import type { QaseyRequestSpan, QaseyTraceContext } from "./observability.ts";
 import { config } from "../../runtime.ts";
 import { meterSphereCaseWorkflowRunId, runMeterSphereCaseOperationWorkflow } from "../../workflows/metersphere-case-workflow.ts";
-import { QASEY_AGENT_MAX_STEPS } from "../../agents/qasey-main/processors.ts";
+import { QASEY_AGENT_SAFETY_MAX_STEPS } from "../../agents/qasey-main/processors.ts";
 import { conversationScope } from "../../../platform/context/conversation-scope.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../../../platform/context/schema.ts";
 
@@ -214,7 +214,7 @@ export async function runQaseyAgentPhase(
     requestContext,
     ...(options.tracingContext ? { tracingContext: options.tracingContext } : {}),
     runId,
-    maxSteps: QASEY_AGENT_MAX_STEPS,
+    maxSteps: QASEY_AGENT_SAFETY_MAX_STEPS,
     abortSignal,
     memory: {
       thread: requestContext.get(MASTRA_THREAD_ID_KEY),

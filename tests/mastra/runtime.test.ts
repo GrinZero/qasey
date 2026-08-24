@@ -22,21 +22,35 @@ describe("Qasey runtime context", () => {
     await expect(toolsForRequest()).rejects.toThrow("Qasey request context has not been initialized");
   });
 
-  // it("keeps Studio MCP discovery opt-in even when authenticated context is native", async () => {
-  //   const requestContext = new RequestContext();
-  //   requestContext.set("identity", { userId: "studio-user", tenantId: "tenant-1", roles: ["user"], service: false });
-  //   requestContext.set("requestId", "studio-request");
-  //   requestContext.set("sessionId", "studio-session");
-  //   requestContext.set("ingressSource", "mastra-studio");
-  //   const discover = vi.spyOn(mcpCatalog, "toolsFor");
+  it("enables read-only MCP discovery for authenticated Studio previews", async () => {
+    const requestContext = new RequestContext();
+    requestContext.set("identity", { userId: "studio-user", tenantId: "tenant-1", roles: ["user"], service: false });
+    requestContext.set("requestId", "studio-request");
+    requestContext.set("sessionId", "studio-session");
+    requestContext.set("applicationId", "qasey");
+    requestContext.set("ingressSource", "mastra-studio");
+    const listModules = createTool({
+      id: "metersphere_ms_list_modules",
+      description: "List MeterSphere modules",
+      inputSchema: z.object({}),
+      outputSchema: z.object({ modules: z.array(z.string()) }),
+      execute: async () => ({ modules: [] }),
+    });
+    const discover = vi.spyOn(mcpCatalog, "toolsForDiscovery").mockResolvedValue({
+      metersphere_ms_list_modules: listModules,
+    });
 
-  //   const tools = await toolsForRequest(requestContext);
+    const tools = await toolsForRequest(requestContext);
 
-  //   expect(studioMcpPreviewEnabled).toBe(false);
-  //   expect(discover).not.toHaveBeenCalled();
-  //   expect(tools).toHaveProperty("getCurrentTime");
-  //   discover.mockRestore();
-  // });
+    expect(studioMcpPreviewEnabled).toBe(true);
+    expect(discover).toHaveBeenCalledWith("api", expect.objectContaining({
+      applicationId: "qasey",
+      tenantId: "tenant-1",
+      subjectId: "studio-user",
+    }), { readOnly: true });
+    expect(tools).toHaveProperty("metersphere_ms_list_modules", listModules);
+    discover.mockRestore();
+  });
 
   it("rejects partial values injected under Qasey keys by a playground", () => {
     const requestContext = new RequestContext();

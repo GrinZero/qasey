@@ -2,12 +2,17 @@ import { agentConfig } from "@mastra/core/agent";
 import { qaseyResponsesModel } from "../../applications/qasey/models.ts";
 import { PlatformRequestContextSchema } from "../../../platform/context/schema.ts";
 import { qaseyChannels } from "../../applications/qasey/channels.ts";
-import { createQaseyStreamBatcher, resolveQaseyMainInputProcessors } from "./processors.ts";
+import { config } from "../../runtime.ts";
+import {
+  createQaseyStreamBatcher,
+  QASEY_AGENT_SAFETY_MAX_STEPS,
+  resolveQaseyMainInputProcessors,
+} from "./processors.ts";
 
 export default agentConfig({
   id: "qasey-main",
   name: "Qasey",
-  durable: true,
+  durable: { maxSteps: QASEY_AGENT_SAFETY_MAX_STEPS },
   description: "MoeGo QA 需求分析、测试用例设计与 E2E 编写智能体",
   model: [{
     model: qaseyResponsesModel,
@@ -24,6 +29,10 @@ export default agentConfig({
     },
   }],
   requestContextSchema: PlatformRequestContextSchema,
+  defaultOptions: () => ({
+    maxSteps: QASEY_AGENT_SAFETY_MAX_STEPS,
+    abortSignal: AbortSignal.timeout(config.QASEY_AGENT_TIMEOUT_MS),
+  }),
   ...(qaseyChannels ? { channels: qaseyChannels } : {}),
   inputProcessors: resolveQaseyMainInputProcessors,
   outputProcessors: [createQaseyStreamBatcher()],

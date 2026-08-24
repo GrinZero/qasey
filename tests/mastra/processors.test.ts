@@ -4,8 +4,8 @@ import { ToolCallFilter } from "@mastra/core/processors";
 import { describe, expect, it, vi } from "vitest";
 import {
   createQaseyContextProcessors,
-  EnsureQaseyFinalResponseProcessor,
-  QASEY_AGENT_MAX_STEPS,
+  EnsureQaseyDeadlineResponseProcessor,
+  partitionQaseyDirectTools,
 } from "../../src/mastra/agents/qasey-main/processors.ts";
 
 describe("qasey-main processors", () => {
@@ -99,21 +99,48 @@ describe("qasey-main processors", () => {
     })]);
   });
 
-  it("forces a text-only last step using a static durable-safe processor", async () => {
+  it("forces a text-only response when the wall-clock deadline approaches", async () => {
     const sendSignal = vi.fn();
-    const processor = new EnsureQaseyFinalResponseProcessor();
+    let now = 1_000;
+    const processor = new EnsureQaseyDeadlineResponseProcessor(50 * 60_000, 5 * 60_000, () => now);
+    const state = {};
 
     await expect(processor.processInputStep({
-      stepNumber: QASEY_AGENT_MAX_STEPS - 2,
+      state,
       sendSignal,
     } as never)).resolves.toEqual({});
+    now += 45 * 60_000;
     await expect(processor.processInputStep({
-      stepNumber: QASEY_AGENT_MAX_STEPS - 1,
+      state,
       sendSignal,
     } as never)).resolves.toEqual({ toolChoice: "none" });
     expect(sendSignal).toHaveBeenCalledWith(expect.objectContaining({
       type: "reactive",
-      attributes: { reason: "max-steps-reached", step: QASEY_AGENT_MAX_STEPS },
+      attributes: {
+        reason: "deadline-approaching",
+        deadlineMs: 3_000_000,
+        remainingMs: 300_000,
+      },
     }));
+  });
+
+  it("keeps MeterSphere case-management tools out of semantic search", () => {
+    const direct = { description: "direct" } as never;
+    const optional = { description: "optional" } as never;
+    const partitioned = partitionQaseyDirectTools({
+      metersphere_ms_list_modules: direct,
+      metersphere_ms_list_test_cases: direct,
+      metersphere_ms_get_test_case_detail: direct,
+      metersphere_ms_bulk_upsert_test_cases: direct,
+      slack_search_messages: optional,
+    });
+
+    expect(Object.keys(partitioned.directTools).sort()).toEqual([
+      "metersphere_ms_bulk_upsert_test_cases",
+      "metersphere_ms_get_test_case_detail",
+      "metersphere_ms_list_modules",
+      "metersphere_ms_list_test_cases",
+    ]);
+    expect(Object.keys(partitioned.searchableTools)).toEqual(["slack_search_messages"]);
   });
 });
