@@ -19,7 +19,7 @@
     "db:migrate": "prisma migrate dev",
     "db:migrate:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "pnpm db:generate && tsc --noEmit",
     "pretest": "pnpm admin-ui:build",
     "test": "NODE_ENV=test QASEY_SHADOW_MODE=false vitest run",
     "test:watch": "NODE_ENV=test QASEY_SHADOW_MODE=false vitest",
