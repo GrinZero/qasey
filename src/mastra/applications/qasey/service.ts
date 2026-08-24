@@ -1,5 +1,6 @@
 import { RequestContext } from "@mastra/core/request-context";
 import type { Mastra } from "@mastra/core/mastra";
+import type { DurableAgentStreamResult } from "@mastra/core/agent/durable";
 import type { ChunkType } from "@mastra/core/stream";
 import {
   type AgentProgressReport,
@@ -283,19 +284,24 @@ export async function runQaseyAgentPhase(
         });
       },
     ),
-  });
-  let step = 0;
-  let stepText = "";
-  for await (const chunk of stream.fullStream) {
-    if (chunk.type === "step-start") stepText = "";
-    if (chunk.type === "text-delta") stepText = `${stepText}${chunk.payload.text}`.slice(0, 2_000);
-    let event = agentRuntimeEventFromChunk(runId, step, chunk);
-    if (event?.type === "step-start") step = event.step;
-    if (event?.type === "step-finish" && !event.text && stepText.trim()) event = { ...event, text: stepText };
-    if (event) await options.events?.onAgentRuntimeEvent?.(event);
-    if (event?.type === "step-finish") stepText = "";
+  }) as unknown as DurableAgentStreamResult;
+  let result: Awaited<ReturnType<typeof stream.output.getFullOutput>>;
+  try {
+    let step = 0;
+    let stepText = "";
+    for await (const chunk of stream.fullStream) {
+      if (chunk.type === "step-start") stepText = "";
+      if (chunk.type === "text-delta") stepText = `${stepText}${chunk.payload.text}`.slice(0, 2_000);
+      let event = agentRuntimeEventFromChunk(runId, step, chunk);
+      if (event?.type === "step-start") step = event.step;
+      if (event?.type === "step-finish" && !event.text && stepText.trim()) event = { ...event, text: stepText };
+      if (event) await options.events?.onAgentRuntimeEvent?.(event);
+      if (event?.type === "step-finish") stepText = "";
+    }
+    result = await stream.output.getFullOutput();
+  } finally {
+    stream.cleanup();
   }
-  const result = await stream.getFullOutput();
   abortSignal.throwIfAborted();
   const completedResult = restoreProcessedAgentOutput(result, finishSnapshot);
   const casePlan = options.resumeCasePlan ?? extractMeterSphereCasePlan(completedResult);

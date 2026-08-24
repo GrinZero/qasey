@@ -76,6 +76,7 @@ describe("Qasey service completion", () => {
 
   it("consumes the Agent full stream and forwards lifecycle events", async () => {
     const runtimeEvents: string[] = [];
+    const cleanup = vi.fn();
     const mastra = mockMastra(async () => ({
       finishReason: "stop",
       text: "review complete",
@@ -85,13 +86,14 @@ describe("Qasey service completion", () => {
       { type: "tool-call", runId: "run-1", from: "AGENT", payload: { toolCallId: "call-1", toolName: "jira_get_issue", args: { issueKey: "FIN-1" } } },
       { type: "tool-result", runId: "run-1", from: "AGENT", payload: { toolCallId: "call-1", toolName: "jira_get_issue", result: { summary: "Payment migration" } } },
       { type: "step-finish", runId: "run-1", from: "AGENT", payload: { stepResult: { reason: "stop" }, output: { text: "review complete", usage: {}, toolCalls: [] }, metadata: {} } },
-    ]);
+    ], cleanup);
 
     await executeQasey(mastra, context, {
       events: { onAgentRuntimeEvent: event => { runtimeEvents.push(`${event.step}:${event.type}`); } },
     });
 
     expect(runtimeEvents).toEqual(["1:step-start", "1:tool-call", "1:tool-result", "1:step-finish"]);
+    expect(cleanup).toHaveBeenCalledOnce();
   });
 
   it("restores aggregate fields that durable stream batching omits", () => {
@@ -201,6 +203,7 @@ describe("Qasey service completion", () => {
 function mockMastra(
   runAgent: (prompt: unknown, options: Record<string, any>) => Promise<Record<string, unknown>>,
   chunks: any[] = [],
+  cleanup: () => void = () => {},
 ): Mastra {
   return {
     getAgent: () => ({
@@ -213,7 +216,10 @@ function mockMastra(
               controller.close();
             },
           }),
-          getFullOutput: async () => output,
+          output: {
+            getFullOutput: async () => output,
+          },
+          cleanup,
         };
       },
     }),
