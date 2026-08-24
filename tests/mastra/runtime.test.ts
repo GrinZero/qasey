@@ -128,6 +128,43 @@ describe("Qasey runtime context", () => {
     expect(tooling.codeModeInstructions).toBeUndefined();
   });
 
+  it("rejects provider-incompatible schemas from the final request catalogue", async () => {
+    const incompatible = createTool({
+      id: "incompatible",
+      description: "fixture",
+      inputSchema: z.object({ value: z.string().regex(/^(?!bad).+$/u) }),
+      execute: async ({ value }) => value,
+    });
+
+    await expect(buildQaseyAgentTooling({ incompatible })).rejects.toThrow(
+      "OpenAI-incompatible tool schemas: incompatible$.properties.value.pattern",
+    );
+  });
+
+  it("keeps the complete request-scoped tool catalogue OpenAI-compatible", async () => {
+    const requestContext = new RequestContext();
+    const context: QaseyRequestContext = {
+      requestId: "request-schema-contract",
+      channel: "api",
+      sessionId: "session-schema-contract",
+      chatInput: "validate the complete tool catalogue",
+      actor: { id: "actor-schema-contract" },
+      source: {},
+      attachments: [],
+    };
+    requestContext.set("qasey-context", context);
+    requestContext.set("agent-progress-session", new AgentProgressSession(() => undefined));
+    vi.spyOn(mcpCatalog, "toolsForDiscovery").mockResolvedValue({});
+
+    const tools = await toolsForRequest(requestContext);
+    const tooling = await buildQaseyAgentTooling(tools);
+
+    expect(tooling.tools).toHaveProperty("getCurrentTime");
+    expect(tooling.tools).toHaveProperty("qasey_report_progress");
+    expect(tooling.tools).toHaveProperty("e2eCreateRun");
+    expect(tooling.codeModeToolNames).toEqual([]);
+  });
+
   it("runs parallel read tools through the isolated QuickJS Code Mode transport", async () => {
     const seen: string[] = [];
     const observedSpans: Array<{ name: string; status: "success" | "error" }> = [];

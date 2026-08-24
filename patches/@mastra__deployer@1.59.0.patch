@@ -1,5 +1,23 @@
+diff --git a/dist/analyze-BIrkd7zx.cjs b/dist/analyze-BIrkd7zx.cjs
+index 01a325b20fbdbf7d027cf4177de4f83101322c31..7f81b580a62f1bb58ff32104192c223921520c68 100644
+--- a/dist/analyze-BIrkd7zx.cjs
++++ b/dist/analyze-BIrkd7zx.cjs
+@@ -937 +937,3 @@ function checkConfigExport(result) {
+-				if (_babel_core.types.isIdentifier(varDecl?.id, { name: "mastra" }) && _babel_core.types.isNewExpression(varDecl.init) && _babel_core.types.isIdentifier(varDecl.init.callee, { name: "Mastra" })) result.hasValidConfig = true;
++				const isDirectMastra = _babel_core.types.isNewExpression(varDecl?.init) && _babel_core.types.isIdentifier(varDecl.init.callee, { name: "Mastra" });
++				const isFsAgentWrapper = _babel_core.types.isIdentifier(varDecl?.init, { name: "__mastra" });
++				if (_babel_core.types.isIdentifier(varDecl?.id, { name: "mastra" }) && (isDirectMastra || isFsAgentWrapper)) result.hasValidConfig = true;
+diff --git a/dist/analyze-CNv6Qdaz.js b/dist/analyze-CNv6Qdaz.js
+index 88db023840018e49d7f5535fef21b153b5c4e21f..424fa80d96535e9a685d69b0c5cf72e1c9c0706c 100644
+--- a/dist/analyze-CNv6Qdaz.js
++++ b/dist/analyze-CNv6Qdaz.js
+@@ -949 +949,3 @@ function checkConfigExport(result) {
+-				if (types.isIdentifier(varDecl?.id, { name: "mastra" }) && types.isNewExpression(varDecl.init) && types.isIdentifier(varDecl.init.callee, { name: "Mastra" })) result.hasValidConfig = true;
++				const isDirectMastra = types.isNewExpression(varDecl?.init) && types.isIdentifier(varDecl.init.callee, { name: "Mastra" });
++				const isFsAgentWrapper = types.isIdentifier(varDecl?.init, { name: "__mastra" });
++				if (types.isIdentifier(varDecl?.id, { name: "mastra" }) && (isDirectMastra || isFsAgentWrapper)) result.hasValidConfig = true;
 diff --git a/dist/services-BRF1RRXB.js b/dist/services-BRF1RRXB.js
-index 98a6326a44a4cc5bdba746341f6f601570cff2a1..0ee0287696d67c1871486c1c08e97c744b2264bb 100644
+index 98a6326a44a4cc5bdba746341f6f601570cff2a1..8ed05aba375b402a96e74faef772b625fcf65d72 100644
 --- a/dist/services-BRF1RRXB.js
 +++ b/dist/services-BRF1RRXB.js
 @@ -140,9 +140,63 @@ function copyPnpmWorkspaceSettings(source, options = {}) {
@@ -80,7 +98,7 @@ index 98a6326a44a4cc5bdba746341f6f601570cff2a1..0ee0287696d67c1871486c1c08e97c74
  	async writeYarnConfig(dir, options) {
  		const yarnrcPath = path.join(dir, ".yarnrc.yml");
 diff --git a/dist/services-_ksvysL5.cjs b/dist/services-_ksvysL5.cjs
-index 706ee2325e2c4adc5b229bde1a9b7531116f3336..bec9c37901be2a299b7efa5cb7f821969e6a6592 100644
+index 706ee2325e2c4adc5b229bde1a9b7531116f3336..e2e5b836f9d7f2f879cd6c7491b9ffce45b76c32 100644
 --- a/dist/services-_ksvysL5.cjs
 +++ b/dist/services-_ksvysL5.cjs
 @@ -144,9 +144,63 @@ function copyPnpmWorkspaceSettings(source, options = {}) {

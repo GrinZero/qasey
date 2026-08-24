@@ -15,6 +15,11 @@ const ReadConnectorOutputSchema = z.object({
 
 type ReadConnectorOutput = z.infer<typeof ReadConnectorOutputSchema>;
 
+const SlackLookupEmailSchema = z.string()
+  .trim()
+  .refine(value => /^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(value), "Invalid email")
+  .meta({ format: "email" });
+
 /** Static upper bound used by safe experiment validation; credentials only reduce this set. */
 export const QASEY_READ_CONNECTOR_TOOL_NAMES = [
   "slack_search_messages",
@@ -72,7 +77,7 @@ export class ReadConnectorCatalog {
       }),
       slack_get_user: createTool({
         id: "slack_get_user", description: "通过用户 ID 或邮箱读取 Slack 用户资料。只读。",
-        inputSchema: z.object({ userId: z.string().optional(), email: z.email().optional() }).refine(value => value.userId || value.email, "userId or email is required"),
+        inputSchema: z.object({ userId: z.string().optional(), email: SlackLookupEmailSchema.optional() }).refine(value => value.userId || value.email, "userId or email is required"),
         outputSchema: ReadConnectorOutputSchema,
         execute: async ({ userId, email }) => readResult("slack", "get_user", userId ? { userId } : { email: email! }, userId ? await client.users.info({ user: userId }) : await client.users.lookupByEmail({ email: email! })),
         toModelOutput: boundedModelOutput,

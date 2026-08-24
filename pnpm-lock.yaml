@@ -205,7 +205,7 @@ settings:
 
 patchedDependencies:
   '@mastra/core@1.59.0': 0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392
-  '@mastra/deployer@1.59.0': 900951d126ab5b3e3b0bd4db2a47a3b5f6af3b076d3aaee467d5cce800f3007e
+  '@mastra/deployer@1.59.0': 93f5f63e97a834739ad8f102f0aecb5e6aa9ba9a60711fae1ce1b279b467536a
   mastra@1.25.0: b3f856d2cd1a81e5da9d244538e025d147088a7983b157f8ff98e7ff7cad819d
 
 importers:
@@ -5570,7 +5570,7 @@ snapshots:
     transitivePeerDependencies:
       - zod
 
-  '@mastra/deployer@1.59.0(patch_hash=900951d126ab5b3e3b0bd4db2a47a3b5f6af3b076d3aaee467d5cce800f3007e)(@hono/node-server@1.19.17(hono@4.13.1))(@mastra/core@1.59.0(patch_hash=0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3))(supports-color@7.2.0)(typescript@5.9.3)(zod@4.4.3)':
+  '@mastra/deployer@1.59.0(patch_hash=93f5f63e97a834739ad8f102f0aecb5e6aa9ba9a60711fae1ce1b279b467536a)(@hono/node-server@1.19.17(hono@4.13.1))(@mastra/core@1.59.0(patch_hash=0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3))(supports-color@7.2.0)(typescript@5.9.3)(zod@4.4.3)':
     dependencies:
       '@babel/core': 8.0.1
       '@babel/preset-typescript': 8.0.1(@babel/core@8.0.1)
@@ -7573,7 +7573,7 @@ snapshots:
       '@clack/prompts': 1.7.0
       '@expo/devcert': 1.2.1(supports-color@7.2.0)
       '@mastra/core': 1.59.0(patch_hash=0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3)
-      '@mastra/deployer': 1.59.0(patch_hash=900951d126ab5b3e3b0bd4db2a47a3b5f6af3b076d3aaee467d5cce800f3007e)(@hono/node-server@1.19.17(hono@4.13.1))(@mastra/core@1.59.0(patch_hash=0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3))(supports-color@7.2.0)(typescript@5.9.3)(zod@4.4.3)
+      '@mastra/deployer': 1.59.0(patch_hash=93f5f63e97a834739ad8f102f0aecb5e6aa9ba9a60711fae1ce1b279b467536a)(@hono/node-server@1.19.17(hono@4.13.1))(@mastra/core@1.59.0(patch_hash=0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3))(supports-color@7.2.0)(typescript@5.9.3)(zod@4.4.3)
       '@mastra/loggers': 1.2.0(@mastra/core@1.59.0(patch_hash=0548148c662f85e668fb041f9673da2b20d049273e567b3f5823269f69bb6392)(express@5.2.1(supports-color@7.2.0))(supports-color@7.2.0)(zod@4.4.3))
       archiver: 8.0.0
       commander: 14.0.3

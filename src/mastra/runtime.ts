@@ -17,7 +17,7 @@ import type { ToolsInput } from "@mastra/core/agent";
 import {
   InMemoryRunRepository, PostgresRunRepository,
 } from "../../packages/domain/src/index.ts";
-import { createGitHubClient, GitHubInstallationTokenProvider, GitHubPublisher, loadConfig, QaseyMcpCatalog, JiraClient, ReadConnectorCatalog } from "../../packages/adapters/src/index.ts";
+import { assertOpenAICompatibleToolSchemas, createGitHubClient, GitHubInstallationTokenProvider, GitHubPublisher, loadConfig, QaseyMcpCatalog, JiraClient, ReadConnectorCatalog } from "../../packages/adapters/src/index.ts";
 import {
   AcpCodingHarness, CuaFallback, E2ECoordinator, LocalArtifactStore, LocalWorkspaceManager,
   MaestroRunner, NoopCodingHarness, NoopDraftPrBroker, PlaywrightRunner,
@@ -99,6 +99,7 @@ runtimeReadiness.register("channel-delivery-inbox", () => channelDeliveryInbox.h
 if (sandboxLeaseStore) runtimeReadiness.register("sandbox-lease-store", () => sandboxLeaseStore.healthCheck());
 export const mcpCatalog = new QaseyMcpCatalog(config);
 runtimeReadiness.register("mcp-oauth-storage", () => mcpCatalog.healthCheck());
+runtimeReadiness.register("metersphere-mcp-tools", () => mcpCatalog.healthCheckRequiredMeterSphereTools());
 export const githubClient = createGitHubClient(config);
 export const readConnectorCatalog = new ReadConnectorCatalog(config);
 export const jiraClient = new JiraClient(config.JIRA_BASE_URL, config.JIRA_EMAIL, config.JIRA_API_TOKEN);
@@ -421,6 +422,7 @@ export async function buildQaseyAgentTooling(
   options: { codeModeActive?: boolean } = {},
 ): Promise<QaseyAgentTooling> {
   const allTools = await toolInput;
+  assertOpenAICompatibleToolSchemas(allTools);
   const codeModeActive = options.codeModeActive ?? (qaseyCodeModeActive && config.QASEY_ENABLE_CODE_MODE);
   if (!codeModeActive) {
     return { tools: allTools, codeModeToolNames: [] };

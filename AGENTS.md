@@ -2,7 +2,7 @@
 
 ## 本地认证：用于 Trace 调查
 
-* 在本地进行 API 重放、Trace 调试和回归探测时，不要复制浏览器中的 `qasey_session` Cookie。请使用专用的开发环境 Bearer Token。
+* 在本地进行 API 重放、Trace 调试和回归探测时，不要复制浏览器中的 `qasey_session` Cookie。请使用专用的开发环境 Bearer Token。（用户给予 Cookie 时除外，可以优先使用）
 
 * 真正的 `QASEY_DEV_AUTH_TOKEN` 存放在被 Git 忽略的 `.env.local` 中。**绝对不要打印、记录日志、粘贴到聊天中，或提交其值。**
 

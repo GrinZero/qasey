@@ -26,9 +26,8 @@ RUN npx npm-cli-login \
 
 FROM dependencies AS build
 COPY . .
-# Environment-specific MCP endpoints are mounted at runtime. Never bake a
-# developer's local MCP catalogue into the production image.
-RUN mkdir -p .qasey && printf '{"servers":{}}\n' > .qasey/mcp.json
+# The tracked MCP catalogue contains endpoint metadata only. Credentials stay
+# in environment variables populated at runtime.
 RUN pnpm build
 
 FROM mcr.microsoft.com/playwright:v1.62.1-noble AS runtime

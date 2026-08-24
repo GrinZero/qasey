@@ -11,6 +11,7 @@ import { logError, logInfo } from "./logging.ts";
 import { loadMcpServerConfigs, type McpServerConfig, type McpServerConfigs, type McpServerName } from "./mcp-config.ts";
 import { FileOAuthStorage, PostgresOAuthStorage, PostgresOAuthStorageBackend } from "./oauth-storage.ts";
 import { SubjectMcpClientPool } from "../../../src/platform/mcp/create-clients.ts";
+import { sanitizeOpenAIToolInputSchema } from "./tool-schema-compat.ts";
 
 const allowedTools = {
   metersphere: new Set([
@@ -22,6 +23,14 @@ const allowedTools = {
   rag: new Set(["answer"]),
   lark: new Set(["lark_doc_search", "lark_doc_read"]),
 } as const;
+
+/** Runtime-critical tools that every production MeterSphere connection must expose. */
+export const QASEY_REQUIRED_METERSPHERE_TOOL_NAMES = [
+  "metersphere_ms_bulk_upsert_test_cases",
+  "metersphere_ms_get_test_case_detail",
+  "metersphere_ms_list_modules",
+  "metersphere_ms_list_test_cases",
+] as const;
 
 /** Static upper bound used by safe experiment validation; does not contact MCP servers. */
 export const QASEY_MCP_ALLOWED_TOOL_NAMES = Object.entries(allowedTools).flatMap(([server, tools]) =>
@@ -294,6 +303,17 @@ export class QaseyMcpCatalog {
     await this.oauthBackend?.healthCheck();
   }
 
+  async healthCheckRequiredMeterSphereTools(): Promise<void> {
+    if (!this.servers.metersphere) {
+      throw new Error("Required MCP server is not configured: metersphere");
+    }
+    const tools = await this.discoveredTools();
+    const missing = QASEY_REQUIRED_METERSPHERE_TOOL_NAMES.filter(name => !tools[name]);
+    if (missing.length > 0) {
+      throw new Error(`Required MeterSphere MCP tools are unavailable: ${missing.join(", ")}`);
+    }
+  }
+
   private oauthServerNames(): McpServerName[] {
     return this.configuredServers().filter(name => this.servers[name]!.auth.type === "oauth");
   }
@@ -391,8 +411,12 @@ export class QaseyMcpCatalog {
       const execute = "execute" in tool ? tool.execute : undefined;
       const hasModelOutput = "toModelOutput" in tool && typeof tool.toModelOutput === "function";
       const hasOutputSchema = "outputSchema" in tool && Boolean(tool.outputSchema);
+      const inputSchema = "inputSchema" in tool
+        ? sanitizeOpenAIToolInputSchema(tool.inputSchema)
+        : undefined;
       output[qualified] = {
         ...tool,
+        ...(inputSchema === undefined ? {} : { inputSchema }),
         requireApproval: policy.requiresApproval,
         ...(policy.effect === "read" && !hasOutputSchema ? { outputSchema: z.unknown() } : {}),
         ...(policy.effect === "read" && !hasModelOutput ? { toModelOutput: boundedMcpModelOutput } : {}),

@@ -6,6 +6,7 @@ import {
   ToolSearchProcessor,
 } from "@mastra/core/processors";
 import type { Processor, ProcessInputStepArgs, ProcessInputStepResult } from "@mastra/core/processors";
+import { QASEY_REQUIRED_METERSPHERE_TOOL_NAMES } from "../../../../packages/adapters/src/index.ts";
 import { config, toolsForRequest } from "../../runtime.ts";
 
 /** Time is the primary run limit; this only protects against an unexpectedly hot loop. */
@@ -13,12 +14,7 @@ export const QASEY_AGENT_SAFETY_MAX_STEPS = 10_000;
 export const QASEY_AGENT_FINAL_RESPONSE_GRACE_MS = 5 * 60_000;
 
 const QASEY_RUN_STARTED_AT_STATE_KEY = "qasey-run-started-at";
-const QASEY_DIRECT_TOOL_NAMES = new Set([
-  "metersphere_ms_bulk_upsert_test_cases",
-  "metersphere_ms_get_test_case_detail",
-  "metersphere_ms_list_modules",
-  "metersphere_ms_list_test_cases",
-]);
+const QASEY_DIRECT_TOOL_NAMES = new Set<string>(QASEY_REQUIRED_METERSPHERE_TOOL_NAMES);
 
 /** Reserve time for a final answer before the wall-clock abort signal fires. */
 export class EnsureQaseyDeadlineResponseProcessor implements Processor {
