@@ -47,10 +47,7 @@ export const ConfigSchema = z.object({
   ),
   QASEY_DEV_TUNNEL_ENABLED: optionalBoolean,
   QASEY_DEV_TUNNEL_BASE_URL: optionalUrl,
-  QASEY_DEV_TUNNEL_TOKEN: z.preprocess(
-    value => value === "" ? undefined : value,
-    z.string().min(32).optional(),
-  ),
+  QASEY_DEV_TUNNEL_TOKEN: optionalString,
   QASEY_USE_REDIS_DURABILITY: optionalBoolean,
   REDIS_HOST: optionalString,
   REDIS_PORT: optionalPositiveInteger,

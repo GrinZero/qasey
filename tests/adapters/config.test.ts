@@ -74,7 +74,7 @@ describe("shared runtime configuration", () => {
   });
 
   it("enables the Dev Runtime tunnel only for local clients and ns-testing servers", () => {
-    const token = "testing-tunnel-token-that-is-at-least-32-characters";
+    const token = "short-token";
     const local = loadConfig({
       NODE_ENV: "development",
       QASEY_DEV_TUNNEL_ENABLED: "true",
