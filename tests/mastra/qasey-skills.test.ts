@@ -26,6 +26,13 @@ describe("qasey-main intent Skills", () => {
     expect(source).toMatch(/不得直接执行真实/u);
   });
 
+  it("requires tool discovery for optional MeterSphere module operations", async () => {
+    const source = await readFile(join(skillsRoot, "metersphere-case-management", "SKILL.md"), "utf8");
+    expect(source).toContain("必须先调用 `search_tools`");
+    expect(source).toContain("metersphere_ms_upsert_module");
+    expect(source).toContain("不得声称“当前工具集没有该能力”");
+  });
+
   it("does not create dedicated Skills for simple fallback intents", async () => {
     const entries = await readdir(skillsRoot);
     expect(entries).not.toContain("unknown-intent");

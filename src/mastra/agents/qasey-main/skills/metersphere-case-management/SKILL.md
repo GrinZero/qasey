@@ -10,6 +10,7 @@ System prompt 已识别的 intent 决定执行 `case_create_full` 或 `case_main
 ## 共享约束
 
 - MeterSphere 核心能力由运行时直接提供，不通过 `search_tools` 发现：使用 `metersphere_ms_list_modules`、`metersphere_ms_list_test_cases`、`metersphere_ms_get_test_case_detail`，以及仅用于唯一一次预检的 `metersphere_ms_bulk_upsert_test_cases(dry_run=true)`。
+- 需要核心能力之外的 MeterSphere 操作时必须先调用 `search_tools`。尤其当目标模块不存在、需要创建或更新模块时，使用同时包含 `MeterSphere`、`module` 和 `create` 或 `upsert` 的具体关键词搜索；发现 `metersphere_ms_upsert_module` 后按其 schema 执行。完成搜索且未发现相应工具之前，不得声称“当前工具集没有该能力”。
 - 如果上述任一必需工具不可用，立即把它作为运行时能力 blocker 返回；不要改写关键词、搜索同义词或用 Slack/Jira 结果替代 MeterSphere 的真实读取与回执。
 - 当前需求、设计与实现事实优先；历史经验仅作为风险线索。冲突时保留证据，不擅自补全产品决策。
 - 每条待写用例都要有明确目的、前置条件、可执行步骤、可观察预期和简短 QA reasoning；每条用例选择 1–3 条直接支撑的稳定来源。
