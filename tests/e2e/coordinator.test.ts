@@ -35,9 +35,19 @@ describe("E2E coordinator", () => {
 
   it("keeps the target repository server-owned at the public boundary", () => {
     expect(CreateE2ERunRequestSchema.safeParse({
-      sourceCaseIds: ["case-1"], handoff: handoff(), platform: "web", framework: "playwright",
+      sourceCaseIds: ["175088"], handoff: handoff(), platform: "web", framework: "playwright",
       repository: { owner: "attacker", repository: "arbitrary" },
     }).success).toBe(false);
+  });
+
+  it("accepts only canonical UUID ids or numeric nums as source case references", () => {
+    const base = { handoff: handoff(), platform: "web", framework: "playwright" };
+    expect(CreateE2ERunRequestSchema.safeParse({ ...base, sourceCaseIds: ["175088"] }).success).toBe(true);
+    expect(CreateE2ERunRequestSchema.safeParse({
+      ...base,
+      sourceCaseIds: ["97bb25db-18df-428e-af86-be305ad8b2ff"],
+    }).success).toBe(true);
+    expect(CreateE2ERunRequestSchema.safeParse({ ...base, sourceCaseIds: ["Checkout succeeds"] }).success).toBe(false);
   });
 
   it("fails before creating an orphaned queued run when CodeTask execution is unavailable", async () => {

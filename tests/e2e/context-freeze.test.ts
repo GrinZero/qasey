@@ -1,7 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { freezeE2EContext, freezeE2EExecutionBrief, testCaseSpecFromMeterSphere } from "../../packages/domain/src/index.ts";
+import { canonicalMeterSphereCaseIdFromList, freezeE2EContext, freezeE2EExecutionBrief, isCanonicalMeterSphereCaseId, testCaseSpecFromMeterSphere } from "../../packages/domain/src/index.ts";
 
 describe("immutable E2E context", () => {
+  it("resolves numeric MeterSphere case numbers to canonical UUID ids", () => {
+    const canonicalId = "97bb25db-18df-428e-af86-be305ad8b2ff";
+    const response = {
+      content: [{
+        type: "text",
+        text: JSON.stringify([{ cases: [
+          { id: canonicalId, num: 175088, name: "Exact case" },
+          { id: "d825e3e4-9dc3-4ad6-829c-2f31ead90bbb", num: 1750880, name: "Fuzzy result" },
+        ] }]),
+      }],
+    };
+
+    expect(canonicalMeterSphereCaseIdFromList("175088", response)).toBe(canonicalId);
+    expect(isCanonicalMeterSphereCaseId(canonicalId)).toBe(true);
+    expect(() => canonicalMeterSphereCaseIdFromList("175089", response)).toThrow(
+      "did not resolve to a canonical UUID id",
+    );
+  });
+
   it("redacts secrets and keeps conversation evidence alongside complete MeterSphere steps", () => {
     const snapshot = freezeE2EContext({
       goal: "Cover checkout",

@@ -21,6 +21,7 @@ System prompt 已识别的 intent 决定执行 `e2e_generate`、`e2e_rerun`、`e
 - MeterSphere 是结构化用例基线，不是唯一上下文来源；不得丢弃前序对话中已经确认但未写入 MeterSphere 的信息。
 - 有未解决的阻塞问题时先向用户澄清，不得启动 E2E。
 - 确认来源用例、平台和运行前置条件；仓库、base ref 和允许路径由 Skill 与 lifecycle 冻结。
+- `sourceCaseIds` 优先原样使用 `ms_list_test_cases` 返回的 canonical UUID `id`，不要误传展示用的数字 `num`。若用户只提供数字编号，可用该数字作为 `name` 查询并核对结果中的 `num` 与 `id`；lifecycle 也会对遗留纯数字输入做一次精确解析。
 - 通过发现到的 E2E 创建工具启动 run；确定性 lifecycle 负责 workspace、author、有限 repair、clean verifier、artifacts、Draft PR 和 QA verdict。
 - 创建成功只表示 run 已进入 lifecycle，不表示代码、验证或 PR 已完成。
 

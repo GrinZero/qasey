@@ -322,7 +322,7 @@ function e2eTools() {
   return {
     e2eCreateRun: createTool({
       id: "e2e_create_run",
-      description: "创建一个隔离的 Playwright（Web）或 Maestro（App）代码生成与验证运行。",
+      description: "创建一个隔离的 Playwright（Web）或 Maestro（App）代码生成与验证运行。sourceCaseIds 优先原样使用 ms_list_test_cases 返回的 canonical UUID id；兼容纯数字 num，冻结阶段会先精确解析为 UUID。禁止名称、module_id 和 URL。",
       inputSchema: CreateE2ERunRequestSchema,
       execute: async (input, { mastra, requestContext }) => {
         if (!requestContext) throw new Error("Trusted request context is required");
@@ -342,7 +342,12 @@ function e2eTools() {
         if (!mastra) throw new Error("Mastra runtime is required to start the E2E workflow");
         const workflowResourceId = getRuntimeContext(requestContext)["qasey-context"].actor.id;
         const run = await mastra.getWorkflow("qasey-e2e-lifecycle").createRun({ runId: created.id, resourceId: workflowResourceId });
-        await run.startAsync({ inputData: { runId: created.id }, requestContext });
+        try {
+          await run.startAsync({ inputData: { runId: created.id }, requestContext });
+        } catch (error) {
+          await e2eCoordinator.fail(owner, created.id, error);
+          throw error;
+        }
         return created;
       },
     }),

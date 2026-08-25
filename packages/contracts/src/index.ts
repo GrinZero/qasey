@@ -348,10 +348,16 @@ export type E2ERun = z.infer<typeof E2ERunSchema>;
 
 const SubmittedRepositoryProfileSchema = RepositoryProfileSchema.omit({ installCommand: true }).strict();
 
+const MeterSphereCaseReferenceSchema = z.string().trim().refine(
+  value => /^\d+$/u.test(value)
+    || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value),
+  { message: "MeterSphere case reference must be a canonical UUID id or numeric num" },
+).describe("MeterSphere canonical UUID id（推荐）或纯数字 num；禁止名称、module_id 和 URL。");
+
 export const CreateE2ERunSchema = z.object({
   requestId: z.string().optional(),
   sourceSessionId: z.string().min(1),
-  sourceCaseIds: z.array(z.string().min(1)).min(1),
+  sourceCaseIds: z.array(MeterSphereCaseReferenceSchema).min(1),
   handoff: E2EContextDraftSchema,
   // Execution commands are server-owned and can never be submitted by a browser/API client.
   repository: SubmittedRepositoryProfileSchema,

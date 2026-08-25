@@ -11,7 +11,7 @@ import {
   type OwnerScope,
   type QaVerdict,
 } from "../../../packages/contracts/src/index.ts";
-import { testCaseSpecFromMeterSphere } from "../../../packages/domain/src/index.ts";
+import { canonicalMeterSphereCaseIdFromList, isCanonicalMeterSphereCaseId, testCaseSpecFromMeterSphere } from "../../../packages/domain/src/index.ts";
 import { config, e2eCoordinator, getRuntimeContext, githubClient, mcpCatalog, mcpSubject, runRepository } from "../runtime.ts";
 import { ownerScopeFromRequestContext } from "../../platform/context/owner-scope.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY, PlatformRequestContextSchema } from "../../platform/context/schema.ts";
@@ -40,21 +40,37 @@ const freezeExecutionBriefStep = createStep({
     if (run.contextSnapshot.blockingQuestions.length > 0) {
       throw new Error(`E2E context has unresolved blocking questions: ${run.contextSnapshot.blockingQuestions.join("; ")}`);
     }
-    const injected = requestContext.get("e2e-case-detail-executor");
-    const tools = typeof injected === "function"
+    const injected = requestContext.get("e2e-metersphere-tool-executor");
+    const legacyDetailExecutor = requestContext.get("e2e-case-detail-executor");
+    const tools = typeof injected === "function" || typeof legacyDetailExecutor === "function"
       ? undefined
       : await mcpCatalog.toolsForCaseWorkflow(getRuntimeContext(requestContext)["qasey-context"].channel, mcpSubject(requestContext));
-    const cases = await mapWithConcurrency(run.sourceCaseIds, 6, async caseId => {
+    const executeMeterSphereTool = async (toolName: string, input: Record<string, unknown>): Promise<unknown> => {
+      if (typeof injected === "function") {
+        return (injected as (toolName: string, input: unknown) => Promise<unknown>)(toolName, input);
+      }
+      if (toolName === "metersphere_ms_get_test_case_detail" && typeof legacyDetailExecutor === "function") {
+        return (legacyDetailExecutor as (caseId: string) => Promise<unknown>)(String(input.case_id));
+      }
+      const tool = tools?.[toolName] as { execute?: (input: unknown, context: unknown) => Promise<unknown> } | undefined;
+      if (!tool?.execute) throw new Error(`Required MeterSphere workflow tool is unavailable: ${toolName}`);
+      return tool.execute(input, { mastra, requestContext, abortSignal });
+    };
+    const cases = await mapWithConcurrency(run.sourceCaseIds, 6, async sourceCaseId => {
       abortSignal.throwIfAborted();
-      const result = typeof injected === "function"
-        ? await (injected as (caseId: string) => Promise<unknown>)(caseId)
-        : await (tools?.metersphere_ms_get_test_case_detail as { execute?: (input: unknown, context: unknown) => Promise<unknown> } | undefined)?.execute?.(
-          { case_id: caseId },
-          { mastra, requestContext, abortSignal },
-        );
-      if (result === undefined) throw new Error("Required MeterSphere case detail tool is unavailable");
+      const caseId = isCanonicalMeterSphereCaseId(sourceCaseId)
+        ? sourceCaseId
+        : canonicalMeterSphereCaseIdFromList(sourceCaseId, await executeMeterSphereTool(
+          "metersphere_ms_list_test_cases",
+          { page: 1, page_size: 100, name: sourceCaseId },
+        ));
+      const result = await executeMeterSphereTool("metersphere_ms_get_test_case_detail", { case_id: caseId });
       return testCaseSpecFromMeterSphere(caseId, result);
     });
+    const canonicalIds = cases.map(testCase => testCase.id);
+    if (new Set(canonicalIds).size !== canonicalIds.length) {
+      throw new Error("E2E source cases resolve to duplicate MeterSphere canonical UUID ids");
+    }
     if (cases.some(testCase => testCase.target !== "web")) throw new Error("Web E2E MVP only accepts MeterSphere cases targeting web");
     let baseSha = run.baseSha;
     if (!baseSha) {

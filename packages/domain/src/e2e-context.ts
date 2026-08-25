@@ -27,6 +27,30 @@ export interface E2EContextSource {
   resourceId: string;
 }
 
+const CANONICAL_METERSPHERE_CASE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
+export function isCanonicalMeterSphereCaseId(value: string): boolean {
+  return CANONICAL_METERSPHERE_CASE_ID_PATTERN.test(value.trim());
+}
+
+/** Resolve an exact numeric MeterSphere case number from an ms_list_test_cases response. */
+export function canonicalMeterSphereCaseIdFromList(caseNumberInput: string, result: unknown): string {
+  const caseNumber = caseNumberInput.trim();
+  if (!/^\d+$/u.test(caseNumber)) throw new Error(`MeterSphere case reference is neither a canonical UUID nor a numeric num: ${caseNumber}`);
+  const matches = collectCaseRecords(result)
+    .filter(record => stringValue(record.num ?? record.case_num ?? record.caseNumber) === caseNumber)
+    .map(record => stringValue(record.id ?? record.case_id ?? record.caseId))
+    .filter(isCanonicalMeterSphereCaseId);
+  const ids = [...new Set(matches)];
+  if (ids.length === 0) {
+    throw new Error(`MeterSphere case num ${caseNumber} did not resolve to a canonical UUID id`);
+  }
+  if (ids.length > 1) {
+    throw new Error(`MeterSphere case num ${caseNumber} resolved to multiple canonical UUID ids`);
+  }
+  return ids[0]!;
+}
+
 export function freezeE2EContext(draftInput: E2EContextDraft, source: E2EContextSource, now = new Date()): E2EContextSnapshot {
   const draft = E2EContextDraftSchema.parse(redactValue(draftInput));
   const body = { version: 1 as const, ...draft, source, createdAt: now.toISOString() };
@@ -120,6 +144,18 @@ function findCaseRecord(value: unknown, caseId: string): Record<string, unknown>
   }
   if (typeof parsed.text === "string") return findCaseRecord(parsed.text, caseId);
   return undefined;
+}
+
+function collectCaseRecords(value: unknown): Array<Record<string, unknown>> {
+  const parsed = parseJson(value);
+  if (Array.isArray(parsed)) return parsed.flatMap(collectCaseRecords);
+  if (!isRecord(parsed)) return [];
+  const current = (parsed.num !== undefined || parsed.case_num !== undefined || parsed.caseNumber !== undefined)
+    ? [parsed]
+    : [];
+  const nested = ["result", "data", "case", "cases", "items", "records", "content", "text"]
+    .flatMap(key => collectCaseRecords(parsed[key]));
+  return [...current, ...nested];
 }
 
 function parseArray(value: unknown): unknown[] {
