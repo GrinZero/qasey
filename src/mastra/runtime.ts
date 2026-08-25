@@ -19,10 +19,8 @@ import {
 } from "../../packages/domain/src/index.ts";
 import { assertOpenAICompatibleToolSchemas, createGitHubClient, GitHubInstallationTokenProvider, GitHubPublisher, loadConfig, QaseyMcpCatalog, JiraClient, ReadConnectorCatalog } from "../../packages/adapters/src/index.ts";
 import {
-  AcpCodingHarness, CuaFallback, E2ECoordinator, LocalArtifactStore, LocalWorkspaceManager,
-  MaestroRunner, NoopCodingHarness, NoopDraftPrBroker, PlaywrightRunner,
+  E2ECoordinator, LocalArtifactStore, NoopDraftPrBroker,
 } from "../../packages/e2e/src/index.ts";
-import type { WorkspaceRef } from "../../packages/e2e/src/index.ts";
 import { ownerScopeFromRequestContext } from "../platform/context/owner-scope.ts";
 import { createCompositeStore } from "../platform/storage/create-composite-store.ts";
 import { InMemoryChannelDeliveryInbox, PrismaChannelDeliveryInbox } from "../platform/channels/delivery-inbox.ts";
@@ -83,14 +81,15 @@ const sandboxLeaseOptions = {
   idleTtlMs: config.QASEY_SANDBOX_IDLE_TTL_MS,
   encryptionKey: config.GOOGLE_COOKIE_PASSWORD ?? config.MASTRA_ENCRYPTION_KEY ?? "qasey-local-sandbox-lease-key",
 };
-export const sandboxLeaseStore = config.QASEY_SANDBOX_ENABLED
+const sandboxEndpointTemplate = config.QASEY_SANDBOX_ENDPOINT_TEMPLATE;
+export const sandboxLeaseStore = sandboxEndpointTemplate
   ? config.DATABASE_URL
     ? new PrismaSandboxLeaseStore(applicationDatabase!.client, sandboxLeaseOptions)
     : new InMemorySandboxLeaseStore(sandboxLeaseOptions)
   : undefined;
 export const sandboxPoolClient = sandboxLeaseStore
   ? new SandboxPoolClient(sandboxLeaseStore, {
-      endpointTemplate: config.QASEY_SANDBOX_ENDPOINT_TEMPLATE,
+      endpointTemplate: sandboxEndpointTemplate!,
       requestTimeoutMs: config.QASEY_SANDBOX_REQUEST_TIMEOUT_MS,
       ...(githubReadTokens ? { githubTokenForScope: () => githubReadTokens.readToken() } : {}),
     })
@@ -116,21 +115,10 @@ runtimeReadiness.register("metersphere-mcp-tools", () => mcpCatalog.healthCheckR
 export const githubClient = createGitHubClient(config);
 export const readConnectorCatalog = new ReadConnectorCatalog(config);
 export const jiraClient = new JiraClient(config.JIRA_BASE_URL, config.JIRA_EMAIL, config.JIRA_API_TOKEN);
-export const workspaceManager = new LocalWorkspaceManager(config.QASEY_WORKSPACE_DIR, config.QASEY_GIT_CACHE_DIR);
-export const codingHarness = config.QASEY_ENABLE_EXECUTION
-  ? new AcpCodingHarness(config.QASEY_ACP_COMMAND, config.QASEY_ACP_ARGS)
-  : new NoopCodingHarness();
 export const artifactStore = new LocalArtifactStore(config.QASEY_ARTIFACT_DIR);
 export const githubPublisher = new GitHubPublisher(githubClient);
-const draftPrBroker = !config.QASEY_SHADOW_MODE && config.QASEY_ENABLE_DRAFT_PR && githubPublisher.configured
+const draftPrBroker = githubPublisher.configured
   ? {
-      publish: (run: E2ERun, workspace: WorkspaceRef, reviewUrl: string) => githubPublisher.publishWorkspace({
-        repository: run.repository,
-        root: workspace.root,
-        branch: workspace.branch,
-        title: `test(e2e): Qasey run ${run.id}`,
-        body: [`## Qasey generated E2E`, ``, `Cases: ${run.sourceCaseIds.join(", ")}`, `Review and evidence: ${reviewUrl}`, ``, `Clean verifier passed. QA approval is still required.`].join("\n"),
-      }),
       publishChanges: (run: E2ERun, changes: Array<{ path: string; deleted: boolean; mode?: "100644" | "100755" | "120000"; content?: Buffer }>, reviewUrl: string) => githubPublisher.publishChanges({
         repository: run.repository,
         baseSha: run.baseSha!,
@@ -145,16 +133,11 @@ const draftPrBroker = !config.QASEY_SHADOW_MODE && config.QASEY_ENABLE_DRAFT_PR 
   : new NoopDraftPrBroker();
 export const e2eCoordinator = new E2ECoordinator(
   runRepository,
-  workspaceManager,
-  codingHarness,
-  { playwright: new PlaywrightRunner(), maestro: new MaestroRunner() },
   artifactStore,
   draftPrBroker,
-  config.QASEY_ENABLE_EXECUTION,
   {
     maxRepairs: config.QASEY_MAX_REPAIRS,
     reviewBaseUrl: config.QASEY_PUBLIC_BASE_URL,
-    ...(config.QASEY_ENABLE_CUA_FALLBACK ? { cua: new CuaFallback() } : {}),
     ...(codeTaskRunnerProvider ? { codeTasks: codeTaskRunnerProvider } : {}),
   },
 );
@@ -356,12 +339,10 @@ function e2eTools() {
           sourceSessionId: sessionId,
           repository: webE2ERepositoryFromSkill(),
         }, { sessionId, threadId, taskRunId, requestId, resourceId });
-        if (config.QASEY_ENABLE_EXECUTION) {
-          if (!mastra) throw new Error("Mastra runtime is required to start the E2E workflow");
-          const resourceId = getRuntimeContext(requestContext)["qasey-context"].actor.id;
-          const run = await mastra.getWorkflow("qasey-e2e-lifecycle").createRun({ runId: created.id, resourceId });
-          await run.startAsync({ inputData: { runId: created.id }, requestContext });
-        }
+        if (!mastra) throw new Error("Mastra runtime is required to start the E2E workflow");
+        const workflowResourceId = getRuntimeContext(requestContext)["qasey-context"].actor.id;
+        const run = await mastra.getWorkflow("qasey-e2e-lifecycle").createRun({ runId: created.id, resourceId: workflowResourceId });
+        await run.startAsync({ inputData: { runId: created.id }, requestContext });
         return created;
       },
     }),
@@ -381,12 +362,10 @@ function e2eTools() {
         if (!requestContext) throw new Error("Trusted request context is required");
         const owner = ownerScopeFromRequestContext(requestContext);
         const created = await e2eCoordinator.rerun(owner, runId);
-        if (config.QASEY_ENABLE_EXECUTION) {
-          if (!mastra) throw new Error("Mastra runtime is required to start the E2E workflow");
-          const resourceId = getRuntimeContext(requestContext)["qasey-context"].actor.id;
-          const workflowRun = await mastra.getWorkflow("qasey-e2e-lifecycle").createRun({ runId: created.id, resourceId });
-          await workflowRun.startAsync({ inputData: { runId: created.id }, requestContext });
-        }
+        if (!mastra) throw new Error("Mastra runtime is required to start the E2E workflow");
+        const resourceId = getRuntimeContext(requestContext)["qasey-context"].actor.id;
+        const workflowRun = await mastra.getWorkflow("qasey-e2e-lifecycle").createRun({ runId: created.id, resourceId });
+        await workflowRun.startAsync({ inputData: { runId: created.id }, requestContext });
         return created;
       },
     }),
@@ -421,10 +400,10 @@ export async function toolsForRequest(requestContext?: RequestContext<any>) {
   const external = await mcpCatalog.toolsForDiscovery(
     context.channel,
     mcpSubject(requestContext),
-    { readOnly: config.QASEY_SHADOW_MODE },
+    { readOnly: false },
   );
   const readTools = readConnectorCatalog.tools();
-  const executionTools = config.QASEY_SHADOW_MODE ? {} : e2eTools();
+  const executionTools = e2eTools();
   const progressSession = requestContext?.get("agent-progress-session") instanceof AgentProgressSession
     ? requestContext.get("agent-progress-session") as AgentProgressSession
     : undefined;

@@ -218,7 +218,6 @@ export async function createAndStartE2ERun(
     requestId,
     resourceId: resource,
   });
-  if (!config.QASEY_ENABLE_EXECUTION) return created;
   const workflow = mastra.getWorkflow("qasey-e2e-lifecycle");
   const run = await workflow.createRun({ runId: created.id, ...(resourceId ? { resourceId } : {}) });
   try {
@@ -232,7 +231,6 @@ export async function createAndStartE2ERun(
 
 export async function rerunE2E(mastra: Mastra, owner: OwnerScope, runId: string, requestContext: RequestContext, resourceId?: string): Promise<E2ERun> {
   const created = await e2eCoordinator.rerun(owner, runId);
-  if (!config.QASEY_ENABLE_EXECUTION) return created;
   const workflow = mastra.getWorkflow("qasey-e2e-lifecycle");
   const run = await workflow.createRun({ runId: created.id, ...(resourceId ? { resourceId } : {}) });
   try {
@@ -245,7 +243,6 @@ export async function rerunE2E(mastra: Mastra, owner: OwnerScope, runId: string,
 }
 
 export async function resumeE2EWithVerdict(mastra: Mastra, owner: OwnerScope, runId: string, verdict: QaVerdict, requestContext: RequestContext): Promise<E2ERun> {
-  if (!config.QASEY_ENABLE_EXECUTION) return e2eCoordinator.verdict(owner, runId, verdict);
   if (!await runRepository.get(owner, runId)) throw new Error(`Run ${runId} not found`);
   const workflow = mastra.getWorkflow("qasey-e2e-lifecycle");
   const run = await workflow.createRun({ runId });
@@ -257,10 +254,8 @@ export async function resumeE2EWithVerdict(mastra: Mastra, owner: OwnerScope, ru
 
 export async function cancelE2ERun(mastra: Mastra, owner: OwnerScope, runId: string): Promise<E2ERun> {
   if (!await runRepository.get(owner, runId)) throw new Error(`Run ${runId} not found`);
-  if (config.QASEY_ENABLE_EXECUTION) {
-    const workflow = mastra.getWorkflow("qasey-e2e-lifecycle");
-    const run = await workflow.createRun({ runId });
-    await run.cancel();
-  }
+  const workflow = mastra.getWorkflow("qasey-e2e-lifecycle");
+  const run = await workflow.createRun({ runId });
+  await run.cancel();
   return e2eCoordinator.cancel(owner, runId);
 }

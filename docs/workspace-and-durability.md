@@ -12,21 +12,22 @@ resolvers, with the effective filesystem rooted at:
 This is conversation isolation rather than unconditional per-user isolation:
 private sessions receive their own scope, while trusted shared Slack/Jira
 threads intentionally share one scope. Segments are sanitized and containment
-is checked. Development can use a bounded LocalSandbox cache. Production code
-execution fails closed unless `createScopedWorkspace` receives a remote
-sandbox provider. Runtime repository `process.cwd()` is never used as an
+is checked. `pnpm dev` automatically starts a bounded local Sandbox and wires
+it through the same provider contract used by deployment. Production code
+execution fails closed unless `createScopedWorkspace` receives the configured
+Sandbox provider. Runtime repository `process.cwd()` is never used as an
 execution workspace.
 
 Qasey task Skills remain agent-level Skills discovered from the file-based
 agent directory. Global reusable Skills remain on the global Workspace. Skills
 are read-only definitions and do not require per-session filesystem isolation.
 
-The E2E `WorkspaceManager` is a separate domain abstraction. It creates a
-clean Git worktree per run and enforces allowed changed paths; it is not the
-Mastra agent workspace shown in Studio. CodeTask repository storage and
-worktree lifecycle are documented in [Code Task Runner](./code-task-runner.md).
-
-The E2E author/verifier clean-workspace discipline remains a Qasey domain workflow, while its paths and artifacts are owner scoped.
+E2E does not use a second local `WorkspaceManager`. The Sandbox CodeTask
+runtime owns the shared Git mirror, attempt-specific worktrees, allowed-path
+validation, and artifact collection. The author/verifier clean-workspace
+discipline remains a Qasey domain workflow, while its paths and artifacts are
+owner scoped. The repository storage invariant is documented in
+[Code Task Runner](./code-task-runner.md).
 
 ## MCP
 

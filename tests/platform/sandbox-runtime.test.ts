@@ -100,6 +100,13 @@ describe("sandbox runtime protocol", () => {
     await session.codeTaskStart(spec, context);
     await waitUntil(async () => (await session.codeTaskState(spec.taskId)).status === "running");
     await expect(session.codeTaskStart({ ...spec, taskId: "task-2", attemptId: "attempt-2" }, context)).rejects.toThrow(/already running/u);
+    await waitUntil(async () => {
+      const [pid, credentials] = await Promise.all([
+        session.filesystem<{ exists: boolean }>({ operation: "exists", path: "code-tasks/task-1/attempt-1/child.pid" }),
+        session.filesystem<{ exists: boolean }>({ operation: "exists", path: "code-tasks/task-1/attempt-1/credential-presence.json" }),
+      ]);
+      return pid.exists && credentials.exists;
+    });
     const pidResult = await session.filesystem<{ content: string } & { encoding: string }>({ operation: "readFile", path: "code-tasks/task-1/attempt-1/child.pid", encoding: "utf8" });
     const childPid = Number(pidResult.content);
     expect(processExists(childPid)).toBe(true);

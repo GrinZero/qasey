@@ -14,7 +14,7 @@ import type {
   MeterSphereCaseCompletionReceipt,
   MeterSphereCasePlan,
 } from "../../../packages/domain/src/index.ts";
-import { config, getRuntimeContext, mcpCatalog, mcpSubject } from "../runtime.ts";
+import { getRuntimeContext, mcpCatalog, mcpSubject } from "../runtime.ts";
 import { PlatformRequestContextSchema } from "../../platform/context/schema.ts";
 import { ownerScopeFromRequestContext } from "../../platform/context/owner-scope.ts";
 import { externalWriteIdempotencyKey } from "../../platform/workflows/durability.ts";
@@ -242,7 +242,6 @@ async function executeWorkflowTool(
   context: { mastra: Mastra; requestContext: RequestContext<any>; abortSignal: AbortSignal },
 ): Promise<unknown> {
   context.abortSignal.throwIfAborted();
-  if (config.QASEY_SHADOW_MODE) throw new Error("MeterSphere case workflow writes are disabled in shadow mode");
   const injected = context.requestContext.get("case-operation-tool-executor");
   if (typeof injected === "function") {
     return (injected as MeterSphereCaseWorkflowToolExecutor)(toolName, input, context);

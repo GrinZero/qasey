@@ -11,7 +11,7 @@
 
 1. Enter the maintenance window and stop old API, Bolt receiver, and worker processes.
 2. With auto-commit enabled, connect to `postgres` and run `deploy/postgres/001_create_databases.sql`; then connect to `moego_qasey` and run `deploy/postgres/002_init_moego_qasey.sql`. Both scripts fail immediately when run against the wrong database.
-3. Provision the dedicated `qasey.mastra.worker.token` secret, shared PostgreSQL, and Redis Streams connection. Deploy the API with `MASTRA_WORKERS=false`, then the private orchestration Worker with `MASTRA_WORKERS=orchestration`, `MASTRA_STEP_EXECUTION_URL=http://moego-qasey-api/studio/api`, and `MASTRA_WORKER_AUTH_TOKEN`. Keep Studio behind Google OAuth/RBAC and leave Editor/MCP Preview disabled unless separately reviewed.
+3. Provision the dedicated `qasey.mastra.worker.token` secret, shared PostgreSQL, Redis Streams connection, and Testing Sandbox Pool. Configure `QASEY_SANDBOX_ENDPOINT_TEMPLATE` with its `{ordinal}` placeholder. Deploy the API with `MASTRA_WORKERS=false`, then the private orchestration Worker with `MASTRA_WORKERS=orchestration`, `MASTRA_STEP_EXECUTION_URL=http://moego-qasey-api/studio/api`, and `MASTRA_WORKER_AUTH_TOKEN`. Keep Studio behind Google OAuth/RBAC and leave Editor/MCP Preview disabled unless separately reviewed.
 4. Update Slack Events and Interactivity URLs to `/studio/api/agents/qasey-main/channels/slack/webhook`.
 5. Run the staging smoke list against production and verify owner-scoped audit/trace records.
 

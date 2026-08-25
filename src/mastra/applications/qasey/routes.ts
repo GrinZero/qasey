@@ -58,7 +58,7 @@ function sandboxScope(c: { get(key: "requestContext"): import("@mastra/core/requ
 }
 
 function requireSandboxPool() {
-  if (!sandboxPoolClient) throw new Error("Qasey sandbox pool is disabled");
+  if (!sandboxPoolClient) throw new Error("Qasey sandbox pool is not configured");
   return sandboxPoolClient;
 }
 
@@ -273,6 +273,9 @@ export const apiRoutes = [
     handler: async c => {
       const parsed = CreateE2ERunRequestSchema.safeParse(await c.req.json());
       if (!parsed.success) return c.json({ error: "validation_error", details: parsed.error.issues }, 400);
+      if (parsed.data.platform !== "web" || parsed.data.framework !== "playwright") {
+        return c.json({ error: "unsupported_e2e_target", message: "CodeTask-backed E2E currently supports Web Playwright only" }, 400);
+      }
       const requestContext = c.get("requestContext");
       const trustedInput = {
         ...parsed.data,

@@ -71,7 +71,6 @@ export const ConfigSchema = z.object({
   GITHUB_APP_INSTALLATION_ID: optionalPositiveInteger,
   GITHUB_APP_PRIVATE_KEY: optionalGitHubPrivateKey,
   GITHUB_ORG: z.string().default("MoeGolibrary"),
-  QASEY_ENABLE_DRAFT_PR: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
   QASEY_PUBLIC_BASE_URL: z.url().default("http://localhost:4111"),
   QASEY_MCP_CONFIG_FILE: z.string().default("config/mcp.json"),
   QASEY_MCP_OAUTH_DIR: z.string().default(".qasey/oauth"),
@@ -90,10 +89,7 @@ export const ConfigSchema = z.object({
   QASEY_CODE_MODE_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(600_000).default(180_000),
   QASEY_CODE_MODE_MEMORY_LIMIT_MB: z.coerce.number().int().min(32).max(512).default(128),
   QASEY_ENABLE_LOCAL_CODE_MODE: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
-  QASEY_ENABLE_EXECUTION: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
-  QASEY_ENABLE_CUA_FALLBACK: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
   QASEY_MAX_REPAIRS: z.coerce.number().int().min(0).max(5).default(2),
-  QASEY_SHADOW_MODE: z.enum(["true", "false"]).default("true").transform(value => value === "true"),
   QASEY_INTENT_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(300_000).default(60_000),
   QASEY_AGENT_TIMEOUT_MS: z.coerce.number().int().min(10_000).default(50 * 60_000),
   QASEY_MEMORY_MODEL: z.string().min(1).default("gpt-5.6-luna"),
@@ -104,8 +100,7 @@ export const ConfigSchema = z.object({
   QASEY_WORKSPACE_DIR: z.string().default(".qasey/workspaces"),
   QASEY_GIT_CACHE_DIR: z.string().default(".qasey/git-cache"),
   QASEY_DATA_ROOT: z.string().default(".qasey/data"),
-  QASEY_SANDBOX_ENABLED: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
-  QASEY_SANDBOX_ENDPOINT_TEMPLATE: z.string().min(1).default("http://moego-qasey-sandbox-{ordinal}.moego-qasey-sandbox:4120"),
+  QASEY_SANDBOX_ENDPOINT_TEMPLATE: optionalString,
   QASEY_SANDBOX_REPLICAS: z.coerce.number().int().min(1).max(20).default(2),
   QASEY_SANDBOX_MAX_SESSIONS: z.coerce.number().int().min(1).max(50).default(5),
   QASEY_SANDBOX_IDLE_TTL_MS: z.coerce.number().int().min(60_000).default(30 * 60_000),
@@ -211,25 +206,25 @@ export const ConfigSchema = z.object({
       message: "DD_LLMOBS_ML_APP is required when QASEY_ENABLE_DATADOG=true",
     });
   }
-  if (value.QASEY_SANDBOX_ENABLED && !value.QASEY_SANDBOX_ENDPOINT_TEMPLATE.includes("{ordinal}")) {
+  if (value.QASEY_SANDBOX_ENDPOINT_TEMPLATE && !value.QASEY_SANDBOX_ENDPOINT_TEMPLATE.includes("{ordinal}")) {
     context.addIssue({
       code: "custom",
       path: ["QASEY_SANDBOX_ENDPOINT_TEMPLATE"],
       message: "QASEY_SANDBOX_ENDPOINT_TEMPLATE must contain {ordinal}",
     });
   }
-  if (value.NODE_ENV === "production" && value.QASEY_SANDBOX_ENABLED && (!value.DATABASE_URL || !value.GOOGLE_COOKIE_PASSWORD)) {
+  if (value.NODE_ENV === "production" && !value.QASEY_SANDBOX_ENDPOINT_TEMPLATE) {
     context.addIssue({
       code: "custom",
-      path: ["QASEY_SANDBOX_ENABLED"],
-      message: "Production sandbox leases require DATABASE_URL and GOOGLE_COOKIE_PASSWORD",
+      path: ["QASEY_SANDBOX_ENDPOINT_TEMPLATE"],
+      message: "QASEY_SANDBOX_ENDPOINT_TEMPLATE is required in production",
     });
   }
-  if (value.NODE_ENV === "production" && value.QASEY_ENABLE_EXECUTION && !value.QASEY_SANDBOX_ENABLED) {
+  if (value.NODE_ENV === "production" && value.QASEY_SANDBOX_ENDPOINT_TEMPLATE && (!value.DATABASE_URL || !value.GOOGLE_COOKIE_PASSWORD)) {
     context.addIssue({
       code: "custom",
-      path: ["QASEY_ENABLE_EXECUTION"],
-      message: "Production E2E code execution requires QASEY_SANDBOX_ENABLED=true; the API Pod cannot host coding agents",
+      path: ["QASEY_SANDBOX_ENDPOINT_TEMPLATE"],
+      message: "Production sandbox leases require DATABASE_URL and GOOGLE_COOKIE_PASSWORD",
     });
   }
   const githubAppKeys = ["GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY"] as const;

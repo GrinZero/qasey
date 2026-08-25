@@ -102,11 +102,29 @@ are absent from the verifier profile.
 
 ## Local verification
 
+The normal development command starts the complete control and execution
+planes. It builds the worker entrypoints, starts one local Sandbox runtime,
+ensures the repository's Chromium version exists in Playwright's host-level
+shared cache, waits for Sandbox readiness, and then starts Mastra. Task-private
+homes receive `PLAYWRIGHT_BROWSERS_PATH`, so attempts do not download their own
+browser copies:
+
+```bash
+pnpm dev
+```
+
+No E2E execution, Sandbox, shadow, or Draft PR feature flags exist. Runtime
+capability is structural: a configured Sandbox endpoint creates the
+`CodeTaskRunner`; without one, E2E submission fails before a queued run is
+persisted. `pnpm dev` injects its loopback endpoint automatically. Production
+must configure the pool endpoint explicitly. Draft PR publication occurs after
+the clean verifier whenever GitHub App publishing credentials are available.
+
 The deterministic storage, lifecycle, path, and check-planning tests run with:
 
 ```bash
 pnpm exec vitest run \
-  tests/e2e/workspace.test.ts \
+  tests/e2e/repository-cache.test.ts \
   tests/code-task \
   tests/platform/sandbox-runtime.test.ts
 ```

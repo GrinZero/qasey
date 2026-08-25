@@ -171,7 +171,7 @@ const remoteSandboxPool = sandboxPoolClient;
 const workspace = lifecycle.own(createScopedWorkspace({
   root: config.QASEY_WORKSPACE_DIR,
   production: config.NODE_ENV === "production",
-  enableCodeExecution: config.QASEY_ENABLE_LOCAL_CODE_MODE || config.QASEY_SANDBOX_ENABLED,
+  enableCodeExecution: config.QASEY_ENABLE_LOCAL_CODE_MODE || Boolean(remoteSandboxPool),
   skills: [GLOBAL_SKILLS_PATH],
   ...(remoteSandboxPool ? {
     remoteFilesystem: scope => remoteSandboxPool.filesystem(scope),

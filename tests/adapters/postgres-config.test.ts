@@ -40,6 +40,7 @@ describe("split PostgreSQL configuration", () => {
       REDIS_PORT: "6379",
       REDIS_PASSWORD: "redis-password",
       REDIS_TLS: "true",
+      QASEY_SANDBOX_ENDPOINT_TEMPLATE: "http://moego-qasey-sandbox-{ordinal}.internal:4120",
     });
     expect(config.DATABASE_URL).toContain("/moego_qasey");
     expect(config.EDITOR_DATABASE_URL).toBeUndefined();

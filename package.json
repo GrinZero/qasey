@@ -21,15 +21,14 @@
     "db:studio": "prisma studio",
     "typecheck": "pnpm db:generate && tsc --noEmit",
     "pretest": "pnpm admin-ui:build",
-    "test": "NODE_ENV=test QASEY_SHADOW_MODE=false vitest run",
-    "test:watch": "NODE_ENV=test QASEY_SHADOW_MODE=false vitest",
+    "test": "NODE_ENV=test vitest run",
+    "test:watch": "NODE_ENV=test vitest",
     "evals:build": "node evals/golden/scripts/build-exports.mjs",
     "evals:snapshot-sources": "node evals/golden/scripts/snapshot-source-evidence.mjs",
     "evals:check": "vitest run tests/evals/golden-dataset.test.ts",
     "evals:import:mastra": "tsx evals/golden/scripts/import-mastra.ts",
     "evals:import:mastra:safe": "tsx evals/golden/scripts/import-mastra-safe.ts",
-    "check": "pnpm typecheck && pnpm test && pnpm build",
-    "demo:web": "vitest run tests/e2e/playwright-runner.test.ts"
+    "check": "pnpm typecheck && pnpm test && pnpm build"
   },
   "dependencies": {
     "@agentclientprotocol/codex-acp": "1.6.2",

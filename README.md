@@ -9,7 +9,7 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-默认监听 Mastra 的本地端口。所有环境都在 `/studio` 提供受 Google OAuth、RBAC 与审计保护的 Studio，其原生 API 统一位于 `/studio/api`；Editor 与 MCP Preview 等高风险能力仍由独立开关控制。`/admin` 是面向多 Agent 产品用户的管理界面，不是 Studio 的替代实现；它只通过已注册 Application 的受控 API 使用 Mastra 能力。
+`pnpm dev` 提供完整本地能力：它构建 Admin UI 与 CodeTask worker，启动单副本本地 Sandbox，等待 `:4120/readyz` 通过后再启动 Mastra。E2E author、repair 和 clean verifier 都走与部署环境相同的 CodeTask Runner 路径；退出开发进程时两边的进程树会一起终止。默认监听 Mastra 的本地端口。所有环境都在 `/studio` 提供受 Google OAuth、RBAC 与审计保护的 Studio，其原生 API 统一位于 `/studio/api`；Editor 与 MCP Preview 等高风险能力仍由独立开关控制。`/admin` 是面向多 Agent 产品用户的管理界面，不是 Studio 的替代实现；它只通过已注册 Application 的受控 API 使用 Mastra 能力。
 
 - Agent：`POST /studio/api/agents/qasey-main/generate`、`/stream`
 - Workflow：`POST /studio/api/workflows/qasey-e2e-lifecycle/start`、`/resume`
@@ -29,6 +29,7 @@ pnpm dev
 - `GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`、`GOOGLE_COOKIE_PASSWORD`
 - `REDIS_HOST`、`REDIS_PORT`、`REDIS_PASSWORD`、`REDIS_TLS=true`
 - `WORKER_TOKEN`：API 接受的专用 Mastra orchestration Worker token
+- `QASEY_SANDBOX_ENDPOINT_TEMPLATE`：固定 Sandbox Pool 地址，必须包含 `{ordinal}`
 - 模型 provider 配置
 
 常用可选：

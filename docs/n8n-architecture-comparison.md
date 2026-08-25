@@ -148,7 +148,6 @@ case create/maintain 只有在 MeterSphere 写入成功，并且之后发生一�
 - MeterSphere create/edit/upsert 在主 Agent 中只能 dry-run，真实 mutation 只归确定性 Workflow 所有；
 - QA Experience upsert 只允许 Slack 渠道，并要求 Mastra approval；
 - delete 工具永不提供给 Agent；
-- shadow mode 直接把 discovery catalog 降级为只读，不依赖 Agent 的 intent 标签；
 - 缺少真实 ingress context 时，test/production fail closed。
 
 这些约束在执行边界生效，不依赖模型遵守 system prompt。
@@ -207,7 +206,7 @@ MeterSphere update 有稳定 case ID 和 fresh read 证明；create 仍需要下
 
 ### 6.5 生产证明弱于 active n8n baseline
 
-代码版 typecheck 和单元/集成测试通过，但默认仍是 `shadowMode=true`、`executionEnabled=false`、`draftPrEnabled=false`。在没有完成真实流量 shadow 对比、负载测试、故障演练和外部系统验证前，不能仅凭代码结构宣布迁移完成。
+代码版 typecheck 和单元/集成测试通过，但仍需完成真实流量对比、负载测试、故障演练和外部系统验证，不能仅凭代码结构宣布迁移完成。E2E/Sandbox/Draft PR 不再由相互独立的布尔开关控制：部署通过 Sandbox endpoint 提供执行能力，GitHub App 凭证提供 Draft PR 发布能力。
 
 ### 6.6 迭代门槛更高
 
@@ -307,11 +306,11 @@ workflow 已有 63 个节点但没有 node groups。`Search for messages in Slac
 - 做 Worker crash、lease lost、上游 429/5xx、通知失败等故障演练；
 - QA Experience approval 必须证明无法从 Code Mode 绕过。
 
-### 阶段五：开启 E2E 与 Draft PR
+### 阶段五：接入 E2E 与 Draft PR
 
 - 接入生产对象存储和远程 runner/job dispatcher；
 - 验证 clean-room verifier、allowed paths 和 artifact 完整性；
-- 先开启 E2E execution，再独立开启 Draft PR；
+- Sandbox endpoint 配置完成后由 CodeTask Runner 直接提供 E2E execution；clean verifier 通过且 GitHub App 凭证可用时创建 Draft PR；
 - QA verdict 和 PR Ready 保持人工控制，禁止自动合并。
 
 ## 11. 参考实现

@@ -17,6 +17,7 @@ const productionAuth = {
   REDIS_PORT: "6379",
   REDIS_PASSWORD: "redis-password",
   REDIS_TLS: "true",
+  QASEY_SANDBOX_ENDPOINT_TEMPLATE: "http://moego-qasey-sandbox-{ordinal}.internal:4120",
 };
 
 describe("shared runtime configuration", () => {
@@ -39,6 +40,23 @@ describe("shared runtime configuration", () => {
     expect(config.METERSPHERE_BASE_URL).toBe("https://metersphere.devops.moego.pet");
     expect(config.METERSPHERE_PROJECT_ID).toBe("20a78db9-19aa-11ee-a261-5a66b98c4036");
     expect(config.SLACK_CHANNEL_MODE).toBe("auto");
+    expect(config.QASEY_SANDBOX_ENDPOINT_TEMPLATE).toBeUndefined();
+  });
+
+  it("uses Sandbox endpoint presence as capability configuration", () => {
+    expect(loadConfig({
+      NODE_ENV: "development",
+      QASEY_SANDBOX_ENDPOINT_TEMPLATE: "http://127.0.0.1:412{ordinal}",
+    } as NodeJS.ProcessEnv).QASEY_SANDBOX_ENDPOINT_TEMPLATE).toBe("http://127.0.0.1:412{ordinal}");
+    expect(() => loadConfig({
+      NODE_ENV: "development",
+      QASEY_SANDBOX_ENDPOINT_TEMPLATE: "http://127.0.0.1:4120",
+    } as NodeJS.ProcessEnv)).toThrow(/must contain \{ordinal\}/);
+    expect(() => loadConfig({
+      NODE_ENV: "production",
+      ...productionAuth,
+      QASEY_SANDBOX_ENDPOINT_TEMPLATE: undefined,
+    } as NodeJS.ProcessEnv)).toThrow(/required in production/);
   });
 
   it("keeps Redis durability off locally unless explicitly enabled", () => {

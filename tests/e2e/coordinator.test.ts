@@ -1,7 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import { InMemoryRunRepository } from "../../packages/domain/src/index.ts";
-import { CreateE2ERunRequestSchema, CreateE2ERunSchema } from "../../packages/contracts/src/index.ts";
-import { E2ECoordinator, type ArtifactStore, type CodingHarness, type DraftPrBroker, type E2ERunner, type WorkspaceManager, type WorkspaceRef } from "../../packages/e2e/src/index.ts";
+import {
+  CreateE2ERunRequestSchema,
+  CreateE2ERunSchema,
+  type ArtifactRef,
+  type CodeTaskResult,
+  type CodeTaskSpec,
+} from "../../packages/contracts/src/index.ts";
+import type { CodeTaskRunner, CodeTaskRunnerProvider } from "../../packages/code-task/src/index.ts";
+import { E2ECoordinator, type ArtifactStore, type DraftPrBroker } from "../../packages/e2e/src/index.ts";
+
+const sha = "a".repeat(64);
+const baseSha = "b".repeat(40);
 
 describe("E2E coordinator", () => {
   it("rejects client-supplied dependency commands", () => {
@@ -30,68 +40,161 @@ describe("E2E coordinator", () => {
     }).success).toBe(false);
   });
 
-  it("requires an author pass and an independent verifier pass before a Draft PR", async () => {
+  it("fails before creating an orphaned queued run when CodeTask execution is unavailable", async () => {
+    const repository = new InMemoryRunRepository();
+    const coordinator = new E2ECoordinator(repository, artifacts(), broker(), {
+      maxRepairs: 2,
+      reviewBaseUrl: "https://qasey.test",
+    });
+    await expect(coordinator.create({ applicationId: "qasey", tenantId: "tenant-1" }, createInput()))
+      .rejects.toThrow(/CodeTask Runner is not configured/);
+  });
+
+  it("requires a Sandbox author pass and an independent verifier pass before a Draft PR", async () => {
     const owner = { applicationId: "qasey", tenantId: "tenant-1" };
     const repository = new InMemoryRunRepository();
-    const createdWorkspaces: WorkspaceRef[] = [];
-    const workspaces: WorkspaceManager = {
-      create: vi.fn(async (profile, id, options) => {
-        const ref: WorkspaceRef = {
-          id,
-          root: `/isolated/${id}`,
-          gitDir: `/isolated/${id}/store.git`,
-          branch: options?.branch ?? `qasey/${id}`,
-          baseSha: options?.baseSha ?? "0123456789abcdef0123456789abcdef01234567",
-          purpose: options?.purpose ?? "author",
-          repository: profile,
-        };
-        createdWorkspaces.push(ref);
-        return ref;
-      }),
-      exec: vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "", durationMs: 1 })),
-      collectPatch: vi.fn(async () => "diff --git a/e2e/a.spec.ts b/e2e/a.spec.ts"),
-      changedPaths: vi.fn(async () => ["e2e/a.spec.ts"]),
-      assertAllowedChanges: vi.fn(async () => undefined),
-      assertWritablePath: vi.fn(async () => undefined),
-      applyPatch: vi.fn(async () => undefined),
-      destroy: vi.fn(async () => undefined),
-    };
-    const harness: CodingHarness = { author: vi.fn(async () => ({ summary: "generated" })) };
-    const phases: string[] = [];
-    const runner: E2ERunner = {
-      framework: "playwright",
-      run: vi.fn(async workspace => { phases.push(workspace.id); return { passed: true, exitCode: 0, summary: "passed", artifacts: [] }; }),
-    };
-    const artifacts: ArtifactStore = {
-      savePatch: vi.fn(async (_owner, runId) => ({ id: `${runId}:patch`, kind: "patch" as const, name: "changes.patch", uri: "file:///artifact.patch" })),
-      loadPatch: vi.fn(async () => "patch"),
-      saveContext: vi.fn(async (_owner, runId) => ({ id: `${runId}:execution-brief`, kind: "report" as const, name: "execution-brief.json", uri: "file:///brief.json" })),
-      saveTaskContext: vi.fn(async (_owner, runId, taskId) => ({ id: `${runId}:${taskId}`, kind: "report" as const, name: "context.json", uri: "file:///context.json" })),
-      persistContent: vi.fn(async (_owner, _runId, _phase, ref) => ref),
-      persist: vi.fn(async (_owner, _runId, _phase, refs) => refs),
-    };
-    let markedReady = false;
-    const broker: DraftPrBroker = {
-      publish: vi.fn(async () => "https://github.com/o/r/pull/1"),
-      markReady: vi.fn(async () => { markedReady = true; }),
-    };
-    const coordinator = new E2ECoordinator(repository, workspaces, harness, { playwright: runner, maestro: { ...runner, framework: "maestro" } }, artifacts, broker, false, { maxRepairs: 2, reviewBaseUrl: "https://qasey.test" });
-    const run = await coordinator.create(owner, {
-      sourceSessionId: "s", sourceCaseIds: ["case-1"], platform: "web", framework: "playwright",
-      handoff: handoff(),
-      repository: { owner: "o", repository: "r", cloneUrl: "https://example.test/r.git", baseRef: "main", allowedPaths: ["e2e"], skillsPaths: [] },
+    const submitted: CodeTaskSpec[] = [];
+    const runner = fakeRunner(submitted);
+    const draftPr = broker();
+    const coordinator = new E2ECoordinator(repository, artifacts(), draftPr, {
+      maxRepairs: 2,
+      reviewBaseUrl: "https://qasey.test",
+      codeTasks: { forScope: vi.fn(async () => runner) } satisfies CodeTaskRunnerProvider,
     });
+    const run = await coordinator.create(owner, createInput());
+    await coordinator.freezeExecutionBrief(owner, run.id, [{
+      id: "case-1",
+      title: "accepted browser flow",
+      priority: "P1",
+      target: "web",
+      preconditions: [],
+      steps: [{ action: "open flow", expected: ["flow is visible"] }],
+      testData: {},
+      tags: [],
+      evidenceRefs: [],
+      unresolvedQuestions: [],
+    }], {
+      owner: "o",
+      repository: "r",
+      workspacePath: "target",
+      baseSha,
+      allowedPaths: ["e2e"],
+      skillPaths: [],
+      specGlobs: ["e2e/**/*.spec.ts"],
+      artifactGlobs: [],
+    });
+    await repository.update(owner, run.id, { baseSha });
+
     await coordinator.execute(owner, run.id);
-    expect(createdWorkspaces).toHaveLength(2);
-    expect(phases[0]).toContain("author");
-    expect(phases[1]).toContain("verifier");
-    expect(broker.publish).toHaveBeenCalledTimes(1);
-    expect(await repository.get(owner, run.id)).toMatchObject({ status: "awaiting_qa", pullRequestUrl: "https://github.com/o/r/pull/1" });
+
+    expect(submitted.map(spec => spec.executionProfileId)).toEqual(["web-e2e-author", "web-e2e-verifier"]);
+    expect(submitted[1]?.attemptId).not.toBe(submitted[0]?.attemptId);
+    expect(draftPr.publishChanges).toHaveBeenCalledTimes(1);
+    expect(await repository.get(owner, run.id)).toMatchObject({
+      status: "awaiting_qa",
+      pullRequestUrl: "https://github.com/o/r/pull/1",
+    });
     await coordinator.verdict(owner, run.id, { verdict: "approve", reviewerId: "qa-1" });
-    expect(markedReady).toBe(true);
+    expect(draftPr.markReady).toHaveBeenCalledTimes(1);
     expect(await repository.get(owner, run.id)).toMatchObject({ status: "succeeded" });
   });
 });
+
+function createInput() {
+  return {
+    sourceSessionId: "s",
+    sourceCaseIds: ["case-1"],
+    platform: "web" as const,
+    framework: "playwright" as const,
+    handoff: handoff(),
+    repository: {
+      owner: "o",
+      repository: "r",
+      cloneUrl: "https://example.test/r.git",
+      baseRef: "main",
+      allowedPaths: ["e2e"],
+      skillsPaths: [],
+    },
+  };
+}
+
+function artifacts(): ArtifactStore {
+  let patch = "";
+  return {
+    savePatch: vi.fn(async (_owner, runId, content) => {
+      patch = content;
+      return ref(`${runId}:patch`, "patch", "changes.patch", "file:///changes.patch");
+    }),
+    loadPatch: vi.fn(async () => patch),
+    saveContext: vi.fn(async (_owner, runId) => ref(`${runId}:execution-brief`, "report", "execution-brief.json", "file:///brief.json")),
+    saveTaskContext: vi.fn(async (_owner, runId, taskId) => ref(`${runId}:${taskId}`, "report", "context.json", "file:///context.json")),
+    persistContent: vi.fn(async (_owner, _runId, _phase, artifact) => artifact),
+    persist: vi.fn(async (_owner, _runId, _phase, refs) => refs),
+  };
+}
+
+function broker(): DraftPrBroker {
+  return {
+    publishChanges: vi.fn(async () => "https://github.com/o/r/pull/1"),
+    markReady: vi.fn(async () => undefined),
+  };
+}
+
+function fakeRunner(submitted: CodeTaskSpec[]): CodeTaskRunner {
+  const specs = new Map<string, CodeTaskSpec>();
+  const patchRef = ref("sandbox-patch", "patch", "changes.patch", "sandbox://changes.patch");
+  const contentRef = ref("sandbox-content", "report", "a.spec.ts", "sandbox://a.spec.ts");
+  return {
+    submit: vi.fn(async spec => {
+      submitted.push(spec);
+      specs.set(spec.taskId, spec);
+      return { taskId: spec.taskId, attemptId: spec.attemptId, status: "succeeded" as const };
+    }),
+    events: vi.fn(async () => ({ events: [] })),
+    get: vi.fn(async taskId => {
+      const spec = specs.get(taskId)!;
+      const verifier = spec.executionProfileId === "web-e2e-verifier";
+      const result: CodeTaskResult = {
+        status: "succeeded",
+        summary: verifier ? "verified" : "authored",
+        changedPaths: ["e2e/a.spec.ts"],
+        changes: verifier ? [{
+          path: "e2e/a.spec.ts",
+          status: "added",
+          mode: "100644",
+          contentRef,
+        }] : [],
+        ...(verifier ? {} : { patchRef }),
+        checks: [],
+        artifacts: [],
+        provenance: {
+          imageDigest: "local-development",
+          profileHash: sha,
+          mastraAcpVersion: "0.4.0",
+          codexAcpVersion: "1.6.2",
+          codexVersion: "test",
+        },
+      };
+      const now = new Date().toISOString();
+      return {
+        taskId,
+        attemptId: spec.attemptId,
+        status: "succeeded" as const,
+        createdAt: now,
+        updatedAt: now,
+        result,
+      };
+    }),
+    cancel: vi.fn(async () => undefined),
+    artifact: vi.fn(async artifact => Buffer.from(artifact.id === patchRef.id
+      ? "diff --git a/e2e/a.spec.ts b/e2e/a.spec.ts"
+      : "test('flow', async () => {});")),
+  };
+}
+
+function ref(id: string, kind: ArtifactRef["kind"], name: string, uri: string): ArtifactRef {
+  return { id, kind, name, uri, sha256: sha };
+}
 
 function handoff() {
   return {
