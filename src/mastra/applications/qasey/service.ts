@@ -2,21 +2,18 @@ import { RequestContext } from "@mastra/core/request-context";
 import type { Mastra } from "@mastra/core/mastra";
 import type { DurableAgentStreamResult } from "@mastra/core/agent/durable";
 import type { ChunkType } from "@mastra/core/stream";
+import { z } from "zod";
 import {
+  AgentProgressReportSchema,
   type AgentProgressReport,
   type QaseyRequestContext,
 } from "../../../../packages/contracts/src/index.ts";
 import { loadModelAttachments } from "../../../../packages/adapters/src/index.ts";
 import {
   AgentProgressSession,
-  buildMeterSphereCasePlan,
-  completeCaseOperationAgainstPlan,
   IncompleteOutcomeError,
 } from "../../../../packages/domain/src/index.ts";
-import type {
-  MeterSphereCaseCompletionReceipt,
-  MeterSphereCasePlan,
-} from "../../../../packages/domain/src/index.ts";
+import type { MeterSphereCaseCompletionReceipt, MeterSphereCasePlan } from "../../../../packages/domain/src/index.ts";
 import {
   initializeQaseyTraceRequestContext,
   startQaseyRequestSpan,
@@ -24,8 +21,9 @@ import {
   traceQaseyOperation,
 } from "./observability.ts";
 import type { QaseyRequestSpan, QaseyTraceContext } from "./observability.ts";
+import type { QaseyRemoteTraceContext } from "./trace-carrier.ts";
 import { config } from "../../runtime.ts";
-import { meterSphereCaseWorkflowRunId, runMeterSphereCaseOperationWorkflow } from "../../workflows/metersphere-case-workflow.ts";
+import { MeterSphereCaseCompletionReceiptSchema } from "../../workflows/metersphere-case-workflow.ts";
 import { QASEY_AGENT_SAFETY_MAX_STEPS } from "../../agents/qasey-main/processors.ts";
 import { conversationScope } from "../../../platform/context/conversation-scope.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../../../platform/context/schema.ts";
@@ -39,23 +37,27 @@ export interface QaseyResponse {
   progress: AgentProgressReport[];
 }
 
+export const QaseyResponseSchema = z.object({
+  text: z.string().min(1),
+  runId: z.string().min(1),
+  outcome: z.literal("success"),
+  finalization: z.enum(["agent", "workflow"]),
+  completionReceipt: MeterSphereCaseCompletionReceiptSchema.optional(),
+  progress: z.array(AgentProgressReportSchema),
+});
+
 export interface QaseyAgentCompletionState {
   finishReason?: string;
   pendingToolCalls: number;
 }
 
-/** JSON-safe checkpoint emitted by the Skill-driven Agent phase. */
+/** Result of the direct Skill-driven Durable Agent phase. */
 export interface QaseyAgentPhaseResult {
   context: QaseyRequestContext;
   runId: string;
   agentText: string;
   completionState: QaseyAgentCompletionState;
-  casePlan?: MeterSphereCasePlan;
   progress: AgentProgressReport[];
-}
-
-export interface QaseyFinalizationDecision extends QaseyAgentPhaseResult {
-  finalization: QaseyResponse["finalization"];
 }
 
 export type QaseyAgentRuntimeEvent =
@@ -125,15 +127,9 @@ export interface ExecuteQaseyOptions {
   events?: QaseyExecutionEvents;
   timeoutMs?: number;
   trace?: QaseyTraceContext;
+  remoteParent?: QaseyRemoteTraceContext;
   /** Parent workflow/channel tracing position for one continuous request trace. */
   tracingContext?: import("@mastra/core/observability").TracingContext;
-  resumeCasePlan?: MeterSphereCasePlan;
-  caseOperationRunner?: (input: {
-    mastra: Mastra;
-    requestContext: RequestContext;
-    plan: MeterSphereCasePlan;
-    workflowRunId: string;
-  }) => Promise<MeterSphereCaseCompletionReceipt>;
   /** Trusted context prepared by a native Workflow or channel ingress. */
   requestContext?: RequestContext<any>;
 }
@@ -148,6 +144,10 @@ type QaseyAgentStreamResult = {
 export async function executeQasey(mastra: Mastra, context: QaseyRequestContext, options: ExecuteQaseyOptions = {}): Promise<QaseyResponse> {
   const runId = options.runId ?? crypto.randomUUID();
   const requestContext = prepareQaseyRequestContext(context, options.requestContext);
+  requestContext.delete("case-plan");
+  requestContext.delete("case-completion-receipt");
+  requestContext.set("qasey-agent-run-id", runId);
+  if (options.events) requestContext.set("qasey-execution-events", options.events);
   initializeQaseyTraceRequestContext(requestContext, context, options.trace);
   const requestTrace = startQaseyRequestSpan(
     mastra,
@@ -156,20 +156,31 @@ export async function executeQasey(mastra: Mastra, context: QaseyRequestContext,
     runId,
     options.trace,
     options.tracingContext,
+    options.remoteParent,
   );
-  let phase: QaseyAgentPhaseResult | undefined;
   try {
-    phase = await runQaseyAgentPhase(mastra, context, {
+    const phase = await runQaseyAgentPhase(mastra, context, {
       ...options,
       runId,
       requestContext,
       ...(requestTrace.tracingContext ? { tracingContext: requestTrace.tracingContext } : {}),
     });
-    const decision = decideQaseyFinalization(phase);
-    const response = await finalizeQaseyDecision(mastra, decision, {
-      ...options,
-      requestContext,
-    });
+    assertCompletionState(phase.completionState);
+    const storedReceipt = requestContext.get("case-completion-receipt");
+    const completionReceipt = storedReceipt === undefined
+      ? undefined
+      : MeterSphereCaseCompletionReceiptSchema.parse(storedReceipt) as MeterSphereCaseCompletionReceipt;
+    const text = completionReceipt ? completionReceiptText(completionReceipt) : phase.agentText;
+    if (!text) throw new IncompleteOutcomeError("Agent stopped without a standalone final answer");
+    await options.events?.onPhase?.({ runId, phase: "finalizing" });
+    const response: QaseyResponse = {
+      text,
+      runId,
+      outcome: "success",
+      finalization: completionReceipt ? "workflow" : "agent",
+      progress: phase.progress,
+      ...(completionReceipt ? { completionReceipt } : {}),
+    };
     requestTrace.span?.end({
       output: response,
       metadata: {
@@ -187,12 +198,20 @@ export async function executeQasey(mastra: Mastra, context: QaseyRequestContext,
       },
     });
     throw error;
+  } finally {
+    requestContext.delete("qasey-execution-events");
+    requestContext.delete("qasey-agent-run-id");
+    requestContext.delete("agent-progress-session");
+    requestContext.delete("case-plan");
+    requestContext.delete("case-completion-receipt");
+    requestContext.delete("case-operation-phase");
+    requestContext.delete("externalWriteIdempotencyKey");
   }
 }
 
 /**
- * Executes the Skill-driven Agent/tool loop, but performs no deterministic
- * write handoff or response finalization.
+ * Executes the Skill-driven Durable Agent/tool loop. Trusted domain tools may
+ * run nested durable workflows during this phase.
  */
 export async function runQaseyAgentPhase(
   mastra: Mastra,
@@ -202,7 +221,6 @@ export async function runQaseyAgentPhase(
   const { runId, requestContext } = options;
   const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? config.QASEY_AGENT_TIMEOUT_MS);
   const abortSignal = options.abortSignal ? AbortSignal.any([options.abortSignal, timeoutSignal]) : timeoutSignal;
-  if (options.resumeCasePlan) requestContext.set("case-plan", options.resumeCasePlan);
   const requestSpan = options.tracingContext?.currentSpan as QaseyRequestSpan | undefined;
   const agentProgress: AgentProgressReport[] = [];
   const progressSession = new AgentProgressSession(async report => {
@@ -314,76 +332,12 @@ export async function runQaseyAgentPhase(
   }
   abortSignal.throwIfAborted();
   const completedResult = restoreProcessedAgentOutput(result, finishSnapshot);
-  const casePlan = options.resumeCasePlan ?? extractMeterSphereCasePlan(completedResult);
-  if (casePlan && casePlan.planHash !== options.resumeCasePlan?.planHash) {
-    requestContext.set("case-plan", casePlan);
-    await options.events?.onCasePlanCheckpoint?.({ runId, plan: casePlan });
-  }
   return {
     context,
     runId,
     agentText: selectFinalText(completedResult as { text?: string; steps?: Array<{ text?: string }> }),
     completionState: inspectAgentCompletion(completedResult),
-    ...(casePlan ? { casePlan } : {}),
     progress: agentProgress,
-  };
-}
-
-/** Pure completion validation used by both the native workflow and compatibility facade. */
-export function decideQaseyFinalization(phase: QaseyAgentPhaseResult): QaseyFinalizationDecision {
-  if (phase.casePlan) return { ...phase, finalization: "workflow" };
-  assertCompletionState(phase.completionState);
-  if (!phase.agentText) throw new IncompleteOutcomeError("Agent stopped without a standalone final answer");
-  return { ...phase, finalization: "agent" };
-}
-
-/** Executes the selected deterministic finalization path and assembles the public response. */
-export async function finalizeQaseyDecision(
-  mastra: Mastra,
-  decision: QaseyFinalizationDecision,
-  options: Pick<ExecuteQaseyOptions, "caseOperationRunner" | "events" | "requestContext" | "trace">,
-): Promise<QaseyResponse> {
-  const requestContext = prepareQaseyRequestContext(decision.context, options.requestContext);
-  let completionReceipt: MeterSphereCaseCompletionReceipt | undefined;
-  if (decision.finalization === "workflow") {
-    const casePlan = decision.casePlan;
-    if (!casePlan) throw new IncompleteOutcomeError("MeterSphere case operation did not produce a successful dry-run CasePlan");
-    requestContext.set("case-plan", casePlan);
-    requestContext.set("case-operation-phase", "execution");
-    await options.events?.onPhase?.({ runId: decision.runId, phase: "workflow" });
-    const workflowRunId = meterSphereCaseWorkflowRunId(options.trace?.jobId ?? decision.context.requestId, casePlan.planHash);
-    const receipt = options.caseOperationRunner
-      ? await options.caseOperationRunner({ mastra, requestContext, plan: casePlan, workflowRunId })
-      : await runMeterSphereCaseOperationWorkflow(mastra, requestContext, casePlan, workflowRunId);
-    completionReceipt = validateQaseyCompletionReceipt(casePlan, receipt);
-    if (!completionReceipt) throw new IncompleteOutcomeError("MeterSphere case workflow returned an invalid completion receipt");
-    await options.events?.onCompletionCheckpoint?.({ runId: decision.runId, receipt: completionReceipt });
-  }
-  return assembleQaseyResponse(decision, completionReceipt, options.events);
-}
-
-/** Builds the public response after a branch has completed its side effects. */
-export async function assembleQaseyResponse(
-  decision: QaseyFinalizationDecision,
-  completionReceipt?: MeterSphereCaseCompletionReceipt,
-  events?: QaseyExecutionEvents,
-): Promise<QaseyResponse> {
-  let text: string;
-  if (decision.finalization === "workflow") {
-    if (!completionReceipt) {
-      throw new IncompleteOutcomeError("Workflow finalization requires a verified completion receipt");
-    }
-    text = completionReceiptText(completionReceipt);
-  } else text = decision.agentText;
-  if (!text) throw new IncompleteOutcomeError("Agent stopped without a standalone final answer");
-  await events?.onPhase?.({ runId: decision.runId, phase: "finalizing" });
-  return {
-    text,
-    runId: decision.runId,
-    outcome: "success",
-    finalization: decision.finalization,
-    progress: decision.progress,
-    ...(completionReceipt ? { completionReceipt } : {}),
   };
 }
 
@@ -418,18 +372,6 @@ export function prepareQaseyRequestContext(
   if (!requestContext.has(MASTRA_THREAD_ID_KEY)) requestContext.set(MASTRA_THREAD_ID_KEY, scope.threadId);
   requestContext.set("qasey-context", context);
   return requestContext;
-}
-
-export function validateQaseyCompletionReceipt(
-  plan: MeterSphereCasePlan | undefined,
-  receipt: MeterSphereCaseCompletionReceipt | undefined,
-): MeterSphereCaseCompletionReceipt | undefined {
-  if (!plan || !receipt?.caseOperation) return undefined;
-  if (receipt.verificationMode !== "separate_read_back"
-    || receipt.caseOperation.verificationMode !== "separate_read_back") return undefined;
-  if (receipt.casePlanHash !== plan.planHash) return undefined;
-  const completeOperation = completeCaseOperationAgainstPlan(plan, receipt.caseOperation);
-  return completeOperation ? { ...receipt, caseOperation: completeOperation } : undefined;
 }
 
 export function selectFinalText(result: { text?: string; steps?: Array<{ text?: string }> }): string {
@@ -543,36 +485,6 @@ export function completionReceiptText(receipt: MeterSphereCaseCompletionReceipt)
     `MeterSphere 用例操作已完成：共处理 ${operation.itemCount} 条，新建 ${operation.createdCount} 条、更新 ${operation.updatedCount} 条，${verification}通过 ${operation.verifiedCount}/${operation.itemCount}。`,
     operation.modulePath ? `目标模块：\`${operation.modulePath}\`。` : "",
   ].filter(Boolean).join("\n");
-}
-
-/** Extract the last successful MeterSphere dry-run from native Mastra step results. */
-export function extractMeterSphereCasePlan(result: unknown): MeterSphereCasePlan | undefined {
-  if (!isRecord(result)) return undefined;
-  const steps = Array.isArray(result.steps) ? result.steps.filter(isRecord) : [];
-  let plan: MeterSphereCasePlan | undefined;
-  for (const step of steps) {
-    const calls = new Map<string, { toolName: string; args: unknown }>();
-    for (const call of arrayField(step.toolCalls)) {
-      const payload = isRecord(call.payload) ? call.payload : call;
-      const id = toolCallId(call);
-      const toolName = stringField(payload.toolName) ?? stringField(call.toolName);
-      if (id && toolName) calls.set(id, { toolName, args: payload.args ?? call.args });
-    }
-    for (const toolResult of arrayField(step.toolResults)) {
-      const payload = isRecord(toolResult.payload) ? toolResult.payload : toolResult;
-      const id = toolCallId(toolResult);
-      const call = id ? calls.get(id) : undefined;
-      const toolName = stringField(payload.toolName) ?? stringField(toolResult.toolName) ?? call?.toolName;
-      const args = payload.args ?? toolResult.args ?? call?.args;
-      const toolOutput = "result" in payload ? payload.result : toolResult.result;
-      if (!toolName?.toLowerCase().includes("metersphere_ms_bulk_upsert_test_cases")
-        || !isRecord(args)
-        || args.dry_run !== true) continue;
-      const candidate = buildMeterSphereCasePlan({ dryRunInput: args, dryRunResult: toolOutput });
-      if (candidate) plan = candidate;
-    }
-  }
-  return plan;
 }
 
 function inspectAgentCompletion(result: unknown): { finishReason?: string; pendingToolCalls: number } {

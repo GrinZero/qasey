@@ -7,7 +7,6 @@ import {
 describe("Qasey application access policy", () => {
   it("exposes filesystem agents and code primitives to authenticated UI, API, and service callers", () => {
     const application = createQaseyApplication({
-      taskWorkflowModule: { qaseyTaskWorkflow: { id: "qasey-task" } },
       e2eModule: { e2eLifecycleWorkflow: { id: "qasey-e2e-lifecycle" } },
       scorerModule: { qaseyEvalScorers: { "qasey-quality": { id: "qasey-quality" } } },
       caseWorkflowModule: {
@@ -18,6 +17,7 @@ describe("Qasey application access policy", () => {
 
     expect(application.agents).toEqual({});
     expect(application.filesystemAgents).toEqual(["qasey-main"]);
+    expect(application.workflows).not.toHaveProperty("qasey-task");
     expect(application.access.agents["qasey-main"]?.audiences).toEqual([
       "admin-ui",
       "api",

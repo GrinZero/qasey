@@ -10,7 +10,6 @@ import Redis from "ioredis";
 import { QASEY_TRACE_REQUEST_CONTEXT_KEYS } from "./applications/qasey/observability.ts";
 import { applicationDatabase, closeQaseyInfrastructure, config, createMastraRuntimeStorage, initializeQaseyInfrastructure, sandboxPoolClient, studioEditorEnabled } from "./runtime.ts";
 import { createQaseyApplication } from "./applications/qasey/application.ts";
-import * as taskWorkflowModule from "./workflows/qasey-task-workflow.ts";
 import * as e2eModule from "./workflows/e2e-workflow.ts";
 import * as scorerModule from "./scorers/eval-scorers.ts";
 import * as caseWorkflowModule from "./workflows/metersphere-case-workflow.ts";
@@ -147,7 +146,6 @@ runtimeReadiness.markInitializationComplete();
 const bootstrapAdmins = new Set((process.env.PLATFORM_BOOTSTRAP_ADMIN_EMAILS ?? "")
   .split(",").map(value => value.trim().toLowerCase()).filter(Boolean));
 const qaseyApplication = createQaseyApplication({
-  taskWorkflowModule,
   e2eModule,
   scorerModule,
   caseWorkflowModule,

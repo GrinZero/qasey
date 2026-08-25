@@ -11,7 +11,7 @@ export interface SlackStatusTarget {
 
 const WORKING_REACTION = "👀";
 // Slack validates both `status` and each `loading_messages` entry at <= 50 characters.
-const STATUS_MAX_CHARS = 150;
+const STATUS_MAX_CHARS = 50;
 const SENSITIVE_KEY = /(?:^|_)(?:token|access_?token|api_?key|authorization|cookie|credential|password|private_?key|secret|session)(?:$|_)/i;
 const SENSITIVE_VALUE = /\b(?:Bearer\s+[A-Za-z0-9._~+\/-]+=*|xox[a-z]-[A-Za-z0-9-]+)\b/gi;
 const INLINE_SECRET = /\b(?:token|access[_-]?token|api[_-]?key|authorization|cookie|password|private[_-]?key|secret|session)\s*[:=]\s*["']?[^\s,;"']+/gi;
@@ -255,6 +255,10 @@ function renderToolResult(
 
 function renderMeterSphereCall(toolName: string, input: Record<string, unknown>, taskTopic?: string): string {
   const topic = inferTopic(stringField(input, "keyword", "query", "name", "moduleName", "module_name")) || taskTopic || "相关需求";
+  if (toolName === "metersphere_commit_case_plan") {
+    const count = caseCount(input);
+    return statusLine(`正在提交${count === undefined ? "测试用例" : `${count} 条测试用例`}并执行独立回查…`);
+  }
   if (toolName.includes("list_modules") || toolName.includes("upsert_module")) return statusLine(`正在查找${topic}的用例目录…`);
   if (toolName.includes("list_test_cases")) return statusLine(`正在查找${topic}的历史用例…`);
   if (toolName.includes("get_test_case_detail")) return "正在查看相关测试用例详情…";
@@ -271,6 +275,9 @@ function renderMeterSphereCall(toolName: string, input: Record<string, unknown>,
 
 function renderMeterSphereResult(toolName: string, input: Record<string, unknown>, result: unknown): string {
   const count = resultCount(result) ?? caseCount(input);
+  if (toolName === "metersphere_commit_case_plan") {
+    return statusLine(`已完成${count === undefined ? "测试用例" : ` ${count} 条测试用例`}写入与独立回查…`);
+  }
   if (toolName.includes("list_modules")) return statusLine(count === undefined ? "已找到相关用例目录…" : `已找到 ${count} 个相关用例目录…`);
   if (toolName.includes("list_test_cases")) return statusLine(count === undefined
     ? "已找到相关历史用例，正在检查覆盖情况…"

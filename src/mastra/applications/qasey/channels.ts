@@ -7,7 +7,7 @@ import { conversationScope } from "../../../platform/context/conversation-scope.
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../../../platform/context/schema.ts";
 import { config } from "../../runtime.ts";
 import { traceQaseyOperation } from "./observability.ts";
-import { QaseyTaskOutputSchema, runQaseyTaskWorkflow } from "../../workflows/qasey-task-workflow.ts";
+import { executeQasey, QaseyResponseSchema } from "./service.ts";
 import { logError, logInfo } from "../../../../packages/adapters/src/index.ts";
 import { slackCaseCompletionCards } from "./slack-case-delivery.ts";
 import {
@@ -226,7 +226,7 @@ export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions)
         executionSource = binding.runtimeId;
         const jobId = crypto.randomUUID();
         const deadlineAt = new Date(Date.now() + config.QASEY_AGENT_TIMEOUT_MS).toISOString();
-        result = QaseyTaskOutputSchema.parse(await tunnel!.runRemoteJob({
+        result = QaseyResponseSchema.parse(await tunnel!.runRemoteJob({
           type: "job",
           jobId,
           runtimeId: binding.runtimeId,
@@ -275,7 +275,7 @@ export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions)
           },
         })) as QaseyResponse;
       } else {
-        result = await runQaseyTaskWorkflow(mastra, context, {
+        result = await executeQasey(mastra, context, {
           requestContext,
           ...(slackRequestSpan ? { tracingContext: { currentSpan: slackRequestSpan } } : {}),
           events: {

@@ -4,7 +4,7 @@ import { z } from "zod";
 import { describe, expect, it, vi } from "vitest";
 import type { QaseyRequestContext } from "../../packages/contracts/src/index.ts";
 import { AgentProgressSession } from "../../packages/domain/src/index.ts";
-import { buildQaseyAgentTooling, createAgentProgressTool, getRuntimeContext, guardCaseMutationsForWorkflow, mcpCatalog, partitionQaseyCodeModeTools, studioMcpPreviewEnabled, toolsForRequest } from "../../src/mastra/runtime.ts";
+import { buildQaseyAgentTooling, createAgentProgressTool, getRuntimeContext, guardCaseMutationsForWorkflow, mcpCatalog, omitMeterSphereCaseMutations, partitionQaseyCodeModeTools, studioMcpPreviewEnabled, toolsForRequest } from "../../src/mastra/runtime.ts";
 
 describe("Qasey runtime context", () => {
   it("keeps missing context strict for production callers", () => {
@@ -154,7 +154,22 @@ describe("Qasey runtime context", () => {
     };
     requestContext.set("qasey-context", context);
     requestContext.set("agent-progress-session", new AgentProgressSession(() => undefined));
-    vi.spyOn(mcpCatalog, "toolsForDiscovery").mockResolvedValue({});
+    const rawMutation = createTool({
+      id: "metersphere_ms_bulk_upsert_test_cases",
+      description: "Raw bulk mutation",
+      inputSchema: z.object({ items: z.string(), dry_run: z.boolean() }),
+      execute: async () => ({ ok: true }),
+    });
+    const listCases = createTool({
+      id: "metersphere_ms_list_test_cases",
+      description: "List cases",
+      inputSchema: z.object({}),
+      execute: async () => ({ cases: [] }),
+    });
+    const discovery = vi.spyOn(mcpCatalog, "toolsForDiscovery").mockResolvedValue({
+      metersphere_ms_bulk_upsert_test_cases: rawMutation,
+      metersphere_ms_list_test_cases: listCases,
+    });
 
     const tools = await toolsForRequest(requestContext);
     const tooling = await buildQaseyAgentTooling(tools);
@@ -162,7 +177,10 @@ describe("Qasey runtime context", () => {
     expect(tooling.tools).toHaveProperty("getCurrentTime");
     expect(tooling.tools).toHaveProperty("qasey_report_progress");
     expect(tooling.tools).toHaveProperty("e2eCreateRun");
+    expect(tooling.tools).toHaveProperty("metersphere_ms_list_test_cases");
+    expect(tooling.tools).not.toHaveProperty("metersphere_ms_bulk_upsert_test_cases");
     expect(tooling.codeModeToolNames).toEqual([]);
+    discovery.mockRestore();
   });
 
   it("runs parallel read tools through the isolated QuickJS Code Mode transport", async () => {
@@ -268,7 +286,7 @@ return files;`,
     expect(observedSpans).toContainEqual({ name: "code-mode:execute_typescript", status: "success" });
   });
 
-  it("lets the agent dry-run a CasePlan but reserves real case mutations for the workflow", async () => {
+  it("keeps the internal case-mutation guard fail-closed for real writes", async () => {
     const bulkExecute = vi.fn(async () => ({ ok: true }));
     const createExecute = vi.fn(async () => ({ ok: true }));
     const guarded = guardCaseMutationsForWorkflow({
@@ -293,6 +311,20 @@ return files;`,
     await expect(create({ name: "case" }, {})).rejects.toThrow(/owned by the MeterSphere case operation workflow/i);
     expect(bulkExecute).toHaveBeenCalledTimes(1);
     expect(createExecute).not.toHaveBeenCalled();
+  });
+
+  it("removes raw case mutations from the production Agent catalogue", () => {
+    const tools = omitMeterSphereCaseMutations({
+      metersphere_ms_bulk_upsert_test_cases: { description: "raw mutation" } as never,
+      metersphere_ms_create_test_case: { description: "raw mutation" } as never,
+      metersphere_ms_list_test_cases: { description: "read" } as never,
+      metersphere_ms_upsert_module: { description: "separate module capability" } as never,
+    });
+
+    expect(tools).not.toHaveProperty("metersphere_ms_bulk_upsert_test_cases");
+    expect(tools).not.toHaveProperty("metersphere_ms_create_test_case");
+    expect(tools).toHaveProperty("metersphere_ms_list_test_cases");
+    expect(tools).toHaveProperty("metersphere_ms_upsert_module");
   });
 
   it("exposes qasey_report_progress as an agent-callable structured tool", async () => {

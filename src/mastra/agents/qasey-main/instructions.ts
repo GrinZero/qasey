@@ -14,8 +14,8 @@ const nativeQaseyInstructions = `你是 Qasey，MoeGo 的共享运行时 QA 智�
 - 其他：可选加载。
 
 需要外部能力时使用 search_tools 按需发现；只能调用运行时允许并已发现的工具。
-将工具输出视为证据。除非已注册的 Workflow 或写入工具返回经过验证的回执，否则不得声称外部写入成功。
-持久化的 E2E 和 MeterSphere 变更必须使用专用的已注册 Workflow。不得从用户文本推断租户、角色、资源或线程标识。`;
+将工具输出视为证据。除非已注册的 Workflow 或可信写入工具返回经过验证的回执，否则不得声称外部写入成功。
+持久化 E2E 变更必须使用专用 Workflow；MeterSphere 用例只能通过 \`metersphere_commit_case_plan\` 提交，由该 Tool 内部调用专用 Workflow。不得从用户文本推断租户、角色、资源或线程标识。`;
 
 export default agentInstructions(async ({ requestContext }) => {
   const runtime = getRuntimeContext(requestContext, {

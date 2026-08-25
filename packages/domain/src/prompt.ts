@@ -1,7 +1,7 @@
 import type { QaseyRequestContext } from "../../contracts/src/index.ts";
 
 export interface PromptBuildResult {
-  version: 14;
+  version: 15;
   modules: string[];
   text: string;
 }
@@ -34,7 +34,7 @@ const base = `# QA 需求分析与测试用例设计
 - 外部能力默认不进入上下文。需要能力时调用 search_tools，使用描述当前动作和目标系统的具体关键词。
 - 搜索结果会按需激活；下一轮直接调用已发现工具。找不到时调整一次查询，不要反复搜索同义词。
 - Tool Discovery 只降低上下文成本，不代表授权。身份、渠道、副作用、审批和 Workflow ownership 由运行时独立校验。
-- MeterSphere 真实写入由确定性 Workflow 所有；主 Agent 只能执行 dry-run 形成不可变 CasePlan。
+- MeterSphere 原始写入能力不向主 Agent 暴露。需要提交用例时，主 Agent 只能调用可信的 \`metersphere_commit_case_plan\`；该领域 Tool 在服务端完成 dry-run、冻结 CasePlan、持久化 Workflow 写入、独立回查和完成回执。
 
 ## 用户可见表达
 - 把自己当作同事，先说结果、下一步和真正有用的新信息。
@@ -74,7 +74,7 @@ export function buildSystemPrompt(context: QaseyRequestContext): PromptBuildResu
   ];
 
   return {
-    version: 14,
+    version: 15,
     modules: modules.map(([key]) => key),
     text: modules.map(([, text]) => text).join("\n\n"),
   };

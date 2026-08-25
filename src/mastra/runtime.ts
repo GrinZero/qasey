@@ -171,8 +171,11 @@ export async function closeQaseyInfrastructure(): Promise<void> {
 export interface QaseyRequestContextMap {
   "qasey-context": QaseyRequestContext;
   "case-plan"?: import("../../packages/domain/src/index.ts").MeterSphereCasePlan;
+  "case-completion-receipt"?: import("../../packages/domain/src/index.ts").MeterSphereCaseCompletionReceipt;
   "agent-progress-session"?: AgentProgressSession;
   "case-operation-phase"?: "planning" | "execution";
+  "qasey-agent-run-id"?: string;
+  "qasey-execution-events"?: unknown;
   native?: boolean;
 }
 
@@ -415,9 +418,9 @@ export async function toolsForRequest(requestContext?: RequestContext<any>) {
   const progressTool = progressSession?.enabled ? {
     qasey_report_progress: createAgentProgressTool(progressSession),
   } : {};
-  // qasey-main may discover case mutation tools for dry-run planning, but the
-  // deterministic MeterSphere workflow is the only owner of real writes.
-  const ownershipScopedExternal = guardCaseMutationsForWorkflow(external);
+  // Raw case mutations never enter the Agent catalog. The trusted commit Tool
+  // invokes the required MCP primitive inside the deterministic Workflow.
+  const ownershipScopedExternal = omitMeterSphereCaseMutations(guardCaseMutationsForWorkflow(external));
   return applyDevRuntimeApprovalGate(
     { getCurrentTime, ...progressTool, ...readTools, ...ownershipScopedExternal, ...executionTools },
     requestContext,
@@ -515,10 +518,7 @@ export function mcpSubject(requestContext?: RequestContext<any>) {
   return { applicationId, tenantId, subjectId };
 }
 
-/**
- * During case planning the Agent may validate the proposed bulk payload, but
- * only the deterministic workflow owns the real case mutation.
- */
+/** Defense-in-depth guard applied before raw mutations are removed from the Agent catalog. */
 export function guardCaseMutationsForWorkflow(tools: ToolsInput): ToolsInput {
   return Object.fromEntries(Object.entries(tools).map(([toolName, tool]) => {
     if (!isMeterSphereCaseMutation(toolName)) return [toolName, tool];
@@ -536,6 +536,10 @@ export function guardCaseMutationsForWorkflow(tools: ToolsInput): ToolsInput {
       },
     }];
   }));
+}
+
+export function omitMeterSphereCaseMutations(tools: ToolsInput): ToolsInput {
+  return Object.fromEntries(Object.entries(tools).filter(([toolName]) => !isMeterSphereCaseMutation(toolName)));
 }
 
 function isMeterSphereCaseMutation(toolName: string): boolean {

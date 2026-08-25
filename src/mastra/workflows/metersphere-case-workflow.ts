@@ -103,7 +103,7 @@ const writeFrozenPlan = createStep({
   execute: async ({ inputData, mastra, requestContext, abortSignal }) => {
     const plan = validateMeterSphereCasePlan(inputData.plan);
     const writeInput = { items: JSON.stringify(plan.writeItems), dry_run: false };
-    const result = await executeWorkflowTool(
+    const result = await executeMeterSphereCaseWorkflowTool(
       "metersphere_ms_bulk_upsert_test_cases",
       writeInput,
       { mastra, requestContext, abortSignal },
@@ -129,7 +129,7 @@ const verifyFreshReadBack = createStep({
   execute: async ({ inputData, mastra, requestContext, abortSignal }) => {
     const { plan, operation: internal } = inputData;
     const readBackCases = await mapWithConcurrency(internal.cases, 6, async (written, index) => {
-      const result = await executeWorkflowTool(
+      const result = await executeMeterSphereCaseWorkflowTool(
         "metersphere_ms_get_test_case_detail",
         { case_id: written.id },
         { mastra, requestContext, abortSignal },
@@ -236,7 +236,7 @@ export function meterSphereCaseWorkflowRunId(stableRequestId: string, planHash: 
   return `metersphere-case-${digest}`;
 }
 
-async function executeWorkflowTool(
+export async function executeMeterSphereCaseWorkflowTool(
   toolName: string,
   input: unknown,
   context: { mastra: Mastra; requestContext: RequestContext<any>; abortSignal: AbortSignal },

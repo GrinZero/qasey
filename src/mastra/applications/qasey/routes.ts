@@ -13,7 +13,7 @@ import { conversationScope } from "../../../platform/context/conversation-scope.
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../../../platform/context/schema.ts";
 import { OAuthPrincipalSchema } from "../../../platform/auth/oauth-principal.ts";
 import type { PlatformGoogleUser } from "../../../platform/auth/google-oidc.ts";
-import { runQaseyTaskWorkflow } from "../../workflows/qasey-task-workflow.ts";
+import { executeQasey } from "./service.ts";
 import { runtimeReadiness } from "../../../platform/storage/readiness.ts";
 import { devRuntimeTunnelServerEnabled } from "../../../../packages/adapters/src/config.ts";
 import { webE2ERepositoryFromSkill } from "../../../platform/code-task/e2e-repository-skill.ts";
@@ -222,7 +222,7 @@ export const apiRoutes = [
         requestContext.set("sessionId", scope.threadId);
         requestContext.set(MASTRA_RESOURCE_ID_KEY, scope.resourceId);
         requestContext.set(MASTRA_THREAD_ID_KEY, scope.threadId);
-        const result = await runQaseyTaskWorkflow(c.get("mastra"), {
+        const result = await executeQasey(c.get("mastra"), {
           ...context,
           actor: {
             id: identity.userId,
@@ -258,7 +258,7 @@ export const apiRoutes = [
           source: {},
           attachments: [],
         };
-        return c.json(await runQaseyTaskWorkflow(c.get("mastra"), context, { requestContext }));
+        return c.json(await executeQasey(c.get("mastra"), context, { requestContext }));
       } catch (error) {
         return c.json({ error: "qasey_task_failed", ...errorBody(error, requestId) }, 502);
       }

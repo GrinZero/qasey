@@ -6,7 +6,7 @@ import { devRuntimeTunnelClientEnabled } from "../../../../packages/adapters/src
 import { runWithDatadogTraceCarrier } from "../../instrumentation.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../../../platform/context/schema.ts";
 import { DEFAULT_SLACK_DEV_RUNTIME_COMMAND } from "../../../platform/channels/slack-dev-runtime.ts";
-import { runQaseyTaskWorkflow } from "../../workflows/qasey-task-workflow.ts";
+import { executeQasey } from "./service.ts";
 import { resolveDevRuntimeId } from "./dev-runtime-identity.ts";
 import {
   DEV_RUNTIME_APPROVAL_GATE_KEY,
@@ -195,7 +195,7 @@ export class DevRuntimeTunnelClient {
       const result = await runWithDatadogTraceCarrier(
         job.trace?.carrier,
         { name: "qasey dev runtime execution", sessionId: job.context.sessionId },
-        () => runQaseyTaskWorkflow(this.mastra, job.context, {
+        () => executeQasey(this.mastra, job.context, {
           requestContext,
           abortSignal: state.abort.signal,
           ...(job.trace ? { remoteParent: job.trace } : {}),

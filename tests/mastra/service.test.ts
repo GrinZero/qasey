@@ -7,7 +7,7 @@ import {
   assertNormalCompletion,
   completionReceiptText,
   executeQasey,
-  extractMeterSphereCasePlan,
+  QaseyResponseSchema,
   restoreProcessedAgentOutput,
   selectFinalText,
 } from "../../src/mastra/applications/qasey/service.ts";
@@ -107,24 +107,14 @@ describe("Qasey service completion", () => {
     });
   });
 
-  it("extracts a deterministic CasePlan from native Mastra tool results", () => {
-    const input = dryRunInput();
-    const output = dryRunOutput();
-    const plan = extractMeterSphereCasePlan({
-      steps: [{
-        toolCalls: [{
-          type: "tool-call",
-          payload: { toolCallId: "dry-run", toolName: "metersphere_ms_bulk_upsert_test_cases", args: input },
-        }],
-        toolResults: [{
-          type: "tool-result",
-          payload: { toolCallId: "dry-run", toolName: "metersphere_ms_bulk_upsert_test_cases", result: output },
-        }],
-      }],
-    });
-
-    expect(plan).toMatchObject({ plannedCount: 1, cases: [{ name: "Case", order: 1 }] });
-    expect(plan).not.toHaveProperty("evidenceSnapshotHash");
+  it("validates the direct Agent response contract", () => {
+    expect(QaseyResponseSchema.parse({
+      text: "review complete",
+      runId: "run-1",
+      outcome: "success",
+      finalization: "agent",
+      progress: [],
+    })).toMatchObject({ finalization: "agent", text: "review complete" });
   });
 
   it("does not install Ledger control and does not stop on Skill/search_tools iterations", async () => {
@@ -168,35 +158,26 @@ describe("Qasey service completion", () => {
     expect(toolEvents).toEqual(["start:github_get_file", "end:github_get_file:executed"]);
   });
 
-  it("hands an extracted dry-run plan to the deterministic Workflow", async () => {
-    const input = dryRunInput();
-    const output = dryRunOutput();
-    const finishedSteps = [{
-        finishReason: "tool-calls",
-        text: "",
-        toolCalls: [{ payload: { toolCallId: "dry-run", toolName: "metersphere_ms_bulk_upsert_test_cases", args: input } }],
-        toolResults: [{ payload: { toolCallId: "dry-run", toolName: "metersphere_ms_bulk_upsert_test_cases", result: output } }],
-      }, { finishReason: "stop", text: "plan ready", toolCalls: [], toolResults: [] }];
+  it("uses the trusted Tool receipt recorded during the direct Agent run", async () => {
+    const receipt = completionReceipt("plan-1");
     const runAgent = vi.fn(async (_prompt: unknown, options: Record<string, any>) => {
-      options.onFinish({ finishReason: "stop", text: "plan ready", steps: finishedSteps });
-      return { finishReason: "stop", text: "", steps: [] };
+      options.requestContext.set("case-completion-receipt", receipt);
+      return {
+        finishReason: "stop",
+        text: "tool finished",
+        steps: [{ finishReason: "stop", text: "tool finished", toolCalls: [], toolResults: [] }],
+      };
     });
-    const caseOperationRunner = vi.fn(async ({ plan }: { plan: { planHash: string } }) => completionReceipt(plan.planHash));
-    const plans: string[] = [];
     const mastra = mockMastra(runAgent);
 
-    const response = await executeQasey(mastra, { ...context, chatInput: "create cases" }, {
-      caseOperationRunner,
-      events: { onCasePlanCheckpoint: event => { plans.push(event.plan.planHash); } },
-    });
+    const response = await executeQasey(mastra, { ...context, chatInput: "create cases" });
 
-    expect(caseOperationRunner).toHaveBeenCalledTimes(1);
-    expect(plans).toHaveLength(1);
     expect(response).toMatchObject({
       outcome: "success",
       finalization: "workflow",
-      completionReceipt: { casePlanHash: plans[0] },
+      completionReceipt: { casePlanHash: "plan-1" },
     });
+    expect(response.text).toContain("独立回查通过 1/1");
   });
 });
 
@@ -224,30 +205,6 @@ function mockMastra(
       },
     }),
   } as unknown as Mastra;
-}
-
-function dryRunInput() {
-  return {
-    dry_run: true,
-    items: JSON.stringify([{
-      operation: "create",
-      name: "Case",
-      priority: "P1",
-      node_id: "module",
-      node_path: "/AI Draft/Feature",
-    }]),
-  };
-}
-
-function dryRunOutput() {
-  return {
-    content: [{ type: "text", text: JSON.stringify([{
-      success: true,
-      dry_run: true,
-      item_count: 1,
-      creates: [{ id: "preview", name: "Case", node_id: "module", node_path: "/AI Draft/Feature", verified: true }],
-    }]) }],
-  };
 }
 
 function completionReceipt(casePlanHash: string): MeterSphereCaseCompletionReceipt {

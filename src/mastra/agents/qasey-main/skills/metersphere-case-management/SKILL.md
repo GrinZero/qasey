@@ -9,15 +9,15 @@ System prompt 已识别的 intent 决定执行 `case_create_full` 或 `case_main
 
 ## 共享约束
 
-- MeterSphere 核心能力由运行时直接提供，不通过 `search_tools` 发现：使用 `metersphere_ms_list_modules`、`metersphere_ms_list_test_cases`、`metersphere_ms_get_test_case_detail`，以及仅用于唯一一次预检的 `metersphere_ms_bulk_upsert_test_cases(dry_run=true)`。
+- MeterSphere 核心能力由运行时直接提供，不通过 `search_tools` 发现：读取使用 `metersphere_ms_list_modules`、`metersphere_ms_list_test_cases`、`metersphere_ms_get_test_case_detail`；用例提交只使用 `metersphere_commit_case_plan`。
 - 需要核心能力之外的 MeterSphere 操作时必须先调用 `search_tools`。尤其当目标模块不存在、需要创建或更新模块时，使用同时包含 `MeterSphere`、`module` 和 `create` 或 `upsert` 的具体关键词搜索；发现 `metersphere_ms_upsert_module` 后按其 schema 执行。完成搜索且未发现相应工具之前，不得声称“当前工具集没有该能力”。
 - 如果上述任一必需工具不可用，立即把它作为运行时能力 blocker 返回；不要改写关键词、搜索同义词或用 Slack/Jira 结果替代 MeterSphere 的真实读取与回执。
 - 当前需求、设计与实现事实优先；历史经验仅作为风险线索。冲突时保留证据，不擅自补全产品决策。
 - 每条待写用例都要有明确目的、前置条件、可执行步骤、可观察预期和简短 QA reasoning；每条用例选择 1–3 条直接支撑的稳定来源。
 - 未知规则标为待确认；无证据的猜测不得进入待写计划，也不得重复创建语义等价用例。
-- 写入前核对目标项目、模块、字段与 create/update 集合，只调用一次 `dry_run=true` 的批量预检冻结不可变 CasePlan。
-- CasePlan 冻结后停止工具操作并交还运行时；不得直接执行真实 case mutation 或删除。确定性 Workflow 负责真实写入、新鲜 detail 回查和 completion checkpoint。
-- 只有 plannedCount 全部通过 fresh read-back receipt 才能声称完成；没有 receipt 时不得声称已写入。
+- 写入前核对目标项目、模块、字段与 create/update 集合，将最终有序 items 一次性交给 `metersphere_commit_case_plan`。不要自行调用原始 bulk/create/edit case mutation，也不要先做一遍独立 dry-run。
+- `metersphere_commit_case_plan` 在服务端负责唯一一次 dry-run、冻结不可变 CasePlan、真实写入、新鲜 detail 回查和 completion checkpoint；不要把它返回的计划或 payload 重新组装后再次提交。
+- 只有该 Tool 返回的 completion receipt 表明 plannedCount 全部通过 fresh read-back，才能声称完成；没有 receipt 时不得声称已写入。
 - 过程消息只用于真实证据、风险、决策或阻塞变化；任务较长时，完成第一个有信息增量的阶段后至少报告一次，不按内部步骤逐项打卡。
 
 ## case_create_full：全量创建

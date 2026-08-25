@@ -1,7 +1,6 @@
 import type { AgentApplicationBundle } from "../../../runtime/application.ts";
 
 export interface QaseyApplicationModules {
-  taskWorkflowModule: Pick<typeof import("../../workflows/qasey-task-workflow.ts"), "qaseyTaskWorkflow">;
   e2eModule: Pick<typeof import("../../workflows/e2e-workflow.ts"), "e2eLifecycleWorkflow">;
   scorerModule: Pick<typeof import("../../scorers/eval-scorers.ts"), "qaseyEvalScorers">;
   caseWorkflowModule: Pick<typeof import("../../workflows/metersphere-case-workflow.ts"), "meterSphereCaseOperationWorkflow">;
@@ -18,7 +17,7 @@ export interface QaseyApplicationModules {
  * generated entry. Importing this definition must not construct infrastructure.
  */
 export function createQaseyApplication(modules: QaseyApplicationModules): AgentApplicationBundle {
-  const { taskWorkflowModule, e2eModule, scorerModule, caseWorkflowModule, routeModule } = modules;
+  const { e2eModule, scorerModule, caseWorkflowModule, routeModule } = modules;
   const qaseyEvalScorers = scorerModule.qaseyEvalScorers;
   return {
     id: "qasey",
@@ -33,7 +32,6 @@ export function createQaseyApplication(modules: QaseyApplicationModules): AgentA
     agents: {},
     filesystemAgents: ["qasey-main"],
     workflows: {
-      "qasey-task": taskWorkflowModule.qaseyTaskWorkflow,
       "qasey-e2e-lifecycle": e2eModule.e2eLifecycleWorkflow,
       "qasey-metersphere-case-operation": caseWorkflowModule.meterSphereCaseOperationWorkflow,
     },
@@ -45,7 +43,6 @@ export function createQaseyApplication(modules: QaseyApplicationModules): AgentA
         "qasey-main": { permission: "qasey.agent.execute", audiences: ["admin-ui", "api", "service"] },
       },
       workflows: {
-        "qasey-task": { permission: "qasey.task.execute", audiences: ["admin-ui", "api", "service"] },
         "qasey-e2e-lifecycle": { permission: "qasey.e2e.execute", audiences: ["admin-ui", "api", "service"] },
         "qasey-metersphere-case-operation": { permission: "qasey.case-workflow.execute", audiences: ["admin-ui", "api", "service"] },
       },

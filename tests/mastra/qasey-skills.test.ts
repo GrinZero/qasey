@@ -19,11 +19,11 @@ describe("qasey-main intent Skills", () => {
     expect(source).not.toContain("qasey_select_task_mode");
   });
 
-  it("keeps real MeterSphere writes owned by the deterministic Workflow", async () => {
+  it("keeps real MeterSphere writes behind the trusted commit Tool", async () => {
     const source = await readFile(join(skillsRoot, "metersphere-case-management", "SKILL.md"), "utf8");
-    expect(source).toContain("dry_run=true");
-    expect(source).toContain("确定性 Workflow");
-    expect(source).toMatch(/不得直接执行真实/u);
+    expect(source).toContain("`metersphere_commit_case_plan`");
+    expect(source).toContain("服务端负责唯一一次 dry-run");
+    expect(source).toContain("不要自行调用原始 bulk/create/edit case mutation");
   });
 
   it("requires tool discovery for optional MeterSphere module operations", async () => {

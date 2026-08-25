@@ -14,13 +14,20 @@ import {
   studioMcpPreviewEnabled,
   toolsForRequest,
 } from "../../runtime.ts";
+import {
+  METERSPHERE_COMMIT_CASE_PLAN_TOOL_NAME,
+  meterSphereCommitCasePlanTool,
+} from "../../applications/qasey/metersphere-case-tools.ts";
 
 /** Time is the primary run limit; this only protects against an unexpectedly hot loop. */
 export const QASEY_AGENT_SAFETY_MAX_STEPS = 10_000;
 export const QASEY_AGENT_FINAL_RESPONSE_GRACE_MS = 5 * 60_000;
 
 const QASEY_RUN_STARTED_AT_STATE_KEY = "qasey-run-started-at";
-const QASEY_DIRECT_TOOL_NAMES = new Set<string>(QASEY_REQUIRED_METERSPHERE_TOOL_NAMES);
+const QASEY_DIRECT_TOOL_NAMES = new Set<string>([
+  ...QASEY_REQUIRED_METERSPHERE_TOOL_NAMES.filter(name => name !== "metersphere_ms_bulk_upsert_test_cases"),
+  METERSPHERE_COMMIT_CASE_PLAN_TOOL_NAME,
+]);
 
 /** Reserve time for a final answer before the wall-clock abort signal fires. */
 export class EnsureQaseyDeadlineResponseProcessor implements Processor {
@@ -136,8 +143,12 @@ export async function resolveQaseyMainInputProcessors({
     // empty RequestContext. It needs the stable processor topology, not tools.
     tools = {} as Awaited<ReturnType<typeof toolsForRequest>>;
   }
-  const { directTools, searchableTools } = partitionQaseyDirectTools(tools);
-  const modelOutputToolNames = Object.entries(tools)
+  const trustedQaseyRequest = Boolean(requestContext.get("qasey-context"));
+  const requestTools = trustedQaseyRequest
+    ? { ...tools, [METERSPHERE_COMMIT_CASE_PLAN_TOOL_NAME]: meterSphereCommitCasePlanTool }
+    : tools;
+  const { directTools, searchableTools } = partitionQaseyDirectTools(requestTools);
+  const modelOutputToolNames = Object.entries(requestTools)
     .filter(([, tool]) => {
       return Boolean(tool && typeof tool === "object" && "toModelOutput" in tool && typeof tool.toModelOutput === "function");
     })

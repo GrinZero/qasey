@@ -3,6 +3,8 @@ import type { MastraDBMessage } from "@mastra/core/agent/message-list";
 import { Agent } from "@mastra/core/agent";
 import { RequestContext } from "@mastra/core/request-context";
 import { ToolCallFilter } from "@mastra/core/processors";
+import { createTool } from "@mastra/core/tools";
+import { z } from "zod";
 import { describe, expect, it, vi } from "vitest";
 import {
   createQaseyContextProcessors,
@@ -10,6 +12,7 @@ import {
   partitionQaseyDirectTools,
   resolveQaseyMainInputProcessors,
 } from "../../src/mastra/agents/qasey-main/processors.ts";
+import { mcpCatalog } from "../../src/mastra/runtime.ts";
 
 describe("qasey-main processors", () => {
   it("serializes dynamic processor workflows without a request context", async () => {
@@ -175,15 +178,45 @@ describe("qasey-main processors", () => {
       metersphere_ms_list_test_cases: direct,
       metersphere_ms_get_test_case_detail: direct,
       metersphere_ms_bulk_upsert_test_cases: direct,
+      metersphere_commit_case_plan: direct,
       slack_search_messages: optional,
     });
 
     expect(Object.keys(partitioned.directTools).sort()).toEqual([
-      "metersphere_ms_bulk_upsert_test_cases",
+      "metersphere_commit_case_plan",
       "metersphere_ms_get_test_case_detail",
       "metersphere_ms_list_modules",
       "metersphere_ms_list_test_cases",
     ]);
-    expect(Object.keys(partitioned.searchableTools)).toEqual(["slack_search_messages"]);
+    expect(Object.keys(partitioned.searchableTools)).toEqual([
+      "metersphere_ms_bulk_upsert_test_cases",
+      "slack_search_messages",
+    ]);
+  });
+
+  it("injects the trusted commit Tool and never exposes the raw bulk mutation", async () => {
+    const requestContext = new RequestContext<any>();
+    requestContext.set("qasey-context", {
+      requestId: "request-1", channel: "api", sessionId: "session-1", chatInput: "create cases",
+      actor: { id: "actor-1" }, source: {}, attachments: [],
+    });
+    const rawBulk = createTool({
+      id: "metersphere_ms_bulk_upsert_test_cases",
+      description: "raw bulk mutation",
+      inputSchema: z.object({ items: z.string(), dry_run: z.boolean() }),
+      execute: async () => ({ ok: true }),
+    });
+    const discovery = vi.spyOn(mcpCatalog, "toolsForDiscovery").mockResolvedValue({
+      metersphere_ms_bulk_upsert_test_cases: rawBulk,
+    });
+
+    const processors = await resolveQaseyMainInputProcessors({ requestContext });
+    const directResult = await processors[2]!.processInputStep!({ tools: {} } as never) as {
+      tools: Record<string, unknown>;
+    };
+
+    expect(directResult.tools).toHaveProperty("metersphere_commit_case_plan");
+    expect(directResult.tools).not.toHaveProperty("metersphere_ms_bulk_upsert_test_cases");
+    discovery.mockRestore();
   });
 });

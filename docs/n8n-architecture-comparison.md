@@ -80,6 +80,8 @@ flowchart LR
         Agent["Qasey Agent + Agent Skills"]
         Discovery["Tool Discovery"]
         Processors["Tool Hooks + Processors"]
+        Commit["MeterSphere Commit Tool"]
+        CaseWorkflow["Case operation Workflow"]
         Workflow["Owned Workflows"]
         Outbox["Notification outbox"]
         Memory["Mastra Memory"]
@@ -104,6 +106,7 @@ flowchart LR
     Agent <--> Processors
     Processors --> Native
     Processors --> MCP --> N8N --> External
+    Agent --> Commit --> CaseWorkflow --> MCP
     Agent --> Workflow --> E2E
     Worker --> Outbox --> Slack
     Outbox --> Jira
@@ -120,7 +123,7 @@ flowchart LR
 | 幂等与恢复 | 依赖 trigger 行为、n8n execution 和下游接口 | `TriggerEnvelope.idempotencyKey`、Postgres queue、任务重试和 notification outbox |
 | 工具发现与授权 | 工具大多持续暴露，依赖 prompt 告诉 Agent 何时只读 | Tool Discovery 按需激活能力；channel、identity、effect、approval 与 Workflow ownership 在执行边界独立校验，delete 永不暴露 |
 | 意图执行协议 | 在主 Agent prompt 中按 intent 描述工作方式和写后回查要求 | qasey-main 先按常驻 Prompt 的明文 intent→Skill 映射识别任务，再加载对应领域级 Skill；unknown/meta 等简单分支直接在常驻 Prompt 中处理 |
-| 完成判定 | Agent 输出和 prompt 约定为主 | Controller 校验 finish reason、未完成 tool call、最终答案及 MeterSphere completion receipt |
+| 完成判定 | Agent 输出和 prompt 约定为主 | Durable Agent 执行门面校验 finish reason 与未完成 tool call；MeterSphere Commit Tool 校验并记录 completion receipt |
 | 工具结果 | 工具结果直接进入上下文 | `toModelOutput` 保留完整应用结果但限制模型载荷；`ToolCallFilter` 保留紧凑历史，`TokenLimiter` 兜底 |
 | Memory | Postgres Chat Memory，加最近 6 条消息用于路由 | Working Memory + Observational Memory + Reflector；Tool history 由原生 Processor 控制 |
 | 通知交付 | Slack/Jira 节点属于主 execution | 任务结果先写 Outbox，再独立重试通知；通知失败不重跑成功的 Agent |
@@ -132,7 +135,7 @@ flowchart LR
 
 ### 5.1 成功语义更可信
 
-case create/maintain 只有在 MeterSphere 写入成功，并且之后发生一次新的 list/get 回查时才能获得 completion receipt。写前查询和与写操作并发启动的查询都不能作为证明。没有 receipt 时，Controller 抛出 `INCOMPLETE_OUTCOME`，任务进入失败和重试语义，而不是接受 Agent 的“已完成”文本。
+case create/maintain 只有通过 `metersphere_commit_case_plan` 完成 dry-run、冻结计划、MeterSphere 写入和之后的新鲜 detail 回查，才能获得 completion receipt。写前查询和与写操作并发启动的查询都不能作为证明。没有 receipt 时，Tool 或执行门面抛出 `INCOMPLETE_OUTCOME`，而不是接受 Agent 的“已完成”文本。
 
 这把三件不同的事情明确分开：
 
@@ -145,7 +148,7 @@ case create/maintain 只有在 MeterSphere 写入成功，并且之后发生一�
 代码版先用固定 allowlist 拒绝未登记工具，再把语义选择与硬权限分开：
 
 - qasey-main 通过 Tool Discovery 找到相关能力，而不是依赖前置 intent 裁剪工具列表；
-- MeterSphere create/edit/upsert 在主 Agent 中只能 dry-run，真实 mutation 只归确定性 Workflow 所有；
+- MeterSphere 原始 case create/edit/bulk upsert 不进入主 Agent 工具目录；Agent 只调用可信 Commit Tool，dry-run、冻结计划和真实 mutation 由 Tool 内部的确定性 Workflow 所有；
 - QA Experience upsert 只允许 Slack 渠道，并要求 Mastra approval；
 - delete 工具永不提供给 Agent；
 - 缺少真实 ingress context 时，test/production fail closed。
@@ -162,7 +165,7 @@ Postgres trigger queue 使用唯一幂等键、`FOR UPDATE SKIP LOCKED` 和可�
 
 读取 Tool 的 `execute` 保留完整 typed 结果，`toModelOutput` 只生成有界的模型载荷。`ToolCallFilter({ preserveModelOutput: true })` 在后续 step 中移除原始 tool arguments/results，同时保留紧凑 model output；`TokenLimiter` 作为最终上下文上限。Tool 生命周期观测统一经过 Agent Tool Hooks，不再改写每个 Tool 的 `execute`。
 
-Code Mode 实现仍保留用于未来评估，但当前不向 qasey-main 暴露；Tool Discovery 发现的 Tool 因而统一经过 Agent Hooks。真实 MeterSphere mutation、fresh read-back 和 completion receipt 继续由原生 Workflow 独占。
+Code Mode 实现仍保留用于未来评估，但当前不向 qasey-main 暴露；Tool Discovery 发现的 Tool 因而统一经过 Agent Hooks。可信 MeterSphere Commit Tool 作为稳定的直接工具暴露，真实 mutation、fresh read-back 和 completion receipt 继续由其内部原生 Workflow 独占。
 
 ### 5.5 更适合 E2E 平台化
 
@@ -182,7 +185,7 @@ Runner 的退出码和断言决定通过与否，模型和 Cua 都不能自行�
 
 常驻 system prompt 明文要求 qasey-main 先识别 intent，并把 QA 快问、QA 评审、用例新建/维护、经验读写及 E2E generate/rerun/repair/status 映射到 5 个领域级 Agent Skill；unknown 与 meta/out-of-scope 不创建专门 Skill。相近 intent 共享 Skill 内的不同执行模式，复合请求按主次顺序组合 Skill。intent 不再向 Runtime 登记；Runtime 只消费真实 Tool 结果、CasePlan、completion receipt 与 E2E run 等可验证事实。
 
-Skill 决定“怎么做”，Tool Discovery 决定“用什么做”，Runtime Policy 决定“允许做什么”，Workflow 与 receipt 决定“是否真的完成”。intent 不再参与工具授权或 finalization 分支，因此模型的语义判断不会变成权限授予。
+Skill 决定“怎么做”，Tool Discovery 决定“用什么做”，Runtime Policy 决定“允许做什么”，可信领域 Tool、内部 Workflow 与 receipt 决定“是否真的完成”。intent 不再参与工具授权或顶层 Workflow 分支，因此模型的语义判断不会变成权限授予。
 
 ## 6. 代码版不足与未解决问题
 

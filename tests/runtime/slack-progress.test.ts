@@ -211,19 +211,19 @@ describe("Qasey Slack progress", () => {
       runId: "run-1",
       step: 1,
       toolCallId: "ms-write-1",
-      toolName: "metersphere_ms_bulk_upsert_test_cases",
-      args: { dry_run: true, items: JSON.stringify([{ name: "case 1" }, { name: "case 2" }]) },
-    })).toBe("正在核对2 条用例的变更计划…");
+      toolName: "metersphere_commit_case_plan",
+      args: { items: [{ name: "case 1" }, { name: "case 2" }] },
+    })).toBe("正在提交2 条测试用例并执行独立回查…");
 
     expect(projector.project({
       type: "tool-result",
       runId: "run-1",
       step: 1,
       toolCallId: "ms-write-1",
-      toolName: "metersphere_ms_bulk_upsert_test_cases",
-      result: { creates: [{}, {}], updates: [], has_more: false },
+      toolName: "metersphere_commit_case_plan",
+      result: { status: "committed_and_verified", itemCount: 2, createdCount: 2, updatedCount: 0, verifiedCount: 2 },
       isError: false,
-    })).toBe("已生成2 条用例变更计划，正在核对…");
+    })).toBe("已完成 2 条测试用例写入与独立回查…");
   });
 
   it("uses progress and step conclusions directly while hiding internal acknowledgements", () => {
