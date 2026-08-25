@@ -45,28 +45,22 @@ export class LocalWorkspaceManager implements WorkspaceManager {
     await mkdir(absoluteRoot, { recursive: true });
     const container = await mkdtemp(join(absoluteRoot, `${safeName(runId)}-`));
     const root = join(container, "worktree");
-    const gitDir = join(container, "store.git");
     const purpose = options.purpose ?? "author";
     const branch = options.branch ?? `qasey/${safeName(runId)}`;
-    const materialized = await this.repositoryCache.materialize({
+    const materialized = await this.repositoryCache.createWorktree({
       namespace: options.namespace ?? "local",
       owner: repository.owner,
       repository: repository.repository,
       cloneUrl: repository.cloneUrl,
-    }, gitDir, {
-      bare: true,
+    }, root, {
       ref: repository.baseRef,
+      ...(options.baseSha ? { baseSha: options.baseSha } : {}),
+      ...(purpose === "author" ? { branch } : { detached: true }),
       timeoutMs: 120_000,
     });
-    const baseSha = options.baseSha ?? materialized.resolvedSha;
+    const gitDir = materialized.mirrorPath;
+    const baseSha = materialized.resolvedSha;
     if (!baseSha) throw new Error(`Unable to resolve base ref ${repository.baseRef}`);
-    const hasCommit = await runSafeCommand({ executable: "git", args: ["--git-dir", gitDir, "cat-file", "-e", `${baseSha}^{commit}`], cwd: container });
-    if (hasCommit.exitCode !== 0) throw new Error(`Pinned base commit is unavailable: ${baseSha}`);
-    const worktreeArgs = purpose === "author"
-      ? ["--git-dir", gitDir, "worktree", "add", "-b", branch, "--", root, baseSha]
-      : ["--git-dir", gitDir, "worktree", "add", "--detach", "--", root, baseSha];
-    const checkout = await runSafeCommand({ executable: "git", args: worktreeArgs, cwd: container });
-    if (checkout.exitCode !== 0) throw new Error(`git worktree add failed: ${checkout.stderr.slice(-1000)}`);
     const ref = { id: runId, root, gitDir, repository, branch, baseSha, purpose };
     this.refs.set(runId, ref);
     return ref;

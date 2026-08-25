@@ -8,7 +8,7 @@ export interface RunRepository {
   create(owner: OwnerScope, run: E2ERun): Promise<E2ERun>;
   get(owner: OwnerScope, id: string): Promise<E2ERun | undefined>;
   list(owner: OwnerScope, limit?: number): Promise<E2ERun[]>;
-  update(owner: OwnerScope, id: string, patch: Partial<Pick<E2ERun, "status" | "branch" | "baseSha" | "pullRequestUrl" | "error" | "artifacts">>): Promise<E2ERun>;
+  update(owner: OwnerScope, id: string, patch: Partial<Pick<E2ERun, "status" | "branch" | "baseSha" | "pullRequestUrl" | "error" | "artifacts" | "caseSnapshot" | "executionBrief" | "briefHash" | "repositoryExecution" | "traceId" | "amendments" | "codeTaskIds">>): Promise<E2ERun>;
   addEvent(owner: OwnerScope, runId: string, type: string, message: string, metadata?: Record<string, unknown>): Promise<RunEvent>;
   events(owner: OwnerScope, runId: string): Promise<RunEvent[]>;
   close?(): Promise<void>;
@@ -43,7 +43,7 @@ export class InMemoryRunRepository implements RunRepository {
       .slice(0, Math.min(Math.max(limit, 1), 500));
   }
 
-  async update(owner: OwnerScope, id: string, patch: Partial<Pick<E2ERun, "status" | "branch" | "baseSha" | "pullRequestUrl" | "error" | "artifacts">>): Promise<E2ERun> {
+  async update(owner: OwnerScope, id: string, patch: Partial<Pick<E2ERun, "status" | "branch" | "baseSha" | "pullRequestUrl" | "error" | "artifacts" | "caseSnapshot" | "executionBrief" | "briefHash" | "repositoryExecution" | "traceId" | "amendments" | "codeTaskIds">>): Promise<E2ERun> {
     const key = ownerKey(owner, id);
     const current = this.runs.get(key);
     if (!current) throw new Error(`Run ${id} not found`);
@@ -121,7 +121,7 @@ export class PrismaRunRepository implements RunRepository {
     return result.map(row => row.payload as unknown as E2ERun);
   }
 
-  async update(owner: OwnerScope, id: string, patch: Partial<Pick<E2ERun, "status" | "branch" | "baseSha" | "pullRequestUrl" | "error" | "artifacts">>): Promise<E2ERun> {
+  async update(owner: OwnerScope, id: string, patch: Partial<Pick<E2ERun, "status" | "branch" | "baseSha" | "pullRequestUrl" | "error" | "artifacts" | "caseSnapshot" | "executionBrief" | "briefHash" | "repositoryExecution" | "traceId" | "amendments" | "codeTaskIds">>): Promise<E2ERun> {
     const current = await this.get(owner, id);
     if (!current) throw new Error(`Run ${id} not found`);
     const updated = { ...current, ...patch, updatedAt: new Date().toISOString() };

@@ -1,7 +1,7 @@
 import { Octokit } from "@octokit/rest";
 import { createPrivateKey, generateKeyPairSync } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { createGitHubClient, GitHubInstallationTokenProvider, loadConfig, normalizeGitHubPrivateKey } from "../../packages/adapters/src/index.ts";
+import { createGitHubClient, GitHubInstallationTokenProvider, GitHubPublisher, loadConfig, normalizeGitHubPrivateKey } from "../../packages/adapters/src/index.ts";
 
 const testPrivateKey = generateKeyPairSync("rsa", { modulusLength: 2048 })
   .privateKey.export({ type: "pkcs1", format: "pem" }).toString();
@@ -57,5 +57,29 @@ describe("GitHub App authentication", () => {
       type: "installation",
       permissions: { contents: "read", pull_requests: "read" },
     });
+  });
+
+  it("updates the existing run branch and reuses its Draft PR during QA repair", async () => {
+    const octokit = {
+      repos: { getCommit: vi.fn(async () => ({ data: { commit: { tree: { sha: "base-tree" } } } })) },
+      git: {
+        createBlob: vi.fn(async () => ({ data: { sha: "blob" } })),
+        createTree: vi.fn(async () => ({ data: { sha: "tree" } })),
+        createCommit: vi.fn(async () => ({ data: { sha: "commit" } })),
+        createRef: vi.fn(async () => { throw Object.assign(new Error("Reference already exists"), { status: 422 }); }),
+        updateRef: vi.fn(async () => ({ data: {} })),
+      },
+      pulls: { create: vi.fn() },
+    };
+    const publisher = new GitHubPublisher(octokit as never);
+
+    await expect(publisher.publishChanges({
+      repository: { owner: "MoeGolibrary", repository: "moego-e2e-autotest", cloneUrl: "https://github.com/MoeGolibrary/moego-e2e-autotest.git", baseRef: "main", allowedPaths: ["tests"], skillsPaths: [] },
+      baseSha: "a".repeat(40), branch: "qasey/run-1", title: "repair", body: "repair",
+      changes: [{ path: "tests/a.spec.ts", deleted: false, mode: "100644", content: Buffer.from("test") }],
+      existingPullRequestUrl: "https://github.com/MoeGolibrary/moego-e2e-autotest/pull/1",
+    })).resolves.toBe("https://github.com/MoeGolibrary/moego-e2e-autotest/pull/1");
+    expect(octokit.git.updateRef).toHaveBeenCalledWith(expect.objectContaining({ ref: "heads/qasey/run-1", sha: "commit", force: true }));
+    expect(octokit.pulls.create).not.toHaveBeenCalled();
   });
 });

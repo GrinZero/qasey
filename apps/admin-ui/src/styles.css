@@ -441,11 +441,21 @@ textarea::placeholder, input::placeholder { color: #a4aaba; }
 .token-step strong { color: #3f4658; font-size: 11px; }
 .token-step small { color: var(--ink-faint); font-size: 8px; line-height: 1.45; }
 .scope-step { margin-top: 21px; }
-.scope-grid { display: grid; gap: 6px; margin-top: 12px; }
-.scope-option { min-width: 0; display: flex; align-items: center; gap: 8px; padding: 8px 9px; border: 1px solid #e6e7ed; border-radius: 8px; color: #666d7e; background: #fafbfc; cursor: pointer; }
-.scope-option:hover { border-color: #cfcced; background: #faf9ff; }
+.scope-grid { display: grid; gap: 8px; margin-top: 12px; }
+.scope-option { min-width: 0; display: flex; align-items: flex-start; gap: 10px; padding: 11px; border: 1px solid #e2e4eb; border-radius: 9px; color: #666d7e; background: #fafbfc; cursor: pointer; transition: border-color .16s ease, background-color .16s ease, box-shadow .16s ease; }
+.scope-option:hover { border-color: #c9c6eb; background: #faf9ff; }
+.scope-option:focus-within { outline: 2px solid #7772e4; outline-offset: 2px; }
+.scope-option--selected { border-color: #aaa6e8; background: #f7f6ff; box-shadow: inset 3px 0 #7772e4; }
 .scope-option input { width: 15px; height: 15px; flex: 0 0 15px; accent-color: var(--indigo); }
-.scope-option span { min-width: 0; overflow: hidden; font-family: "SFMono-Regular", Consolas, monospace; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.scope-copy { min-width: 0; display: flex; flex: 1; flex-direction: column; gap: 4px; }
+.scope-heading { min-width: 0; display: flex; align-items: center; gap: 6px; }
+.scope-heading strong { overflow: hidden; color: #3f4658; font-size: 10px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+.scope-access { flex: 0 0 auto; padding: 2px 5px; border-radius: 4px; font-size: 7px; font-weight: 750; line-height: 1.25; }
+.scope-access--read { color: #27716a; background: #e9f5f3; }
+.scope-access--execute { color: #5953bb; background: #ebeaff; }
+.scope-access--write { color: #a4552e; background: #fff0e8; }
+.scope-code { min-width: 0; overflow: hidden; color: #6d7383; font-family: "SFMono-Regular", Consolas, monospace; font-size: 8px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.scope-description { color: #858b99; font-size: 9px; line-height: 1.45; }
 .token-create { width: 100%; min-height: 39px; margin-top: 15px; }
 .token-registry { min-width: 0; }
 .token-reveal { position: relative; overflow: hidden; margin-bottom: 18px; padding: 16px; border-radius: 12px; color: white; background: #202538; box-shadow: 0 12px 28px rgb(31 36 56 / 13%); }

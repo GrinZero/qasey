@@ -22,8 +22,9 @@ agent directory. Global reusable Skills remain on the global Workspace. Skills
 are read-only definitions and do not require per-session filesystem isolation.
 
 The E2E `WorkspaceManager` is a separate domain abstraction. It creates a
-clean repository checkout per run and enforces allowed changed paths; it is not
-the Mastra agent workspace shown in Studio.
+clean Git worktree per run and enforces allowed changed paths; it is not the
+Mastra agent workspace shown in Studio. CodeTask repository storage and
+worktree lifecycle are documented in [Code Task Runner](./code-task-runner.md).
 
 The E2E author/verifier clean-workspace discipline remains a Qasey domain workflow, while its paths and artifacts are owner scoped.
 

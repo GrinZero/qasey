@@ -15,7 +15,12 @@ System prompt 已识别的 intent 决定执行 `e2e_generate`、`e2e_rerun`、`e
 
 ## e2e_generate：创建 run
 
-- 确认来源用例、平台、仓库、base ref、允许修改路径和运行前置条件。
+- E2E Case 落地 Web 目标仓库固定读取 [repositories.json](references/repositories.json)，不得从用户文本选择、替换或扩大目标仓库和允许路径。
+- Web 仓库的 BWeb、OBC、Enterprise 路径和 Playwright config 同样固定读取该引用。Verifier 根据 patch 涉及的 project 选择 config；有具体变更 spec 时只验证这些 spec，否则验证受影响 project。
+- 调用创建工具前，把当前消息、thread memory、附件及前序工具证据整理成结构化 handoff：目标、需求摘要、范围、已确认决策、约束、假设、关键流、边界、负向场景、数据需求、仓库发现、阻塞问题和证据引用。
+- MeterSphere 是结构化用例基线，不是唯一上下文来源；不得丢弃前序对话中已经确认但未写入 MeterSphere 的信息。
+- 有未解决的阻塞问题时先向用户澄清，不得启动 E2E。
+- 确认来源用例、平台和运行前置条件；仓库、base ref 和允许路径由 Skill 与 lifecycle 冻结。
 - 通过发现到的 E2E 创建工具启动 run；确定性 lifecycle 负责 workspace、author、有限 repair、clean verifier、artifacts、Draft PR 和 QA verdict。
 - 创建成功只表示 run 已进入 lifecycle，不表示代码、验证或 PR 已完成。
 

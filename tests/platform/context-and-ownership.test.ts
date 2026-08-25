@@ -2,6 +2,7 @@ import { RequestContext } from "@mastra/core/request-context";
 import { describe, expect, it } from "vitest";
 import type { E2ERun, OwnerScope } from "../../packages/contracts/src/index.ts";
 import { InMemoryRunRepository } from "../../packages/domain/src/run-repository.ts";
+import { freezeE2EContext } from "../../packages/domain/src/e2e-context.ts";
 import { applyTrustedContext } from "../../src/platform/context/identity-resolver.ts";
 import { conversationScope } from "../../src/platform/context/conversation-scope.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../../src/platform/context/schema.ts";
@@ -59,9 +60,13 @@ describe("trusted context and ownership", () => {
 
 function testRun(owner: OwnerScope, id: string): E2ERun {
   const now = new Date().toISOString();
+  const contextSnapshot = freezeE2EContext({
+    goal: "test", requirementSummary: "test", inScope: [], outOfScope: [], confirmedDecisions: [], constraints: [], assumptions: [],
+    criticalFlows: [], boundaryCases: [], negativeCases: [], testDataNeeds: [], repositoryFindings: [], blockingQuestions: [], evidenceRefs: [],
+  }, { sessionId: "session", threadId: "thread", taskRunId: "task", requestId: "request", resourceId: "test" });
   return {
     ...owner, id, requestId: "request", sourceSessionId: "session", status: "queued", platform: "web", framework: "playwright",
     repository: { owner: "o", repository: "r", cloneUrl: "https://example.test/r.git", baseRef: "main", allowedPaths: ["tests"], skillsPaths: [] }, sourceCaseIds: ["case"],
-    artifacts: [], createdAt: now, updatedAt: now,
+    contextSnapshot, caseSnapshot: [], amendments: [], codeTaskIds: [], artifacts: [], createdAt: now, updatedAt: now,
   };
 }

@@ -5,5 +5,6 @@ export * from "./run-repository.ts";
 export * from "./errors.ts";
 export * from "./metersphere-receipt.ts";
 export * from "./case-plan.ts";
+export * from "./e2e-context.ts";
 export * from "./progress.ts";
 export * from "./agent-progress.ts";

@@ -1,7 +1,8 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdir, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LocalFilesystem, LocalSandbox } from "@mastra/core/workspace";
@@ -10,8 +11,11 @@ import {
   SandboxBrowserActionSchema, SandboxBrowserStartSchema, SandboxExecuteRequestSchema,
   SandboxDesktopActionSchema, SandboxDesktopApplicationSchema, SandboxDesktopStartSchema,
   SandboxDesktopToolSchema, SandboxFilesystemRequestSchema, SandboxRepositoryCloneSchema, SandboxSessionClaimSchema,
+  SandboxCodeTaskCancelSchema, SandboxCodeTaskStartSchema,
 } from "../platform/workspace/sandbox-protocol.ts";
 import type { SandboxSessionState } from "../platform/workspace/sandbox-protocol.ts";
+import { CodeTaskEventSchema, CodeTaskStateSchema, type CodeTaskSpec, type CodeTaskState } from "../../packages/contracts/src/index.ts";
+import { executionProfile, type CodeTaskWorkerManifest } from "../../packages/code-task/src/index.ts";
 import { DesktopController, type DesktopToolResult } from "./desktop.ts";
 import { SharedRepositoryCache } from "../../packages/e2e/src/repository-cache.ts";
 
@@ -29,6 +33,9 @@ interface SandboxRuntimeOptions {
   desktopWidth?: number;
   desktopHeight?: number;
   driverWorkerPath?: string;
+  codeTaskWorkerPath?: string;
+  codeTaskEnvAllowlist?: string[];
+  codeTaskRepositoryPreparer?(repositoryRoot: string, spec: CodeTaskSpec, taskRoot: string): Promise<string>;
 }
 
 interface BrowserSession {
@@ -52,7 +59,18 @@ interface ActiveSession {
   filesystem: LocalFilesystem;
   sandbox: LocalSandbox;
   browser?: BrowserSession;
+  activeCodeTask?: ActiveCodeTask;
   lastActivityAt: number;
+}
+
+interface ActiveCodeTask {
+  taskId: string;
+  attemptId: string;
+  child: ChildProcess;
+  taskRoot: string;
+  statePath: string;
+  eventsPath: string;
+  heartbeat: NodeJS.Timeout;
 }
 
 interface DesktopLease {
@@ -157,6 +175,24 @@ export class QaseySandboxRuntime {
       await this.touchWorkspace(session);
       return sendJson(response, 200, await this.cloneRepository(session, await readJson(request)));
     }
+    const codeTaskMatch = /^\/v1\/sessions\/([^/]+)\/code-tasks(?:\/([^/]+)(?:\/(events|cancel))?)?$/u.exec(url.pathname);
+    if (codeTaskMatch) {
+      const sessionId = decodeURIComponent(codeTaskMatch[1] ?? "");
+      const session = this.authenticate(request, sessionId);
+      session.lastActivityAt = Date.now();
+      await this.touchWorkspace(session);
+      const taskId = codeTaskMatch[2] ? decodeURIComponent(codeTaskMatch[2]) : undefined;
+      const action = codeTaskMatch[3];
+      if (method === "POST" && !taskId) return sendJson(response, 202, await this.startCodeTask(session, await readJson(request)));
+      if (method === "GET" && taskId && action === "events") {
+        return sendJson(response, 200, await this.codeTaskEvents(session, taskId, url.searchParams.get("after") ?? undefined));
+      }
+      if (method === "POST" && taskId && action === "cancel") {
+        return sendJson(response, 200, await this.cancelCodeTask(session, taskId, SandboxCodeTaskCancelSchema.parse(await readJson(request)).reason));
+      }
+      if (method === "GET" && taskId && !action) return sendJson(response, 200, await this.codeTaskState(session, taskId));
+      throw new HttpError(405, "Method not allowed");
+    }
     const match = /^\/v1\/sessions\/([^/]+)\/(filesystem|execute|stop|browser\/start|browser\/action|browser\/frame|desktop\/start|desktop\/action|desktop\/tool|desktop\/app|desktop\/frame|desktop\/stop)$/u.exec(url.pathname);
     if (!match) throw new HttpError(404, "Route not found");
     const sessionId = decodeURIComponent(match[1] ?? "");
@@ -238,6 +274,7 @@ export class QaseySandboxRuntime {
       sandbox,
       lastActivityAt: Date.now(),
     };
+    await this.recoverInterruptedCodeTasks(repository);
     this.sessions.set(input.sessionId, session);
     await this.touchWorkspace(session);
     return this.state(session);
@@ -327,6 +364,238 @@ export class QaseySandboxRuntime {
       timeout: input.timeout ?? this.options.commandTimeoutMs,
       maxRetainedBytes: input.maxRetainedBytes ?? 1024 * 1024,
     });
+  }
+
+  private async startCodeTask(session: ActiveSession, raw: unknown): Promise<CodeTaskState> {
+    const input = SandboxCodeTaskStartSchema.parse(raw);
+    const { spec } = input;
+    if (spec.scope.sessionId !== session.sessionId) throw new HttpError(403, "Code task scope does not match the authenticated sandbox session");
+    if (session.activeCodeTask && session.activeCodeTask.child.exitCode === null) {
+      throw new HttpError(409, `Sandbox session is already running code task ${session.activeCodeTask.taskId}`);
+    }
+    if (session.activeCodeTask) {
+      clearInterval(session.activeCodeTask.heartbeat);
+      delete session.activeCodeTask;
+    }
+    const taskRoot = containedPath(join(session.root, "repo", "code-tasks"), join(safeTaskSegment(spec.taskId), safeTaskSegment(spec.attemptId)));
+    if (await fileExists(taskRoot)) throw new HttpError(409, "Code task attempt already exists");
+    await mkdir(join(taskRoot, "artifacts"), { recursive: true, mode: 0o700 });
+    await Promise.all([
+      mkdir(join(taskRoot, "home", ".codex"), { recursive: true, mode: 0o700 }),
+      mkdir(join(taskRoot, "home", ".config"), { recursive: true, mode: 0o700 }),
+      mkdir(join(taskRoot, "home", ".cache"), { recursive: true, mode: 0o700 }),
+      mkdir(join(taskRoot, "home", ".local", "share"), { recursive: true, mode: 0o700 }),
+    ]);
+    const workspaceRoot = this.options.codeTaskRepositoryPreparer
+      ? await this.options.codeTaskRepositoryPreparer(join(session.root, "repo"), spec, taskRoot)
+      : await this.prepareCodeTaskRepositories(session, spec, taskRoot);
+    if (spec.inputPatchRef) await this.applyCodeTaskPatch(session, workspaceRoot, spec.inputPatchRef.uri);
+    const statePath = join(taskRoot, "state.json");
+    const eventsPath = join(taskRoot, "events.ndjson");
+    const createdAt = new Date().toISOString();
+    const queued: CodeTaskState = { taskId: spec.taskId, attemptId: spec.attemptId, status: "queued", createdAt, updatedAt: createdAt };
+    await writeFile(statePath, JSON.stringify(queued), { mode: 0o600 });
+    const manifestPath = join(taskRoot, "manifest.json");
+    const manifest: CodeTaskWorkerManifest = {
+      spec,
+      context: input.context,
+      repositoryRoot: join(session.root, "repo"),
+      workspaceRoot,
+      taskRoot,
+      statePath,
+      eventsPath,
+    };
+    await writeFile(manifestPath, JSON.stringify(manifest), { mode: 0o600 });
+    const child = spawn(process.execPath, [this.options.codeTaskWorkerPath ?? defaultCodeTaskWorkerPath(), manifestPath], {
+      cwd: workspaceRoot,
+      env: this.codeTaskWorkerEnvironment(session, spec, taskRoot),
+      detached: true,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    const heartbeat = setInterval(() => {
+      session.lastActivityAt = Date.now();
+      void this.touchWorkspace(session);
+    }, Math.max(5_000, Math.min(30_000, this.options.idleTtlMs / 3)));
+    heartbeat.unref();
+    const active: ActiveCodeTask = { taskId: spec.taskId, attemptId: spec.attemptId, child, taskRoot, statePath, eventsPath, heartbeat };
+    session.activeCodeTask = active;
+    child.once("error", error => { void this.finishCodeTaskProcess(session, active, error); });
+    child.once("close", code => { void this.finishCodeTaskProcess(session, active, code === 0 ? undefined : new Error(`Code task worker exited with code ${code ?? "unknown"}`)); });
+    return queued;
+  }
+
+  private async codeTaskState(session: ActiveSession, taskId: string): Promise<CodeTaskState> {
+    const paths = await this.findCodeTaskPaths(session, taskId);
+    if (!paths) throw new HttpError(404, "Code task not found");
+    return CodeTaskStateSchema.parse(JSON.parse(await readFile(paths.statePath, "utf8")));
+  }
+
+  private async codeTaskEvents(session: ActiveSession, taskId: string, after?: string): Promise<{ events: unknown[]; nextCursor?: string }> {
+    const paths = await this.findCodeTaskPaths(session, taskId);
+    if (!paths) throw new HttpError(404, "Code task not found");
+    const minimum = after ? Number(after) : 0;
+    if (!Number.isSafeInteger(minimum) || minimum < 0) throw new HttpError(400, "Invalid code task event cursor");
+    const events = (await readFile(paths.eventsPath, "utf8").catch(() => ""))
+      .split("\n").filter(Boolean)
+      .map(line => CodeTaskEventSchema.parse(JSON.parse(line)))
+      .filter(event => Number(event.cursor) > minimum)
+      .slice(0, 500);
+    const nextCursor = events.at(-1)?.cursor;
+    return { events, ...(nextCursor ? { nextCursor } : {}) };
+  }
+
+  private async cancelCodeTask(session: ActiveSession, taskId: string, reason: string): Promise<CodeTaskState> {
+    const current = await this.codeTaskState(session, taskId);
+    if (["succeeded", "failed", "cancelled", "lost"].includes(current.status)) return current;
+    const active = session.activeCodeTask;
+    if (!active || active.taskId !== taskId || active.child.pid === undefined) {
+      const lost = { ...current, status: "lost" as const, updatedAt: new Date().toISOString(), error: "Code task worker is no longer active" };
+      await writeFile((await this.findCodeTaskPaths(session, taskId))!.statePath, JSON.stringify(lost), { mode: 0o600 });
+      return lost;
+    }
+    const requested = { ...current, status: "cancel_requested" as const, updatedAt: new Date().toISOString(), error: reason };
+    await writeFile(active.statePath, JSON.stringify(requested), { mode: 0o600 });
+    await this.appendCodeTaskEvent(active, "task.cancel_requested", "Code task cancellation requested", { reason });
+    killProcessGroup(active.child.pid, "SIGTERM");
+    await Promise.race([
+      new Promise<void>(resolveClose => active.child.once("close", () => resolveClose())),
+      new Promise<void>(resolveWait => setTimeout(resolveWait, 5_000)),
+    ]);
+    if (active.child.exitCode === null) killProcessGroup(active.child.pid, "SIGKILL");
+    const cancelled = { ...requested, status: "cancelled" as const, updatedAt: new Date().toISOString() };
+    await writeFile(active.statePath, JSON.stringify(cancelled), { mode: 0o600 });
+    await this.appendCodeTaskEvent(active, "task.cancelled", "Code task process group terminated");
+    return cancelled;
+  }
+
+  private async appendCodeTaskEvent(active: Pick<ActiveCodeTask, "taskId" | "attemptId" | "eventsPath">, type: string, message: string, metadata: Record<string, unknown> = {}): Promise<void> {
+    const previous = (await readFile(active.eventsPath, "utf8").catch(() => "")).split("\n").filter(Boolean).at(-1);
+    const previousCursor = previous ? Number((JSON.parse(previous) as { cursor?: unknown }).cursor) : 0;
+    const event = CodeTaskEventSchema.parse({
+      cursor: String(Number.isSafeInteger(previousCursor) ? previousCursor + 1 : 1),
+      taskId: active.taskId,
+      at: new Date().toISOString(),
+      type,
+      message,
+      metadata: { attemptId: active.attemptId, ...metadata },
+    });
+    await appendFile(active.eventsPath, `${JSON.stringify(event)}\n`, { mode: 0o600 });
+  }
+
+  private async prepareCodeTaskRepositories(session: ActiveSession, spec: CodeTaskSpec, taskRoot: string): Promise<string> {
+    let primaryRoot: string | undefined;
+    for (const [index, mount] of spec.repositories.entries()) {
+      const cloneUrl = `https://github.com/${mount.owner}/${mount.repository}.git`;
+      const worktree = containedPath(join(taskRoot, "repositories"), mount.destination);
+      await this.repositoryCache.createWorktree({
+        // The broker authorizes and refreshes every use. Git objects contain no
+        // credentials, so all sessions on this Sandbox replica can share one
+        // store per canonical repository instead of cloning once per session.
+        namespace: "code-task-repository-pool-v1",
+        owner: mount.owner,
+        repository: mount.repository,
+        cloneUrl,
+      }, worktree, {
+        ref: mount.baseRef,
+        baseSha: mount.baseSha ?? (index === 0 ? spec.baseSha : undefined) ?? spec.baseSha,
+        detached: true,
+        ...(session.githubToken ? { env: gitHubGitEnvironment(session.githubToken) } : {}),
+        timeoutMs: this.options.commandTimeoutMs,
+      });
+      if (!primaryRoot && (mount.mode === "write" || index === 0)) primaryRoot = worktree;
+    }
+    if (!primaryRoot) throw new HttpError(400, "Code task has no primary repository mount");
+    return primaryRoot;
+  }
+
+  private async applyCodeTaskPatch(session: ActiveSession, workspaceRoot: string, uri: string): Promise<void> {
+    const path = sandboxArtifactPath(join(session.root, "repo"), uri);
+    const result = await executeSandboxCommand(session.sandbox, "git", ["apply", "--index", "--binary", "--", path], {
+      cwd: workspaceRoot,
+      timeout: this.options.commandTimeoutMs,
+    });
+    if (result.exitCode !== 0) throw new HttpError(400, `Input patch could not be applied: ${result.stderr.slice(-1_000)}`);
+  }
+
+  private codeTaskWorkerEnvironment(session: ActiveSession, spec: CodeTaskSpec, taskRoot: string): NodeJS.ProcessEnv {
+    const home = join(taskRoot, "home");
+    const profile = executionProfile(spec.executionProfileId);
+    const configured = this.options.codeTaskEnvAllowlist ? new Set(this.options.codeTaskEnvAllowlist) : undefined;
+    const allowed = profile.allowedEnvironmentKeys.filter(key => !configured || configured.has(key));
+    const environment: NodeJS.ProcessEnv = {
+      PATH: session.environment.PATH,
+      HOME: home,
+      CODEX_HOME: join(home, ".codex"),
+      XDG_CONFIG_HOME: join(home, ".config"),
+      XDG_CACHE_HOME: join(home, ".cache"),
+      XDG_DATA_HOME: join(home, ".local", "share"),
+      CI: "true",
+      NO_BROWSER: "1",
+      GH_PROMPT_DISABLED: "1",
+      GIT_TERMINAL_PROMPT: "0",
+      QASEY_ACP_COMMAND: process.env.QASEY_ACP_COMMAND?.trim() || "codex-acp",
+      QASEY_ACP_ARGS: JSON.stringify(process.env.QASEY_ACP_ARGS?.trim().split(/\s+/u).filter(Boolean) ?? []),
+      QASEY_IMAGE_DIGEST: process.env.QASEY_IMAGE_DIGEST?.trim() || "unknown-internal-image",
+      QASEY_MASTRA_ACP_VERSION: "0.4.0",
+      QASEY_CODEX_ACP_VERSION: "1.6.2",
+      QASEY_CODEX_VERSION: process.env.QASEY_CODEX_VERSION?.trim() || "0.148.0",
+    };
+    for (const key of allowed) {
+      const value = process.env[key];
+      if (value !== undefined) environment[key] = value;
+    }
+    for (const [source, target] of Object.entries(profile.environmentAliases ?? {})) {
+      const value = environment[source];
+      if (value !== undefined) environment[target] = value;
+    }
+    return environment;
+  }
+
+  private async finishCodeTaskProcess(session: ActiveSession, active: ActiveCodeTask, error?: Error): Promise<void> {
+    if (session.activeCodeTask !== active) return;
+    clearInterval(active.heartbeat);
+    const current = await readFile(active.statePath, "utf8").then(value => CodeTaskStateSchema.parse(JSON.parse(value))).catch(() => undefined);
+    if (!current || current.status === "running" || current.status === "queued") {
+      const now = new Date().toISOString();
+      const failed: CodeTaskState = {
+        taskId: active.taskId,
+        attemptId: active.attemptId,
+        status: "failed",
+        createdAt: current?.createdAt ?? now,
+        updatedAt: now,
+        error: error?.message ?? "Code task worker stopped without a terminal result",
+      };
+      await writeFile(active.statePath, JSON.stringify(failed), { mode: 0o600 });
+    }
+    delete session.activeCodeTask;
+    session.lastActivityAt = Date.now();
+  }
+
+  private async findCodeTaskPaths(session: ActiveSession, taskId: string): Promise<{ statePath: string; eventsPath: string } | undefined> {
+    const taskDirectory = containedPath(join(session.root, "repo", "code-tasks"), safeTaskSegment(taskId));
+    const attempts = await readdir(taskDirectory, { withFileTypes: true }).catch(() => []);
+    const candidates = await Promise.all(attempts.filter(entry => entry.isDirectory()).map(async attempt => {
+      const statePath = join(taskDirectory, attempt.name, "state.json");
+      const state = await readFile(statePath, "utf8").then(value => CodeTaskStateSchema.parse(JSON.parse(value))).catch(() => undefined);
+      return state ? { state, statePath, eventsPath: join(taskDirectory, attempt.name, "events.ndjson") } : undefined;
+    }));
+    const latest = candidates.filter(candidate => candidate !== undefined)
+      .sort((left, right) => right.state.updatedAt.localeCompare(left.state.updatedAt))[0];
+    return latest ? { statePath: latest.statePath, eventsPath: latest.eventsPath } : undefined;
+  }
+
+  private async recoverInterruptedCodeTasks(repositoryRoot: string): Promise<void> {
+    const root = join(repositoryRoot, "code-tasks");
+    const taskDirectories = await readdir(root, { withFileTypes: true }).catch(() => []);
+    for (const task of taskDirectories.filter(entry => entry.isDirectory())) {
+      const attempts = await readdir(join(root, task.name), { withFileTypes: true }).catch(() => []);
+      for (const attempt of attempts.filter(entry => entry.isDirectory())) {
+        const statePath = join(root, task.name, attempt.name, "state.json");
+        const state = await readFile(statePath, "utf8").then(value => CodeTaskStateSchema.parse(JSON.parse(value))).catch(() => undefined);
+        if (!state || !["queued", "running", "cancel_requested"].includes(state.status)) continue;
+        await writeFile(statePath, JSON.stringify({ ...state, status: "lost", updatedAt: new Date().toISOString(), error: "Sandbox runtime restarted during execution" }), { mode: 0o600 });
+      }
+    }
   }
 
   private async browserStart(session: ActiveSession, raw: unknown): Promise<SandboxSessionState> {
@@ -550,6 +819,14 @@ export class QaseySandboxRuntime {
   }
 
   private async closeSession(session: ActiveSession): Promise<void> {
+    const codeTask = session.activeCodeTask;
+    if (codeTask?.child.pid !== undefined && codeTask.child.exitCode === null) {
+      clearInterval(codeTask.heartbeat);
+      killProcessGroup(codeTask.child.pid, "SIGTERM");
+      await new Promise(resolveWait => setTimeout(resolveWait, 250));
+      if (codeTask.child.exitCode === null) killProcessGroup(codeTask.child.pid, "SIGKILL");
+      delete session.activeCodeTask;
+    }
     await this.releaseDesktop(session);
     const browser = session.browser;
     delete session.browser;
@@ -653,6 +930,10 @@ export function sandboxRuntimeOptions(env: NodeJS.ProcessEnv = process.env): San
     desktopWidth: positiveInteger(env.QASEY_SANDBOX_DESKTOP_WIDTH, 1440),
     desktopHeight: positiveInteger(env.QASEY_SANDBOX_DESKTOP_HEIGHT, 900),
     driverWorkerPath: env.QASEY_CUA_DRIVER_WORKER_PATH?.trim() || defaultDriverWorkerPath(),
+    codeTaskWorkerPath: env.QASEY_CODE_TASK_WORKER_PATH?.trim() || defaultCodeTaskWorkerPath(),
+    ...(env.QASEY_CODE_TASK_ENV_ALLOWLIST?.trim()
+      ? { codeTaskEnvAllowlist: env.QASEY_CODE_TASK_ENV_ALLOWLIST.split(",").map(value => value.trim()).filter(Boolean) }
+      : {}),
   };
 }
 
@@ -660,11 +941,33 @@ function defaultDriverWorkerPath(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "cua-driver-worker.mjs");
 }
 
+function defaultCodeTaskWorkerPath(): string {
+  return join(dirname(fileURLToPath(import.meta.url)), "code-task-worker.mjs");
+}
+
 function containedPath(rootInput: string, child: string): string {
   const root = resolve(rootInput);
   const target = resolve(root, child.replace(/^[/\\]+/u, ""));
   if (target !== root && !target.startsWith(`${root}${sep}`)) throw new HttpError(400, "Path escaped sandbox workspace");
   return target;
+}
+
+function sandboxArtifactPath(repositoryRoot: string, uri: string): string {
+  if (!uri.startsWith("sandbox://")) throw new HttpError(400, "Code task artifact must use sandbox:// URI");
+  return containedPath(repositoryRoot, uri.slice("sandbox://".length));
+}
+
+function safeTaskSegment(value: string): string {
+  const segment = value.replace(/[^A-Za-z0-9._-]/gu, "-").replace(/^\.+$/u, "-").slice(0, 160);
+  if (!segment) throw new HttpError(400, "Code task identifier contains no safe path segment");
+  return segment === value ? segment : `${segment.slice(0, 140)}-${createHash("sha256").update(value).digest("hex").slice(0, 16)}`;
+}
+
+function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
+  try { process.kill(-pid, signal); }
+  catch {
+    try { process.kill(pid, signal); } catch { /* process already stopped */ }
+  }
 }
 
 function decodeContent(content: string, encoding: "utf8" | "base64"): string | Buffer {

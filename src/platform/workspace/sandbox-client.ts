@@ -4,6 +4,13 @@ import type {
   CopyOptions, FileContent, FileEntry, FileStat, FilesystemInfo, ListOptions, ReadOptions,
   RemoveOptions, WorkspaceFilesystem, WriteOptions,
 } from "@mastra/core/workspace";
+import {
+  CodeTaskEventPageSchema,
+  CodeTaskStateSchema,
+  type CodeTaskEventPage,
+  type CodeTaskSpec,
+  type CodeTaskState,
+} from "../../../packages/contracts/src/index.ts";
 import type {
   SandboxBrowserActionSchema, SandboxDesktopActionSchema, SandboxDesktopApplicationSchema,
   SandboxDesktopStartSchema, SandboxDesktopToolSchema, SandboxLease, SandboxLeaseScope,
@@ -127,6 +134,33 @@ export class SandboxRuntimeSession {
       body: JSON.stringify(body),
       ...(signal ? { signal } : {}),
     });
+  }
+
+  async codeTaskStart(spec: CodeTaskSpec, context: string): Promise<CodeTaskState> {
+    const result = await this.request(`/v1/sessions/${encodeURIComponent(this.lease.sessionId)}/code-tasks`, {
+      method: "POST",
+      body: JSON.stringify({ spec, context }),
+    });
+    return CodeTaskStateSchema.parse(result);
+  }
+
+  async codeTaskState(taskId: string): Promise<CodeTaskState> {
+    const result = await this.request(`/v1/sessions/${encodeURIComponent(this.lease.sessionId)}/code-tasks/${encodeURIComponent(taskId)}`, { method: "GET" });
+    return CodeTaskStateSchema.parse(result);
+  }
+
+  async codeTaskEvents(taskId: string, after?: string): Promise<CodeTaskEventPage> {
+    const query = after ? `?after=${encodeURIComponent(after)}` : "";
+    const result = await this.request(`/v1/sessions/${encodeURIComponent(this.lease.sessionId)}/code-tasks/${encodeURIComponent(taskId)}/events${query}`, { method: "GET" });
+    return CodeTaskEventPageSchema.parse(result);
+  }
+
+  async codeTaskCancel(taskId: string, reason: string): Promise<CodeTaskState> {
+    const result = await this.request(`/v1/sessions/${encodeURIComponent(this.lease.sessionId)}/code-tasks/${encodeURIComponent(taskId)}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    });
+    return CodeTaskStateSchema.parse(result);
   }
 
   async browserStart(input: { url?: string; width?: number; height?: number } = {}): Promise<SandboxSessionState> {

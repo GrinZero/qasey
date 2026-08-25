@@ -17,6 +17,12 @@ export interface MaterializeRepositoryOptions {
   timeoutMs?: number;
 }
 
+export interface CreateRepositoryWorktreeOptions extends Omit<MaterializeRepositoryOptions, "bare"> {
+  baseSha?: string;
+  branch?: string;
+  detached?: boolean;
+}
+
 export interface MaterializedRepository {
   cacheHit: boolean;
   mirrorPath: string;
@@ -25,10 +31,10 @@ export interface MaterializedRepository {
 }
 
 /**
- * One clean mirror per authorized repository namespace. Callers receive a
- * session/run-local clone, never the shared mirror itself. `--local` lets Git
- * hard-link immutable object files on filesystems that support it while every
- * clone retains independent refs, config, worktrees, and cleanup.
+ * One Git mirror/store per repository namespace. Coding attempts should call
+ * createWorktree() so author, repair, and verifier checkouts share this single
+ * object store. materialize() remains for callers that explicitly need a
+ * standalone clone.
  */
 export class SharedRepositoryCache {
   constructor(
@@ -52,27 +58,7 @@ export class SharedRepositoryCache {
     if (await exists(destination)) throw new Error(`Repository destination already exists: ${destination}`);
 
     return this.withRepositoryLock(mirrorPath, async () => {
-      const cacheHit = await exists(mirrorPath);
-      if (!cacheHit) {
-        const clone = await git(dirname(mirrorPath), ["clone", "--mirror", "--", source.cloneUrl, mirrorPath], options);
-        assertGit(clone, "git mirror clone");
-      } else {
-        const configuredRemote = await git(mirrorPath, ["remote", "get-url", "origin"], options);
-        assertGit(configuredRemote, "git mirror remote inspection");
-        if (normalizeRemote(configuredRemote.stdout) !== normalizeRemote(source.cloneUrl)) {
-          throw new Error("Repository cache key resolved to a different origin URL");
-        }
-      }
-
-      const fetchArgs = options.ref
-        ? ["fetch", "--prune", "origin", `+refs/heads/${options.ref}:refs/heads/${options.ref}`]
-        : ["remote", "update", "--prune"];
-      const refresh = await git(mirrorPath, fetchArgs, options);
-      assertGit(refresh, "git mirror refresh");
-
-      const resolvedSha = options.ref
-        ? await resolveCommit(mirrorPath, options.ref, options)
-        : undefined;
+      const prepared = await prepareMirror(source, mirrorPath, options);
       const cloneArgs = ["clone", "--local", ...(options.bare ? ["--bare"] : []), "--", mirrorPath, destination];
       const localClone = await git(dirname(destination), cloneArgs, options);
       if (localClone.exitCode !== 0) {
@@ -81,7 +67,42 @@ export class SharedRepositoryCache {
       }
       const setRemote = await git(options.bare ? destination : join(destination, ".git"), ["remote", "set-url", "origin", source.cloneUrl], options, true);
       assertGit(setRemote, "git local origin configuration");
-      return { cacheHit, mirrorPath, destination, ...(resolvedSha ? { resolvedSha } : {}) };
+      return { ...prepared, mirrorPath, destination };
+    });
+  }
+
+  async createWorktree(
+    source: RepositoryCacheSource,
+    destinationInput: string,
+    options: CreateRepositoryWorktreeOptions = {},
+  ): Promise<MaterializedRepository> {
+    const cacheRoot = resolve(this.root);
+    const namespaceRoot = containedPath(cacheRoot, safeSegment(source.namespace));
+    const mirrorPath = containedPath(namespaceRoot, `${repositoryKey(source)}.git`);
+    const destination = resolve(destinationInput);
+    await Promise.all([
+      mkdir(namespaceRoot, { recursive: true, mode: 0o700 }),
+      mkdir(dirname(destination), { recursive: true, mode: 0o700 }),
+    ]);
+    if (await exists(destination)) throw new Error(`Repository worktree destination already exists: ${destination}`);
+
+    return this.withRepositoryLock(mirrorPath, async () => {
+      const prepared = await prepareMirror(source, mirrorPath, options);
+      const baseSha = options.baseSha ?? prepared.resolvedSha;
+      if (!baseSha) throw new Error("A pinned base SHA or resolvable ref is required to create a worktree");
+      const hasCommit = await git(mirrorPath, ["cat-file", "-e", `${baseSha}^{commit}`], options);
+      assertGit(hasCommit, `verify pinned base commit ${baseSha}`);
+      const prune = await git(mirrorPath, ["worktree", "prune"], options);
+      assertGit(prune, "git worktree prune");
+      const checkoutArgs = options.detached || !options.branch
+        ? ["worktree", "add", "--detach", "--", destination, baseSha]
+        : ["worktree", "add", "-b", options.branch, "--", destination, baseSha];
+      const checkout = await git(mirrorPath, checkoutArgs, options);
+      if (checkout.exitCode !== 0) {
+        await rm(destination, { recursive: true, force: true });
+        assertGit(checkout, "git worktree add");
+      }
+      return { ...prepared, mirrorPath, destination, resolvedSha: baseSha };
     });
   }
 
@@ -115,6 +136,32 @@ export class SharedRepositoryCache {
       await rm(lockPath, { recursive: true, force: true });
     }
   }
+}
+
+async function prepareMirror(
+  source: RepositoryCacheSource,
+  mirrorPath: string,
+  options: MaterializeRepositoryOptions,
+): Promise<Pick<MaterializedRepository, "cacheHit" | "resolvedSha">> {
+  const cacheHit = await exists(mirrorPath);
+  if (!cacheHit) {
+    const clone = await git(dirname(mirrorPath), ["clone", "--mirror", "--", source.cloneUrl, mirrorPath], options);
+    assertGit(clone, "git mirror clone");
+  } else {
+    const configuredRemote = await git(mirrorPath, ["remote", "get-url", "origin"], options);
+    assertGit(configuredRemote, "git mirror remote inspection");
+    if (normalizeRemote(configuredRemote.stdout) !== normalizeRemote(source.cloneUrl)) {
+      throw new Error("Repository cache key resolved to a different origin URL");
+    }
+  }
+
+  const fetchArgs = options.ref
+    ? ["fetch", "--prune", "origin", `+refs/heads/${options.ref}:refs/heads/${options.ref}`]
+    : ["remote", "update", "--prune"];
+  const refresh = await git(mirrorPath, fetchArgs, options);
+  assertGit(refresh, "git mirror refresh");
+  const resolvedSha = options.ref ? await resolveCommit(mirrorPath, options.ref, options) : undefined;
+  return { cacheHit, ...(resolvedSha ? { resolvedSha } : {}) };
 }
 
 async function resolveCommit(

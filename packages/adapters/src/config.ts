@@ -225,6 +225,13 @@ export const ConfigSchema = z.object({
       message: "Production sandbox leases require DATABASE_URL and GOOGLE_COOKIE_PASSWORD",
     });
   }
+  if (value.NODE_ENV === "production" && value.QASEY_ENABLE_EXECUTION && !value.QASEY_SANDBOX_ENABLED) {
+    context.addIssue({
+      code: "custom",
+      path: ["QASEY_ENABLE_EXECUTION"],
+      message: "Production E2E code execution requires QASEY_SANDBOX_ENABLED=true; the API Pod cannot host coding agents",
+    });
+  }
   const githubAppKeys = ["GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY"] as const;
   const configuredGitHubAppKeys = githubAppKeys.filter(key => value[key] !== undefined);
   if (configuredGitHubAppKeys.length > 0 && configuredGitHubAppKeys.length < githubAppKeys.length) {

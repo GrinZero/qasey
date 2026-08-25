@@ -30,6 +30,8 @@ describe("local author and clean verifier workspaces", () => {
     });
     try {
       expect(author.baseSha).toBe(verifier.baseSha);
+      expect(author.gitDir).toBe(verifier.gitDir);
+      expect(author.gitDir).toContain(cache);
       await expect(readFile(join(verifier.root, "README.md"), "utf8")).resolves.toBe("fixture\n");
       expect(await readdir(join(cache, "tenant"))).toHaveLength(1);
       const detached = await runSafeCommand({ executable: "git", args: ["symbolic-ref", "-q", "HEAD"], cwd: verifier.root });

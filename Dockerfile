@@ -14,6 +14,7 @@ COPY patches ./patches
 COPY apps/admin-ui/package.json apps/admin-ui/package.json
 COPY apps/api/package.json apps/api/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/code-task/package.json packages/code-task/package.json
 COPY packages/domain/package.json packages/domain/package.json
 COPY packages/adapters/package.json packages/adapters/package.json
 COPY packages/e2e/package.json packages/e2e/package.json
@@ -86,6 +87,7 @@ RUN corepack enable \
 RUN chown pwuser:pwuser /app \
   && install -d -o pwuser -g pwuser -m 0750 /app/.mastra/output/workspace \
   && chmod 0755 /app/dist/gh-wrapper.mjs \
+  && chmod 0755 /app/dist/code-task-worker.mjs \
   && ln -s /app/dist/gh-wrapper.mjs /usr/local/bin/gh
 USER 1001
 EXPOSE 8080

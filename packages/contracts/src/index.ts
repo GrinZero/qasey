@@ -118,6 +118,156 @@ export const ArtifactRefSchema = z.object({
 });
 export type ArtifactRef = z.infer<typeof ArtifactRefSchema>;
 
+export const E2EEvidenceRefSchema = z.object({
+  kind: z.enum(["message", "attachment", "document", "metersphere_case", "repository"]),
+  ref: z.string().min(1),
+  title: z.string().min(1).max(500).optional(),
+  summary: z.string().max(8_000).optional(),
+});
+export type E2EEvidenceRef = z.infer<typeof E2EEvidenceRefSchema>;
+
+export const E2EContextDraftSchema = z.object({
+  goal: z.string().min(1).max(8_000),
+  requirementSummary: z.string().min(1).max(24_000),
+  inScope: z.array(z.string().min(1).max(2_000)).max(100).default([]),
+  outOfScope: z.array(z.string().min(1).max(2_000)).max(100).default([]),
+  confirmedDecisions: z.array(z.string().min(1).max(4_000)).max(100).default([]),
+  constraints: z.array(z.string().min(1).max(4_000)).max(100).default([]),
+  assumptions: z.array(z.string().min(1).max(4_000)).max(100).default([]),
+  criticalFlows: z.array(z.string().min(1).max(4_000)).max(200).default([]),
+  boundaryCases: z.array(z.string().min(1).max(4_000)).max(200).default([]),
+  negativeCases: z.array(z.string().min(1).max(4_000)).max(200).default([]),
+  testDataNeeds: z.array(z.string().min(1).max(4_000)).max(100).default([]),
+  repositoryFindings: z.array(z.string().min(1).max(4_000)).max(200).default([]),
+  blockingQuestions: z.array(z.string().min(1).max(4_000)).max(100).default([]),
+  evidenceRefs: z.array(E2EEvidenceRefSchema).max(200).default([]),
+}).strict().superRefine((value, context) => {
+  if (Buffer.byteLength(JSON.stringify(value), "utf8") > 64 * 1024) {
+    context.addIssue({ code: "custom", message: "E2E handoff exceeds the 64 KiB snapshot limit" });
+  }
+});
+export type E2EContextDraft = z.infer<typeof E2EContextDraftSchema>;
+
+export const E2EContextSnapshotSchema = E2EContextDraftSchema.safeExtend({
+  version: z.literal(1),
+  source: z.object({
+    sessionId: z.string().min(1),
+    threadId: z.string().min(1),
+    taskRunId: z.string().min(1),
+    requestId: z.string().min(1),
+    resourceId: z.string().min(1),
+  }).strict(),
+  createdAt: z.iso.datetime(),
+  snapshotHash: z.string().regex(/^[a-f0-9]{64}$/u),
+});
+export type E2EContextSnapshot = z.infer<typeof E2EContextSnapshotSchema>;
+
+export const CodeTaskKindSchema = z.enum(["author", "repair", "review", "migration-author"]);
+export const CodeTaskStatusSchema = z.enum([
+  "queued", "running", "cancel_requested", "succeeded", "failed", "cancelled", "lost",
+]);
+export const CodeTaskScopeSchema = z.object({
+  applicationId: z.string().min(1),
+  tenantId: z.string().min(1),
+  sessionId: z.string().min(1),
+}).strict();
+const RelativeWorkspacePathSchema = z.string().min(1).max(1_000)
+  .refine(value => !value.startsWith("/") && !value.startsWith("\\"), "Workspace paths must be relative")
+  .refine(value => value.split(/[\\/]/u).every(segment => segment !== "." && segment !== ".." && segment.length > 0), "Workspace paths cannot contain dot or empty segments");
+export const RepositoryMountSchema = z.object({
+  owner: z.string().min(1),
+  repository: z.string().min(1),
+  destination: RelativeWorkspacePathSchema,
+  mode: z.enum(["read", "write"]),
+  baseRef: z.string().min(1).default("main"),
+  baseSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
+}).strict();
+export const FixedCheckRefSchema = z.object({ id: z.string().min(1).max(100) }).strict();
+export const CodeTaskTraceContextSchema = z.object({
+  traceId: z.string().min(1).optional(),
+  parentSpanId: z.string().min(1).optional(),
+  traceparent: z.string().min(1).optional(),
+}).strict();
+export type CodeTaskTraceContext = z.infer<typeof CodeTaskTraceContextSchema>;
+
+export const CodeTaskSpecSchema = z.object({
+  taskId: z.string().regex(/^[A-Za-z0-9._:-]{1,200}$/u),
+  attemptId: z.string().regex(/^[A-Za-z0-9._:-]{1,200}$/u),
+  kind: CodeTaskKindSchema,
+  scope: CodeTaskScopeSchema,
+  contextRef: ArtifactRefSchema,
+  contextHash: z.string().regex(/^[a-f0-9]{64}$/u),
+  repositories: z.array(RepositoryMountSchema).min(1).max(8),
+  baseSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
+  executionProfileId: z.enum(["web-e2e-author", "web-e2e-repair", "web-e2e-verifier", "code-review-readonly"]),
+  allowedPaths: z.array(RelativeWorkspacePathSchema).max(100),
+  fixedChecks: z.array(FixedCheckRefSchema).max(20).default([]),
+  deadlineMs: z.number().int().min(1_000).max(30 * 60_000),
+  traceContext: CodeTaskTraceContextSchema.default({}),
+  inputPatchRef: ArtifactRefSchema.optional(),
+}).strict();
+export type CodeTaskSpec = z.infer<typeof CodeTaskSpecSchema>;
+
+export const CheckResultSchema = z.object({
+  id: z.string().min(1),
+  passed: z.boolean(),
+  exitCode: z.number().int(),
+  summary: z.string(),
+  durationMs: z.number().int().nonnegative(),
+  artifacts: z.array(ArtifactRefSchema).default([]),
+}).strict();
+export type CheckResult = z.infer<typeof CheckResultSchema>;
+export const CodeTaskChangeSchema = z.object({
+  path: z.string().min(1),
+  status: z.enum(["added", "modified", "deleted", "renamed"]),
+  mode: z.enum(["100644", "100755", "120000"]).optional(),
+  contentRef: ArtifactRefSchema.optional(),
+}).strict();
+export type CodeTaskChange = z.infer<typeof CodeTaskChangeSchema>;
+export const CodeTaskProvenanceSchema = z.object({
+  imageDigest: z.string().min(1),
+  profileHash: z.string().regex(/^[a-f0-9]{64}$/u),
+  mastraAcpVersion: z.string().min(1),
+  codexAcpVersion: z.string().min(1),
+  codexVersion: z.string().min(1),
+}).strict();
+export const CodeTaskResultSchema = z.object({
+  status: z.enum(["succeeded", "failed", "cancelled", "lost"]),
+  summary: z.string(),
+  changedPaths: z.array(z.string()),
+  changes: z.array(CodeTaskChangeSchema).default([]),
+  patchRef: ArtifactRefSchema.optional(),
+  checks: z.array(CheckResultSchema),
+  artifacts: z.array(ArtifactRefSchema),
+  provenance: CodeTaskProvenanceSchema,
+}).strict();
+export type CodeTaskResult = z.infer<typeof CodeTaskResultSchema>;
+
+export const CodeTaskEventSchema = z.object({
+  cursor: z.string().min(1),
+  taskId: z.string().min(1),
+  at: z.iso.datetime(),
+  type: z.string().min(1),
+  message: z.string(),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+}).strict();
+export type CodeTaskEvent = z.infer<typeof CodeTaskEventSchema>;
+export const CodeTaskStateSchema = z.object({
+  taskId: z.string().min(1),
+  attemptId: z.string().min(1),
+  status: CodeTaskStatusSchema,
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+  result: CodeTaskResultSchema.optional(),
+  error: z.string().optional(),
+}).strict();
+export type CodeTaskState = z.infer<typeof CodeTaskStateSchema>;
+export const CodeTaskEventPageSchema = z.object({
+  events: z.array(CodeTaskEventSchema),
+  nextCursor: z.string().optional(),
+}).strict();
+export type CodeTaskEventPage = z.infer<typeof CodeTaskEventPageSchema>;
+
 export const EvidenceManifestSchema = z.object({
   runId: z.string().min(1),
   commitSha: z.string().min(1),
@@ -134,6 +284,39 @@ export const EvidenceManifestSchema = z.object({
 });
 export type EvidenceManifest = z.infer<typeof EvidenceManifestSchema>;
 
+export const E2ERepositoryExecutionSchema = z.object({
+  owner: z.string().min(1),
+  repository: z.string().min(1),
+  workspacePath: z.string().min(1),
+  baseSha: z.string().regex(/^[a-f0-9]{40,64}$/u).optional(),
+  allowedPaths: z.array(z.string().min(1)).min(1),
+  skillPaths: z.array(z.string().min(1)).default([]),
+  installCommand: z.array(z.string()).optional(),
+  testCommand: z.array(z.string()).optional(),
+  specGlobs: z.array(z.string()).default([]),
+  artifactGlobs: z.array(z.string()).default([]),
+}).strict();
+export type E2ERepositoryExecution = z.infer<typeof E2ERepositoryExecutionSchema>;
+
+export const E2EExecutionBriefSchema = z.object({
+  version: z.literal(1),
+  context: E2EContextSnapshotSchema,
+  cases: z.array(TestCaseSpecSchema).min(1),
+  repository: E2ERepositoryExecutionSchema,
+  createdAt: z.iso.datetime(),
+  briefHash: z.string().regex(/^[a-f0-9]{64}$/u),
+}).strict();
+export type E2EExecutionBrief = z.infer<typeof E2EExecutionBriefSchema>;
+
+export const E2EAmendmentSchema = z.object({
+  id: z.string().min(1),
+  createdAt: z.iso.datetime(),
+  reviewerId: z.string().min(1),
+  feedback: z.string().min(1).max(5_000),
+  hash: z.string().regex(/^[a-f0-9]{64}$/u),
+}).strict();
+export type E2EAmendment = z.infer<typeof E2EAmendmentSchema>;
+
 export const E2ERunSchema = z.object({
   applicationId: z.string().min(1),
   tenantId: z.string().min(1),
@@ -141,6 +324,14 @@ export const E2ERunSchema = z.object({
   requestId: z.string().min(1),
   sourceSessionId: z.string().min(1),
   sourceCaseIds: z.array(z.string()),
+  contextSnapshot: E2EContextSnapshotSchema,
+  caseSnapshot: z.array(TestCaseSpecSchema).default([]),
+  executionBrief: E2EExecutionBriefSchema.optional(),
+  briefHash: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+  repositoryExecution: E2ERepositoryExecutionSchema.optional(),
+  traceId: z.string().optional(),
+  amendments: z.array(E2EAmendmentSchema).default([]),
+  codeTaskIds: z.array(z.string()).default([]),
   repository: RepositoryProfileSchema,
   platform: E2EPlatformSchema,
   framework: E2EFrameworkSchema,
@@ -161,12 +352,15 @@ export const CreateE2ERunSchema = z.object({
   requestId: z.string().optional(),
   sourceSessionId: z.string().min(1),
   sourceCaseIds: z.array(z.string().min(1)).min(1),
+  handoff: E2EContextDraftSchema,
   // Execution commands are server-owned and can never be submitted by a browser/API client.
   repository: SubmittedRepositoryProfileSchema,
   platform: E2EPlatformSchema,
   framework: E2EFrameworkSchema,
 }).strict();
 export type CreateE2ERun = z.infer<typeof CreateE2ERunSchema>;
+export const CreateE2ERunRequestSchema = CreateE2ERunSchema.omit({ requestId: true, sourceSessionId: true, repository: true }).strict();
+export type CreateE2ERunRequest = z.infer<typeof CreateE2ERunRequestSchema>;
 
 export const QaVerdictSchema = z.object({
   verdict: z.enum(["approve", "request_changes"]),

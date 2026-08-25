@@ -2,8 +2,8 @@
   "explorer.fileNesting.enabled": true,
   "explorer.fileNesting.expand": false,
   "explorer.fileNesting.patterns": {
-    ".env": ".env.devops, .env.secret, .env.testing",
-    ".env.local": ".env.*.local",
+    ".env": ".env.devops, .env.testing",
+    ".env.local": ".env.*.local, .env.secret",
     ".env.local.example": ".env.*.example"
   }
 }

@@ -27,8 +27,9 @@ export class AcpCodingHarness implements CodingHarness {
       args: this.args,
       cwd: workspace.root,
       persistSession: false,
+      ...(process.env.CODEX_API_KEY || process.env.OPENAI_API_KEY ? { authMethodId: "api-key" } : {}),
       onPermissionRequest: async permission => {
-        const allow = permission.options.find(option => /allow|approve|yes/i.test(option.name));
+        const allow = permission.options.find(option => option.kind === "allow_once");
         return allow
           ? { outcome: { outcome: "selected" as const, optionId: allow.optionId } }
           : { outcome: { outcome: "cancelled" as const } };

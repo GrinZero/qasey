@@ -1,4 +1,9 @@
 import { z } from "zod";
+import {
+  CodeTaskEventPageSchema,
+  CodeTaskSpecSchema,
+  CodeTaskStateSchema,
+} from "../../../packages/contracts/src/index.ts";
 
 export const SandboxSessionClaimSchema = z.object({
   sessionId: z.string().min(1).max(200),
@@ -41,6 +46,16 @@ export const SandboxExecuteRequestSchema = z.object({
   timeout: z.number().int().positive().max(30 * 60_000).optional(),
   maxRetainedBytes: z.number().int().positive().max(16 * 1024 * 1024).optional(),
 }).strict();
+
+export const SandboxCodeTaskStartSchema = z.object({
+  spec: CodeTaskSpecSchema,
+  context: z.string().max(256 * 1024),
+}).strict();
+export const SandboxCodeTaskCancelSchema = z.object({
+  reason: z.string().min(1).max(2_000),
+}).strict();
+export const SandboxCodeTaskStateSchema = CodeTaskStateSchema;
+export const SandboxCodeTaskEventPageSchema = CodeTaskEventPageSchema;
 
 export const SandboxBrowserStartSchema = z.object({
   url: z.url().optional(),

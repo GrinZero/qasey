@@ -3,7 +3,7 @@ import { readFile, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { CreateE2ERunSchema, QaVerdictInputSchema } from "../../../../packages/contracts/src/index.ts";
+import { CreateE2ERunRequestSchema, QaVerdictInputSchema } from "../../../../packages/contracts/src/index.ts";
 import { normalizeJiraWebhook } from "../../../../packages/domain/src/index.ts";
 import { config, channelDeliveryInbox, jiraClient, runRepository, sandboxPoolClient } from "../../runtime.ts";
 import { cancelE2ERun, createAndStartE2ERun, rerunE2E, resumeE2EWithVerdict } from "../../workflows/e2e-workflow.ts";
@@ -16,6 +16,7 @@ import type { PlatformGoogleUser } from "../../../platform/auth/google-oidc.ts";
 import { runQaseyTaskWorkflow } from "../../workflows/qasey-task-workflow.ts";
 import { runtimeReadiness } from "../../../platform/storage/readiness.ts";
 import { devRuntimeTunnelServerEnabled } from "../../../../packages/adapters/src/config.ts";
+import { webE2ERepositoryFromSkill } from "../../../platform/code-task/e2e-repository-skill.ts";
 import {
   bearerToken,
   DEV_RUNTIME_HEARTBEAT_MS,
@@ -270,9 +271,15 @@ export const apiRoutes = [
   registerApiRoute("/v1/runs", {
     method: "POST",
     handler: async c => {
-      const parsed = CreateE2ERunSchema.safeParse(await c.req.json());
+      const parsed = CreateE2ERunRequestSchema.safeParse(await c.req.json());
       if (!parsed.success) return c.json({ error: "validation_error", details: parsed.error.issues }, 400);
-      try { return c.json(await createAndStartE2ERun(c.get("mastra"), owner(c), parsed.data, c.get("requestContext"), authenticatedUser(c)?.id), 202); }
+      const requestContext = c.get("requestContext");
+      const trustedInput = {
+        ...parsed.data,
+        sourceSessionId: String(requestContext.get("sessionId")),
+        repository: webE2ERepositoryFromSkill(),
+      };
+      try { return c.json(await createAndStartE2ERun(c.get("mastra"), owner(c), trustedInput, requestContext, authenticatedUser(c)?.id), 202); }
       catch (error) { return c.json(errorBody(error, crypto.randomUUID()), 400); }
     },
   }),

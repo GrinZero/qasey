@@ -10,7 +10,7 @@ import type { CodeModeTransport, ToolObserve } from "@mastra/core/tools";
 import { QuickJsCodeModeTransport } from "@mastra/quickjs";
 import { ObservabilityStoragePostgresVNext, PostgresStore } from "@mastra/pg";
 import { z } from "zod";
-import { AgentProgressInputSchema, CreateE2ERunSchema, QaseyRequestContextSchema } from "../../packages/contracts/src/index.ts";
+import { AgentProgressInputSchema, CreateE2ERunRequestSchema, QaseyRequestContextSchema } from "../../packages/contracts/src/index.ts";
 import type { E2ERun, QaseyRequestContext } from "../../packages/contracts/src/index.ts";
 import { AgentProgressSession } from "../../packages/domain/src/index.ts";
 import type { ToolsInput } from "@mastra/core/agent";
@@ -29,6 +29,9 @@ import { InMemoryChannelDeliveryInbox, PrismaChannelDeliveryInbox } from "../pla
 import { runtimeReadiness } from "../platform/storage/readiness.ts";
 import { InMemorySandboxLeaseStore, PrismaSandboxLeaseStore } from "../platform/workspace/sandbox-lease-store.ts";
 import { SandboxPoolClient } from "../platform/workspace/sandbox-client.ts";
+import { PooledSandboxCodeTaskRunnerProvider } from "../platform/code-task/pooled-sandbox-runner.ts";
+import { webE2ERepositoryFromSkill } from "../platform/code-task/e2e-repository-skill.ts";
+import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../platform/context/schema.ts";
 import { applyDevRuntimeApprovalGate } from "./applications/qasey/dev-runtime-approval-gate.ts";
 import { createApplicationDatabase } from "../platform/storage/prisma.ts";
 
@@ -92,6 +95,9 @@ export const sandboxPoolClient = sandboxLeaseStore
       ...(githubReadTokens ? { githubTokenForScope: () => githubReadTokens.readToken() } : {}),
     })
   : undefined;
+export const codeTaskRunnerProvider = sandboxPoolClient
+  ? new PooledSandboxCodeTaskRunnerProvider(sandboxPoolClient)
+  : undefined;
 // The registry can survive a development hot reload. Reset it before replacing
 // checks so readiness never reports the previous runtime while this one starts.
 runtimeReadiness.markInitializationStarted();
@@ -125,6 +131,15 @@ const draftPrBroker = !config.QASEY_SHADOW_MODE && config.QASEY_ENABLE_DRAFT_PR 
         title: `test(e2e): Qasey run ${run.id}`,
         body: [`## Qasey generated E2E`, ``, `Cases: ${run.sourceCaseIds.join(", ")}`, `Review and evidence: ${reviewUrl}`, ``, `Clean verifier passed. QA approval is still required.`].join("\n"),
       }),
+      publishChanges: (run: E2ERun, changes: Array<{ path: string; deleted: boolean; mode?: "100644" | "100755" | "120000"; content?: Buffer }>, reviewUrl: string) => githubPublisher.publishChanges({
+        repository: run.repository,
+        baseSha: run.baseSha!,
+        branch: run.branch ?? `qasey/${run.id}`,
+        title: `test(e2e): Qasey run ${run.id}`,
+        body: [`## Qasey generated E2E`, ``, `Cases: ${run.sourceCaseIds.join(", ")}`, `Review and evidence: ${reviewUrl}`, ``, `Clean verifier passed. QA approval is still required.`].join("\n"),
+        changes,
+        ...(run.pullRequestUrl ? { existingPullRequestUrl: run.pullRequestUrl } : {}),
+      }),
       markReady: (run: E2ERun) => run.pullRequestUrl ? githubPublisher.markPullRequestReady(run.pullRequestUrl) : Promise.resolve(),
     }
   : new NoopDraftPrBroker();
@@ -140,6 +155,7 @@ export const e2eCoordinator = new E2ECoordinator(
     maxRepairs: config.QASEY_MAX_REPAIRS,
     reviewBaseUrl: config.QASEY_PUBLIC_BASE_URL,
     ...(config.QASEY_ENABLE_CUA_FALLBACK ? { cua: new CuaFallback() } : {}),
+    ...(codeTaskRunnerProvider ? { codeTasks: codeTaskRunnerProvider } : {}),
   },
 );
 
@@ -324,11 +340,22 @@ function e2eTools() {
     e2eCreateRun: createTool({
       id: "e2e_create_run",
       description: "创建一个隔离的 Playwright（Web）或 Maestro（App）代码生成与验证运行。",
-      inputSchema: CreateE2ERunSchema.omit({ requestId: true }),
+      inputSchema: CreateE2ERunRequestSchema,
       execute: async (input, { mastra, requestContext }) => {
         if (!requestContext) throw new Error("Trusted request context is required");
         const owner = ownerScopeFromRequestContext(requestContext);
-        const created = await e2eCoordinator.create(owner, input);
+        if (input.platform !== "web" || input.framework !== "playwright") throw new Error("The first CodeTask-backed E2E release only supports Web Playwright");
+        const requestId = String(requestContext.get("requestId"));
+        const sessionId = String(requestContext.get("sessionId"));
+        const resourceId = String(requestContext.get(MASTRA_RESOURCE_ID_KEY));
+        const threadId = String(requestContext.get(MASTRA_THREAD_ID_KEY) ?? sessionId);
+        const taskRunId = String(requestContext.get("taskId") ?? requestContext.get("executionId") ?? requestId);
+        const created = await e2eCoordinator.create(owner, {
+          ...input,
+          requestId,
+          sourceSessionId: sessionId,
+          repository: webE2ERepositoryFromSkill(),
+        }, { sessionId, threadId, taskRunId, requestId, resourceId });
         if (config.QASEY_ENABLE_EXECUTION) {
           if (!mastra) throw new Error("Mastra runtime is required to start the E2E workflow");
           const resourceId = getRuntimeContext(requestContext)["qasey-context"].actor.id;

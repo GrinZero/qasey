@@ -74,37 +74,69 @@ export class GitHubPublisher {
     title: string;
     body: string;
   }): Promise<string> {
-    const octokit = this.requireClient();
     const { stdout: baseOutput } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: input.root });
     const baseSha = baseOutput.trim();
     const changes = await changedFiles(input.root, input.repository.allowedPaths);
     if (changes.length === 0) throw new Error("Refusing to publish an empty change");
-    const tree: Array<{ path: string; mode: "100644" | "100755" | "120000"; type: "blob"; sha: string | null }> = [];
-    for (const change of changes) {
+    const materialized = await Promise.all(changes.map(async change => {
       if (change.deleted) {
-        tree.push({ path: change.path, mode: "100644", type: "blob", sha: null });
-        continue;
+        return { path: change.path, deleted: true as const };
       }
       const absolute = join(input.root, change.path);
       const stats = await lstat(absolute);
       const content = stats.isSymbolicLink() ? Buffer.from(await readlink(absolute)) : await readFile(absolute);
+      return { path: change.path, deleted: false as const, mode: stats.isSymbolicLink() ? "120000" as const : stats.mode & 0o111 ? "100755" as const : "100644" as const, content };
+    }));
+    return this.publishChanges({ ...input, baseSha, changes: materialized });
+  }
+
+  async publishChanges(input: {
+    repository: RepositoryProfile;
+    baseSha: string;
+    branch: string;
+    title: string;
+    body: string;
+    changes: Array<{ path: string; deleted: boolean; mode?: "100644" | "100755" | "120000"; content?: Buffer }>;
+    existingPullRequestUrl?: string;
+  }): Promise<string> {
+    const octokit = this.requireClient();
+    if (input.changes.length === 0) throw new Error("Refusing to publish an empty change");
+    const tree: Array<{ path: string; mode: "100644" | "100755" | "120000"; type: "blob"; sha: string | null }> = [];
+    for (const change of input.changes) {
+      if (change.deleted) {
+        tree.push({ path: change.path, mode: "100644", type: "blob", sha: null });
+        continue;
+      }
+      if (!change.content || !change.mode) throw new Error(`Published change ${change.path} is missing content or mode`);
       const blob = await octokit.git.createBlob({
         owner: input.repository.owner, repo: input.repository.repository,
-        content: content.toString("base64"), encoding: "base64",
+        content: change.content.toString("base64"), encoding: "base64",
       });
-      tree.push({ path: change.path, mode: stats.isSymbolicLink() ? "120000" : stats.mode & 0o111 ? "100755" : "100644", type: "blob", sha: blob.data.sha });
+      tree.push({ path: change.path, mode: change.mode, type: "blob", sha: blob.data.sha });
     }
+    const baseCommit = await octokit.repos.getCommit({
+      owner: input.repository.owner, repo: input.repository.repository, ref: input.baseSha,
+    });
     const createdTree = await octokit.git.createTree({
-      owner: input.repository.owner, repo: input.repository.repository, base_tree: baseSha, tree,
+      owner: input.repository.owner, repo: input.repository.repository, base_tree: baseCommit.data.commit.tree.sha, tree,
     });
     const commit = await octokit.git.createCommit({
       owner: input.repository.owner, repo: input.repository.repository,
-      message: input.title, tree: createdTree.data.sha, parents: [baseSha],
+      message: input.title, tree: createdTree.data.sha, parents: [input.baseSha],
     });
-    await octokit.git.createRef({
-      owner: input.repository.owner, repo: input.repository.repository,
-      ref: `refs/heads/${input.branch}`, sha: commit.data.sha,
-    });
+    try {
+      await octokit.git.createRef({
+        owner: input.repository.owner, repo: input.repository.repository,
+        ref: `refs/heads/${input.branch}`, sha: commit.data.sha,
+      });
+    } catch (error) {
+      if (!isGitHubAlreadyExists(error)) throw error;
+      await octokit.git.updateRef({
+        owner: input.repository.owner, repo: input.repository.repository,
+        ref: `heads/${input.branch}`, sha: commit.data.sha, force: true,
+      });
+    }
+    if (input.existingPullRequestUrl) return input.existingPullRequestUrl;
     return this.createDraftPullRequest(input);
   }
 
@@ -138,6 +170,10 @@ export class GitHubPublisher {
     if (!this.octokit) throw new Error("GitHub App authentication is not configured");
     return this.octokit;
   }
+}
+
+function isGitHubAlreadyExists(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "status" in error && error.status === 422);
 }
 
 async function changedFiles(root: string, allowedPaths: string[]): Promise<Array<{ path: string; deleted: boolean }>> {

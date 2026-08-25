@@ -84,6 +84,7 @@ pnpm check
 - [Adding an Application](./docs/adding-application.md)
 - [Permissions](./docs/permissions.md)
 - [Workspace and durability](./docs/workspace-and-durability.md)
+- [Code Task Runner](./docs/code-task-runner.md)
 - [Production runbook](./docs/production-runbook.md)
 
 ## Breaking change
