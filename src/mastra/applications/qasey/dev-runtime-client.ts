@@ -1,11 +1,13 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { Mastra } from "@mastra/core/mastra";
 import { RequestContext } from "@mastra/core/request-context";
 import type { QaseyConfig } from "../../../../packages/adapters/src/config.ts";
 import { devRuntimeTunnelClientEnabled } from "../../../../packages/adapters/src/config.ts";
+import { runWithDatadogTraceCarrier } from "../../instrumentation.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../../../platform/context/schema.ts";
 import { DEFAULT_SLACK_DEV_RUNTIME_COMMAND } from "../../../platform/channels/slack-dev-runtime.ts";
 import { runQaseyTaskWorkflow } from "../../workflows/qasey-task-workflow.ts";
+import { resolveDevRuntimeId } from "./dev-runtime-identity.ts";
 import {
   DEV_RUNTIME_APPROVAL_GATE_KEY,
   type DevRuntimeApprovalGate,
@@ -59,7 +61,7 @@ export class DevRuntimeTunnelClient {
     private readonly config: QaseyConfig,
     options: DevRuntimeClientOptions = {},
   ) {
-    this.runtimeId = options.runtimeId ?? generateRuntimeId();
+    this.runtimeId = options.runtimeId ?? resolveDevRuntimeId();
     this.instanceId = options.instanceId ?? randomUUID();
     this.fetchImpl = options.fetch ?? fetch;
     this.log = options.log ?? console;
@@ -190,16 +192,21 @@ export class DevRuntimeTunnelClient {
     };
     requestContext.set(DEV_RUNTIME_APPROVAL_GATE_KEY, gate);
     try {
-      const result = await runQaseyTaskWorkflow(this.mastra, job.context, {
-        requestContext,
-        abortSignal: state.abort.signal,
-        events: {
-          onPhase: async ({ runId, phase }) => this.postEvent(state, { type: "phase", runId, phase }),
-          onAgentRuntimeEvent: async event => this.postEvent(state, { type: "agent_runtime_event", event }),
-          onAgentProgress: async ({ runId, ...report }) => this.postEvent(state, { type: "progress", runId, report }),
-          onToolStart: async ({ runId, toolName }) => this.postEvent(state, { type: "tool_started", runId, toolName }),
-        },
-      });
+      const result = await runWithDatadogTraceCarrier(
+        job.trace?.carrier,
+        { name: "qasey dev runtime execution", sessionId: job.context.sessionId },
+        () => runQaseyTaskWorkflow(this.mastra, job.context, {
+          requestContext,
+          abortSignal: state.abort.signal,
+          ...(job.trace ? { remoteParent: job.trace } : {}),
+          events: {
+            onPhase: async ({ runId, phase }) => this.postEvent(state, { type: "phase", runId, phase }),
+            onAgentRuntimeEvent: async event => this.postEvent(state, { type: "agent_runtime_event", event }),
+            onAgentProgress: async ({ runId, ...report }) => this.postEvent(state, { type: "progress", runId, report }),
+            onToolStart: async ({ runId, toolName }) => this.postEvent(state, { type: "tool_started", runId, toolName }),
+          },
+        }),
+      );
       await this.postEvent(state, { type: "completed", result });
     } catch (error) {
       if (state.abort.signal.aborted) {
@@ -288,14 +295,11 @@ export function startDevRuntimeTunnelClient(
     console.warn("Dev Runtime tunnel is enabled but QASEY_DEV_TUNNEL_BASE_URL or QASEY_DEV_TUNNEL_TOKEN is missing; Slack routing is unavailable.");
     return undefined;
   }
-  const client = new DevRuntimeTunnelClient(mastra, config);
+  const client = new DevRuntimeTunnelClient(mastra, config, {
+    runtimeId: resolveDevRuntimeId(config.QASEY_DEV_RUNTIME_ID),
+  });
   client.start();
   return client;
-}
-
-function generateRuntimeId(): string {
-  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  return `local-${Array.from(randomBytes(8), byte => alphabet[byte % alphabet.length]).join("")}`;
 }
 
 function errorMessage(error: unknown): string {

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Qasey Mastra API"
+  short_description: "安全调用本地和 T2 Mastra API"
+  default_prompt: "使用 $qasey-mastra-api 检查或调用本地或 T2 环境中的 Qasey Mastra API。"

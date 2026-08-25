@@ -19,6 +19,7 @@ import {
 import { DevRuntimeTunnelError, getDevRuntimeTunnelService } from "./dev-runtime-service.ts";
 import { slackTunnelApprovalCard, slackTunnelApprovalStatusCard } from "./slack-tunnel-delivery.ts";
 import type { QaseyAgentRuntimeEvent, QaseyResponse } from "./service.ts";
+import { createDatadogTraceCarrier } from "../../instrumentation.ts";
 
 type NativeMessage = Parameters<ChannelHandler>[1];
 type NativeThread = Parameters<ChannelHandler>[0];
@@ -89,7 +90,7 @@ export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions)
       requestId: `slack:${message.id}`,
       channel: "slack" as const,
       sessionId: scope.threadId,
-      chatInput: message.text,
+      chatInput: buildSlackChatInput(message.text, message.links),
       actor: {
         id: message.author.userId,
         ...(message.author.fullName ? { displayName: message.author.fullName } : {}),
@@ -110,7 +111,7 @@ export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions)
     const sourceMessage = thread.createSentMessageFromMessage(message);
     const receivedAt = Date.now();
     const slackRequestSpan = mastra.observability.getDefaultInstance()?.startSpan({
-      type: SpanType.GENERIC,
+      type: SpanType.WORKFLOW_RUN,
       name: "qasey slack request",
       entityType: EntityType.AGENT,
       entityId: "qasey",
@@ -123,6 +124,8 @@ export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions)
       },
       metadata: {
         requestId: context.requestId,
+        sessionId: context.sessionId,
+        userId: context.actor.id,
         channel: "slack",
         actorId: context.actor.id,
       },
@@ -132,16 +135,25 @@ export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions)
     let firstToolAt: number | undefined;
     let firstProgressAt: number | undefined;
     let lastStatus: string | undefined;
+    let statusDeliveryCount = 0;
+    let statusDeliveryFailureCount = 0;
+    let statusDeliveryDurationMs = 0;
+    let firstStatusDeliveryAt: number | undefined;
     const statusProjector = new SlackAgentStatusProjector();
     const updateStatus = async (status: string | undefined) => {
       if (!status || status === lastStatus) return;
       lastStatus = status;
-      await traceQaseyOperation(
-        slackRequestSpan,
-        "qasey slack status delivery",
-        { status },
-        () => showSlackStatus(thread, status),
-      );
+      const startedAt = Date.now();
+      statusDeliveryCount += 1;
+      firstStatusDeliveryAt ??= startedAt;
+      try {
+        await showSlackStatus(thread, status);
+      } catch (error) {
+        statusDeliveryFailureCount += 1;
+        throw error;
+      } finally {
+        statusDeliveryDurationMs += Date.now() - startedAt;
+      }
     };
     await traceQaseyOperation(
       slackRequestSpan,
@@ -210,7 +222,7 @@ export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions)
 
       const binding = tunnel ? await tunnel.bindingFor(workspaceId, message.author.userId) : undefined;
       let result: QaseyResponse;
-      if (binding) {
+      if (binding?.online) {
         executionSource = binding.runtimeId;
         const jobId = crypto.randomUUID();
         const deadlineAt = new Date(Date.now() + config.QASEY_AGENT_TIMEOUT_MS).toISOString();
@@ -222,6 +234,13 @@ export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions)
           context,
           resourceId: scope.resourceId,
           threadId: scope.threadId,
+          ...(slackRequestSpan ? {
+            trace: {
+              traceId: slackRequestSpan.traceId,
+              parentSpanId: slackRequestSpan.id,
+              carrier: createDatadogTraceCarrier(slackRequestSpan.id, slackRequestSpan.traceId),
+            },
+          } : {}),
           delivery: {
             workspaceId,
             ...(options.installationId ? { installationId: options.installationId } : {}),
@@ -333,6 +352,14 @@ export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions)
         () => markSlackRequestFinished(sourceMessage, outcome),
       );
       const durationMs = Date.now() - receivedAt;
+      const deliveryMetadata = {
+        outcome,
+        durationMs,
+        statusDeliveryCount,
+        statusDeliveryFailureCount,
+        statusDeliveryDurationMs,
+        ...(firstStatusDeliveryAt ? { firstStatusDeliveryLatencyMs: firstStatusDeliveryAt - receivedAt } : {}),
+      };
       logInfo("slack.request.finished", {
         requestId: context.requestId,
         workspaceId,
@@ -347,10 +374,10 @@ export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions)
         slackRequestSpan?.error({
           error: requestError instanceof Error ? requestError : new Error(String(requestError)),
           endSpan: true,
-          metadata: { outcome, durationMs },
+          metadata: deliveryMetadata,
         });
       } else {
-        slackRequestSpan?.end({ metadata: { outcome, durationMs } });
+        slackRequestSpan?.end({ metadata: deliveryMetadata });
       }
     }
   };
@@ -395,6 +422,16 @@ function scopeFor(thread: NativeThread, message: NativeMessage, tenantId: string
     externalThreadId: `${prefix}${message.threadId || thread.channelId}`,
     kind: thread.isDM ? "private" : "shared",
   });
+}
+
+/** Preserve Slack's canonical link targets when converting a rich message to Agent input. */
+export function buildSlackChatInput(
+  text: string,
+  links: readonly { url: string }[] | undefined,
+): string {
+  const urls = [...new Set((links ?? []).map(link => link.url.trim()).filter(Boolean))];
+  if (urls.length === 0) return text;
+  return `${text}\n\nLinks:\n${urls.join("\n")}`;
 }
 
 function slackTenantId(message: NativeMessage): string {

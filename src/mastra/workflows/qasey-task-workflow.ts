@@ -18,6 +18,7 @@ import {
   startQaseyRequestSpan,
   type QaseyTraceContext,
 } from "../applications/qasey/observability.ts";
+import type { QaseyRemoteTraceContext } from "../applications/qasey/trace-carrier.ts";
 import {
   assembleQaseyResponse,
   decideQaseyFinalization,
@@ -225,6 +226,7 @@ export interface RunQaseyTaskOptions {
   abortSignal?: AbortSignal;
   runId?: string;
   trace?: QaseyTraceContext;
+  remoteParent?: QaseyRemoteTraceContext;
   resumeCasePlan?: MeterSphereCasePlan;
 }
 
@@ -249,6 +251,7 @@ export async function runQaseyTaskWorkflow(
     run.runId,
     options.trace,
     options.tracingContext,
+    options.remoteParent,
   );
   try {
     const result = await run.start({

@@ -3,6 +3,7 @@ import { EntityType, SpanType } from "@mastra/core/observability";
 import type { Span, TracingContext } from "@mastra/core/observability";
 import type { RequestContext } from "@mastra/core/request-context";
 import type { QaseyRequestContext } from "../../../../packages/contracts/src/index.ts";
+import type { QaseyRemoteTraceContext } from "./trace-carrier.ts";
 
 const QASEY_TRACE_ID_KEY = "qasey__traceId";
 const QASEY_REQUEST_SPAN_ID_KEY = "qasey__requestSpanId";
@@ -31,7 +32,8 @@ export interface QaseyTraceContext {
   workerId?: string;
 }
 
-export type QaseyRequestSpan = Span<SpanType.GENERIC>;
+export type QaseyRequestSpan = Span<SpanType.WORKFLOW_RUN>;
+export type QaseyCorrelatedSpan = Span<SpanType.GENERIC>;
 
 export function initializeQaseyTraceRequestContext(
   requestContext: RequestContext,
@@ -54,11 +56,12 @@ export function startQaseyRequestSpan(
   runId: string,
   trace: QaseyTraceContext = {},
   parentTracingContext?: TracingContext,
+  remoteParent?: QaseyRemoteTraceContext,
 ): { span?: QaseyRequestSpan; tracingContext?: TracingContext } {
   const instance = mastra.observability?.getDefaultInstance();
   if (!instance) return {};
   const details = {
-    type: SpanType.GENERIC,
+    type: SpanType.WORKFLOW_RUN,
     name: "qasey request",
     entityType: EntityType.AGENT,
     entityId: "qasey",
@@ -80,6 +83,7 @@ export function startQaseyRequestSpan(
       runId,
       requestId: context.requestId,
       sessionId: context.sessionId,
+      userId: context.actor.id,
       threadId: context.sessionId,
       resourceId: context.actor.id,
       actorId: context.actor.id,
@@ -91,7 +95,14 @@ export function startQaseyRequestSpan(
   const parentSpan = parentTracingContext?.currentSpan;
   const span = parentSpan && typeof parentSpan.createChildSpan === "function"
     ? parentSpan.createChildSpan(details)
-    : instance.startSpan({ ...details, tags: ["qasey", `channel:${context.channel}`] });
+    : instance.startSpan({
+        ...details,
+        tags: ["qasey", `channel:${context.channel}`],
+        ...(remoteParent ? {
+          traceId: remoteParent.traceId,
+          externalParentSpanId: remoteParent.parentSpanId,
+        } : {}),
+      });
   requestContext.set(QASEY_TRACE_ID_KEY, span.traceId);
   requestContext.set(QASEY_REQUEST_SPAN_ID_KEY, span.id);
   return { span, tracingContext: { currentSpan: span } };
@@ -107,7 +118,7 @@ export function startQaseyCorrelatedSpan(
   requestContext: RequestContext<any>,
   name: string,
   input?: unknown,
-): QaseyRequestSpan | undefined {
+): QaseyCorrelatedSpan | undefined {
   const instance = mastra?.observability?.getDefaultInstance();
   const traceId = requestContext.get(QASEY_TRACE_ID_KEY);
   const parentSpanId = requestContext.get(QASEY_REQUEST_SPAN_ID_KEY);

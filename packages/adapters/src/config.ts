@@ -48,6 +48,10 @@ export const ConfigSchema = z.object({
   QASEY_DEV_TUNNEL_ENABLED: optionalBoolean,
   QASEY_DEV_TUNNEL_BASE_URL: optionalUrl,
   QASEY_DEV_TUNNEL_TOKEN: optionalString,
+  QASEY_DEV_RUNTIME_ID: z.preprocess(
+    value => value === "" ? undefined : value,
+    z.string().regex(/^local-[A-Z2-9]{8}$/u).optional(),
+  ),
   QASEY_USE_REDIS_DURABILITY: optionalBoolean,
   REDIS_HOST: optionalString,
   REDIS_PORT: optionalPositiveInteger,
@@ -79,6 +83,9 @@ export const ConfigSchema = z.object({
   QASEY_ENABLE_DATADOG: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
   QASEY_DATADOG_CAPTURE_CONTENT: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
   DD_LLMOBS_ML_APP: optionalString,
+  DD_LLMOBS_AGENTLESS_ENABLED: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
+  DD_API_KEY: optionalString,
+  DD_SITE: z.string().min(1).default("datadoghq.com"),
   DD_SERVICE: z.string().min(1).default("qasey"),
   DD_ENV: optionalString,
   DD_VERSION: optionalString,
@@ -204,6 +211,13 @@ export const ConfigSchema = z.object({
       code: "custom",
       path: ["DD_LLMOBS_ML_APP"],
       message: "DD_LLMOBS_ML_APP is required when QASEY_ENABLE_DATADOG=true",
+    });
+  }
+  if (value.QASEY_ENABLE_DATADOG && value.DD_LLMOBS_AGENTLESS_ENABLED && !value.DD_API_KEY) {
+    context.addIssue({
+      code: "custom",
+      path: ["DD_API_KEY"],
+      message: "DD_API_KEY is required when Datadog agentless mode is enabled",
     });
   }
   if (value.QASEY_SANDBOX_ENDPOINT_TEMPLATE && !value.QASEY_SANDBOX_ENDPOINT_TEMPLATE.includes("{ordinal}")) {

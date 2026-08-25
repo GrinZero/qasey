@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mergeWorkspaceSkills, resolveAgentSkills } from "@mastra/core/skills";
@@ -6,12 +6,22 @@ import { afterAll, describe, expect, it } from "vitest";
 import { createTrustedRequestContext } from "../../src/platform/context/identity-resolver.ts";
 import { createScopedWorkspace } from "../../src/platform/workspace/create-workspace.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../../src/platform/context/schema.ts";
-import { GLOBAL_SKILLS_PATH, QASEY_MAIN_SKILLS_PATH } from "../../src/mastra/skill-paths.ts";
+import { firstExistingPath, GLOBAL_SKILLS_PATH, QASEY_MAIN_SKILLS_PATH } from "../../src/mastra/skill-paths.ts";
 
 const root = mkdtempSync(join(tmpdir(), "shared-mastra-workspace-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 describe("native scoped workspace", () => {
+  it("prefers an existing bundled path and falls back to the source tree", () => {
+    const sourcePath = join(root, "source");
+    const bundledPath = join(root, "bundled");
+    mkdirSync(sourcePath);
+    expect(firstExistingPath([join(root, "missing"), sourcePath])).toBe(sourcePath);
+
+    mkdirSync(bundledPath);
+    expect(firstExistingPath([bundledPath, sourcePath])).toBe(bundledPath);
+  });
+
   it("reuses one path within a session and separates different owners", async () => {
     const workspace = createScopedWorkspace({ root, production: false, enableCodeExecution: false });
     const alpha = await workspace.resolveFilesystem({ requestContext: context("alpha", "tenant-a", "task-1", "run-1", "author") });

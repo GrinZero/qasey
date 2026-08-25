@@ -46,7 +46,7 @@ pnpm dev
 - `QASEY_ENABLE_LOCAL_CODE_MODE`：仅为开发 Workspace 开启 LocalSandbox；Code Mode 自身不依赖宿主机或远程 sandbox
 - `QASEY_ENABLE_STUDIO_EDITOR`、`QASEY_ENABLE_STUDIO_MCP_PREVIEW`：生产默认关闭
 - `EDITOR_DATABASE_URL`：可选的独立 Editor 数据库；未配置时，生产 Editor 域由 `MastraCompositeStore` 回退到 `DATABASE_URL` 对应的 default store
-- `QASEY_ENABLE_DATADOG`、`DD_LLMOBS_ML_APP`
+- `QASEY_ENABLE_DATADOG`、`DD_LLMOBS_ML_APP`：启用 Mastra Datadog Bridge。集群默认通过 Datadog Agent 上报；本地没有 Agent 时可设置 `DD_LLMOBS_AGENTLESS_ENABLED=true`、`DD_SITE` 并通过密钥环境注入 `DD_API_KEY`。Slack dev Runtime tunnel 会传播 Datadog/W3C trace carrier，使云端入口和本地 Agent/LLM/Tool span 保持在同一条 trace 中
 
 本地开发默认把 Observability 写入 `QASEY_OBSERVABILITY_DB_PATH` 指向的 DuckDB；即使本机通过拆分 PG 配置连接共享应用数据库，也不会隐式初始化远端 Observability schema。确需联调时可显式设置 `OBSERVABILITY_DATABASE_URL`。生产仍使用独立的 PostgreSQL Observability 数据库。
 

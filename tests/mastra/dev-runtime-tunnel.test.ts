@@ -5,7 +5,11 @@ import {
   DevRuntimeTunnelError,
   DevRuntimeTunnelService,
 } from "../../src/mastra/applications/qasey/dev-runtime-service.ts";
-import type { DevRuntimeJob, DevRuntimeServerEvent } from "../../src/mastra/applications/qasey/dev-runtime-protocol.ts";
+import {
+  DEV_RUNTIME_RECONNECT_GRACE_MS,
+  type DevRuntimeJob,
+  type DevRuntimeServerEvent,
+} from "../../src/mastra/applications/qasey/dev-runtime-protocol.ts";
 
 const runtimeId = "local-ABCDEFG2";
 const instanceId = "00000000-0000-4000-8000-000000000001";
@@ -34,6 +38,14 @@ function job(): DevRuntimeJob {
     },
     resourceId: "resource-1",
     threadId: "thread-1",
+    trace: {
+      traceId: "6a8d122f000000006d4819df8dbc2a31",
+      parentSpanId: "2178a1ab9a296f75",
+      carrier: {
+        traceparent: "00-6a8d122f000000006d4819df8dbc2a31-2178a1ab9a296f75-01",
+        "x-datadog-tags": "_dd.p.llmobs_parent_id=2178a1ab9a296f75",
+      },
+    },
     delivery: { workspaceId: "T1" },
   };
 }
@@ -62,6 +74,7 @@ describe("DevRuntimeTunnelService", () => {
       instanceId,
       send: async event => {
         if (event.type !== "job") return;
+        expect(event.trace).toEqual(job().trace);
         await service.publishClientEvent({ runtimeId, instanceId, jobId: event.jobId, event: { type: "accepted", sequence: 1 } });
         await service.publishClientEvent({
           runtimeId,
@@ -147,9 +160,49 @@ describe("DevRuntimeTunnelService", () => {
       const rejection = expect(result).rejects.toMatchObject({ code: "runtime_disconnected" });
       await vi.advanceTimersByTimeAsync(1);
       await close();
-      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(DEV_RUNTIME_RECONNECT_GRACE_MS + 5_000);
 
       await rejection;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps an accepted job alive while the runtime reconnects", async () => {
+    vi.useFakeTimers();
+    try {
+      const service = createService();
+      const oldInstanceId = instanceId;
+      const newInstanceId = "00000000-0000-4000-8000-000000000004";
+      const closeOld = await service.openConnection({
+        runtimeId,
+        instanceId: oldInstanceId,
+        send: async event => {
+          if (event.type === "job") {
+            await service.publishClientEvent({
+              runtimeId,
+              instanceId: oldInstanceId,
+              jobId: event.jobId,
+              event: { type: "accepted", sequence: 1 },
+            });
+          }
+        },
+      });
+      const result = service.runRemoteJob(job());
+      await vi.advanceTimersByTimeAsync(1);
+      await closeOld();
+
+      const closeNew = await service.openConnection({ runtimeId, instanceId: newInstanceId, send: vi.fn() });
+      await vi.advanceTimersByTimeAsync(5_000);
+      await service.publishClientEvent({
+        runtimeId,
+        instanceId: newInstanceId,
+        jobId: job().jobId,
+        event: { type: "completed", sequence: 2, result: { text: "reconnected result" } },
+      });
+
+      await expect(result).resolves.toEqual({ text: "reconnected result" });
+      await closeNew();
     } finally {
       vi.useRealTimers();
     }

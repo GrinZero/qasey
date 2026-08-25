@@ -5,10 +5,12 @@ import {
   QaseyRequestContextSchema,
 } from "../../../../packages/contracts/src/index.ts";
 import type { QaseyAgentRuntimeEvent } from "./service.ts";
+import { QaseyRemoteTraceContextSchema } from "./trace-carrier.ts";
 
 export const DEV_RUNTIME_BINDING_TTL_MS = 8 * 60 * 60_000;
 export const DEV_RUNTIME_PRESENCE_TTL_MS = 45_000;
 export const DEV_RUNTIME_HEARTBEAT_MS = 15_000;
+export const DEV_RUNTIME_RECONNECT_GRACE_MS = 20_000;
 export const DEV_RUNTIME_ACCEPT_TIMEOUT_MS = 5_000;
 export const DEV_RUNTIME_JOB_TTL_MS = 60 * 60_000;
 export const DEV_RUNTIME_APPROVAL_TTL_MS = 10 * 60_000;
@@ -25,6 +27,7 @@ export const DevRuntimeJobSchema = z.object({
   context: QaseyRequestContextSchema,
   resourceId: z.string().min(1),
   threadId: z.string().min(1),
+  trace: QaseyRemoteTraceContextSchema.optional(),
   delivery: z.object({
     workspaceId: z.string().min(1),
     installationId: z.string().min(1).optional(),

@@ -11,7 +11,7 @@ export interface SlackStatusTarget {
 
 const WORKING_REACTION = "👀";
 // Slack validates both `status` and each `loading_messages` entry at <= 50 characters.
-const STATUS_MAX_CHARS = 50;
+const STATUS_MAX_CHARS = 150;
 const SENSITIVE_KEY = /(?:^|_)(?:token|access_?token|api_?key|authorization|cookie|credential|password|private_?key|secret|session)(?:$|_)/i;
 const SENSITIVE_VALUE = /\b(?:Bearer\s+[A-Za-z0-9._~+\/-]+=*|xox[a-z]-[A-Za-z0-9-]+)\b/gi;
 const INLINE_SECRET = /\b(?:token|access[_-]?token|api[_-]?key|authorization|cookie|password|private[_-]?key|secret|session)\s*[:=]\s*["']?[^\s,;"']+/gi;

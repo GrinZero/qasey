@@ -11,6 +11,7 @@ import {
   DEV_RUNTIME_HEARTBEAT_MS,
   DEV_RUNTIME_JOB_TTL_MS,
   DEV_RUNTIME_PRESENCE_TTL_MS,
+  DEV_RUNTIME_RECONNECT_GRACE_MS,
   DevRuntimeClientEventSchema,
   DevRuntimeIdSchema,
   DevRuntimeInstanceIdSchema,
@@ -239,6 +240,7 @@ export class DevRuntimeTunnelService {
     let acceptTimer: ReturnType<typeof setTimeout> | undefined;
     let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
     let presenceTimer: ReturnType<typeof setInterval> | undefined;
+    let disconnectedAt: number | undefined;
 
     return new Promise<unknown>((resolve, reject) => {
       const cleanup = async () => {
@@ -328,9 +330,15 @@ export class DevRuntimeTunnelService {
             if (settled || checkingPresence) return;
             checkingPresence = true;
             void this.isOnline(job.runtimeId).then(online => {
-              if (!online) finish("runtime_disconnected", () => reject(new DevRuntimeTunnelError(
+              if (online) {
+                disconnectedAt = undefined;
+                return;
+              }
+              disconnectedAt ??= Date.now();
+              if (Date.now() - disconnectedAt < DEV_RUNTIME_RECONNECT_GRACE_MS) return;
+              finish("runtime_disconnected", () => reject(new DevRuntimeTunnelError(
                 "runtime_disconnected",
-                `Runtime ${job.runtimeId} 已断开连接。`,
+                `Runtime ${job.runtimeId} 在 ${DEV_RUNTIME_RECONNECT_GRACE_MS / 1_000} 秒内未恢复连接。`,
                 502,
               )));
             }).catch(error => finish("presence_failed", () => reject(error))).finally(() => {

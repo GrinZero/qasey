@@ -1,4 +1,4 @@
-import "./instrumentation.ts";
+import { registerDatadogContextBridge } from "./instrumentation.ts";
 import { Mastra } from "@mastra/core/mastra";
 import type { CustomSpanFormatter } from "@mastra/core/observability";
 import { DatadogBridge } from "@mastra/datadog";
@@ -71,6 +71,7 @@ const formatDatadogSpan: CustomSpanFormatter = span => {
     tenantId: span.requestContext.tenantId,
     userId: span.requestContext.userId,
     channel: span.requestContext.channel,
+    sessionId: span.requestContext.sessionId,
     threadId: span.requestContext.mastra__threadId,
     taskId: span.requestContext.taskId,
   } : undefined;
@@ -86,13 +87,16 @@ const formatDatadogSpan: CustomSpanFormatter = span => {
 const datadogBridge = config.QASEY_ENABLE_DATADOG
   ? new DatadogBridge({
       mlApp: config.DD_LLMOBS_ML_APP!,
+      site: config.DD_SITE,
+      ...(config.DD_API_KEY ? { apiKey: config.DD_API_KEY } : {}),
       service: config.DD_SERVICE,
       env: config.DD_ENV ?? config.NODE_ENV,
-      agentless: false,
-      requestContextKeys: ["applicationId", "requestId", "tenantId", "userId", "mastra__threadId", "taskId", "channel"],
+      agentless: config.DD_LLMOBS_AGENTLESS_ENABLED,
+      requestContextKeys: ["applicationId", "requestId", "tenantId", "userId", "sessionId", "mastra__threadId", "taskId", "channel"],
       customSpanFormatter: formatDatadogSpan,
     })
   : undefined;
+registerDatadogContextBridge(datadogBridge);
 
 const permissionStore = config.NODE_ENV === "production" && config.DATABASE_URL
   ? new PrismaPermissionStore(applicationDatabase!.client)

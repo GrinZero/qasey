@@ -36,11 +36,14 @@ describe("shared runtime configuration", () => {
     expect(config.OBSERVABILITY_DATABASE_URL).toBeUndefined();
     expect(config.QASEY_ENABLE_DATADOG).toBe(false);
     expect(config.QASEY_DATADOG_CAPTURE_CONTENT).toBe(false);
+    expect(config.DD_LLMOBS_AGENTLESS_ENABLED).toBe(false);
+    expect(config.DD_SITE).toBe("datadoghq.com");
     expect(config.DD_SERVICE).toBe("qasey");
     expect(config.METERSPHERE_BASE_URL).toBe("https://metersphere.devops.moego.pet");
     expect(config.METERSPHERE_PROJECT_ID).toBe("20a78db9-19aa-11ee-a261-5a66b98c4036");
     expect(config.SLACK_CHANNEL_MODE).toBe("auto");
     expect(config.QASEY_SANDBOX_ENDPOINT_TEMPLATE).toBeUndefined();
+    expect(config.QASEY_DEV_RUNTIME_ID).toBeUndefined();
   });
 
   it("uses Sandbox endpoint presence as capability configuration", () => {
@@ -120,6 +123,17 @@ describe("shared runtime configuration", () => {
     } as NodeJS.ProcessEnv)).toThrow(/ns-testing/);
   });
 
+  it("accepts an explicit stable local runtime identity", () => {
+    expect(loadConfig({
+      NODE_ENV: "development",
+      QASEY_DEV_RUNTIME_ID: "local-ABCDEFG2",
+    } as NodeJS.ProcessEnv).QASEY_DEV_RUNTIME_ID).toBe("local-ABCDEFG2");
+    expect(() => loadConfig({
+      NODE_ENV: "development",
+      QASEY_DEV_RUNTIME_ID: "local-invalid",
+    } as NodeJS.ProcessEnv)).toThrow(/QASEY_DEV_RUNTIME_ID/);
+  });
+
   it("requires an LLM application name when Datadog is enabled", () => {
     expect(() => loadConfig({
       NODE_ENV: "production",
@@ -140,6 +154,26 @@ describe("shared runtime configuration", () => {
     expect(config.QASEY_ENABLE_DATADOG).toBe(true);
     expect(config.DD_SERVICE).toBe("qasey-worker");
     expect(config.QASEY_DATADOG_CAPTURE_CONTENT).toBe(true);
+  });
+
+  it("requires an API key only for agentless Datadog runtimes", () => {
+    expect(() => loadConfig({
+      NODE_ENV: "development",
+      QASEY_ENABLE_DATADOG: "true",
+      DD_LLMOBS_ML_APP: "qasey",
+      DD_LLMOBS_AGENTLESS_ENABLED: "true",
+    } as NodeJS.ProcessEnv)).toThrow(/DD_API_KEY/);
+
+    const config = loadConfig({
+      NODE_ENV: "development",
+      QASEY_ENABLE_DATADOG: "true",
+      DD_LLMOBS_ML_APP: "qasey",
+      DD_LLMOBS_AGENTLESS_ENABLED: "true",
+      DD_API_KEY: "test-api-key",
+      DD_SITE: "us5.datadoghq.com",
+    } as NodeJS.ProcessEnv);
+    expect(config.DD_LLMOBS_AGENTLESS_ENABLED).toBe(true);
+    expect(config.DD_SITE).toBe("us5.datadoghq.com");
   });
 
   it("parses explicit Studio capability switches", () => {

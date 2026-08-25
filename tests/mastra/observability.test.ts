@@ -1,5 +1,6 @@
 import type { Mastra } from "@mastra/core/mastra";
 import { RequestContext } from "@mastra/core/request-context";
+import { SpanType } from "@mastra/core/observability";
 import { describe, expect, it, vi } from "vitest";
 import type { QaseyRequestContext } from "../../packages/contracts/src/index.ts";
 import {
@@ -38,12 +39,39 @@ describe("Qasey observability", () => {
 
     expect(createChildSpan).toHaveBeenCalledWith(expect.objectContaining({
       name: "qasey request",
+      type: SpanType.WORKFLOW_RUN,
       metadata: expect.objectContaining({ requestId: "request-1" }),
     }));
     expect(startSpan).not.toHaveBeenCalled();
     expect(result.tracingContext?.currentSpan).toBe(childSpan);
     expect(requestContext.get("qasey__traceId")).toBe("trace-1");
     expect(requestContext.get("qasey__requestSpanId")).toBe("child-span");
+  });
+
+  it("rebuilds a remote workflow parent when no live tracing context is available", () => {
+    const remoteSpan = { id: "local-span", traceId: "abc123" };
+    const startSpan = vi.fn(() => remoteSpan);
+    const mastra = {
+      observability: { getDefaultInstance: () => ({ startSpan }) },
+    } as unknown as Mastra;
+    const requestContext = new RequestContext();
+
+    const result = startQaseyRequestSpan(
+      mastra,
+      requestContext,
+      context,
+      "run-remote",
+      {},
+      undefined,
+      { traceId: "abc123", parentSpanId: "def456" },
+    );
+
+    expect(startSpan).toHaveBeenCalledWith(expect.objectContaining({
+      type: SpanType.WORKFLOW_RUN,
+      traceId: "abc123",
+      externalParentSpanId: "def456",
+    }));
+    expect(result.tracingContext?.currentSpan).toBe(remoteSpan);
   });
 
   it("correlates dynamic tool-resolution spans without storing a live span in RequestContext", () => {
