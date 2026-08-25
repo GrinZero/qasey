@@ -12,7 +12,7 @@ import {
 } from "../../packages/contracts/src/index.ts";
 import {
   CodeTaskWorkerManifestSchema,
-  MastraAcpCodexBackend,
+  NativeMastraCodingBackend,
   executionProfile,
   executionProfileHash,
 } from "../../packages/code-task/src/index.ts";
@@ -40,9 +40,9 @@ try {
   const initialPaths = await changedPaths(manifest.workspaceRoot);
   let agentSummary = "Deterministic execution profile; no coding agent was started.";
   if (profile.useAgent) {
-    await emit("agent.started", "Starting ACP coding backend");
+    await emit("agent.started", "Starting native Mastra coding agent");
     agentSummary = await runAgent();
-    await emit("agent.completed", "ACP coding backend completed");
+    await emit("agent.completed", "Native Mastra coding agent completed");
   }
   abortController.signal.throwIfAborted();
   const pathsForChecks = await changedPaths(manifest.workspaceRoot);
@@ -84,9 +84,7 @@ try {
 }
 
 async function runAgent(): Promise<string> {
-  const command = process.env.QASEY_ACP_COMMAND?.trim() || "codex-acp";
-  const args = parseArgs(process.env.QASEY_ACP_ARGS);
-  const output = await new MastraAcpCodexBackend(command, args).run({
+  const output = await new NativeMastraCodingBackend().run({
     taskId: spec.taskId,
     workspaceRoot: manifest.workspaceRoot,
     context: manifest.context,
@@ -95,7 +93,7 @@ async function runAgent(): Promise<string> {
     traceContext: spec.traceContext,
     abortSignal: abortController.signal,
   });
-  await emit("agent.backend", "ACP backend run associated", { backendRunId: output.backendRunId });
+  await emit("agent.backend", "Native Mastra Agent run associated", { backendRunId: output.backendRunId });
   return safeText(output.summary);
 }
 
@@ -353,9 +351,9 @@ function provenance() {
   return {
     imageDigest: process.env.QASEY_IMAGE_DIGEST?.trim() || "unknown-internal-image",
     profileHash: executionProfileHash(profile),
-    mastraAcpVersion: process.env.QASEY_MASTRA_ACP_VERSION?.trim() || "0.4.0",
-    codexAcpVersion: process.env.QASEY_CODEX_ACP_VERSION?.trim() || "unverified",
-    codexVersion: process.env.QASEY_CODEX_VERSION?.trim() || "unverified",
+    agentBackend: "native-mastra" as const,
+    mastraVersion: process.env.QASEY_MASTRA_VERSION?.trim() || "unverified",
+    model: process.env.QASEY_CODE_AGENT_MODEL?.trim() || "gpt-5.6-sol",
   };
 }
 
@@ -372,15 +370,6 @@ function resolveContained(rootInput: string, path: string): string {
   return target;
 }
 
-function parseArgs(value: string | undefined): string[] {
-  if (!value?.trim()) return [];
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    if (Array.isArray(parsed) && parsed.every(item => typeof item === "string")) return parsed;
-  } catch { /* reject below */ }
-  throw new Error("QASEY_ACP_ARGS must be a JSON string array in the sandbox worker");
-}
-
 function sha256(value: string | Buffer): string { return createHash("sha256").update(value).digest("hex"); }
 
 function isRuntimeGeneratedPath(path: string): boolean {
@@ -390,7 +379,7 @@ function isRuntimeGeneratedPath(path: string): boolean {
 }
 
 function fixedCheckEnvironment(): Record<string, string> {
-  const keys = ["HOME", "CODEX_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "CI", "BASE_URL", "QASEY_E2E_BASE_URL", "QASEY_E2E_STORAGE_STATE_PATH"];
+  const keys = ["HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "CI", "BASE_URL", "QASEY_E2E_BASE_URL", "QASEY_E2E_STORAGE_STATE_PATH"];
   return Object.fromEntries(keys.flatMap(key => process.env[key] === undefined ? [] : [[key, process.env[key]!]]));
 }
 

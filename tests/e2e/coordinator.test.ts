@@ -180,9 +180,9 @@ function fakeRunner(submitted: CodeTaskSpec[]): CodeTaskRunner {
         provenance: {
           imageDigest: "local-development",
           profileHash: sha,
-          mastraAcpVersion: "0.4.0",
-          codexAcpVersion: "1.6.2",
-          codexVersion: "test",
+          agentBackend: "native-mastra",
+          mastraVersion: "1.59.0",
+          model: "gpt-5.6-sol",
         },
       };
       const now = new Date().toISOString();

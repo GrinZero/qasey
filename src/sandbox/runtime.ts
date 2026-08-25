@@ -381,7 +381,6 @@ export class QaseySandboxRuntime {
     if (await fileExists(taskRoot)) throw new HttpError(409, "Code task attempt already exists");
     await mkdir(join(taskRoot, "artifacts"), { recursive: true, mode: 0o700 });
     await Promise.all([
-      mkdir(join(taskRoot, "home", ".codex"), { recursive: true, mode: 0o700 }),
       mkdir(join(taskRoot, "home", ".config"), { recursive: true, mode: 0o700 }),
       mkdir(join(taskRoot, "home", ".cache"), { recursive: true, mode: 0o700 }),
       mkdir(join(taskRoot, "home", ".local", "share"), { recursive: true, mode: 0o700 }),
@@ -525,7 +524,6 @@ export class QaseySandboxRuntime {
     const environment: NodeJS.ProcessEnv = {
       PATH: session.environment.PATH,
       HOME: home,
-      CODEX_HOME: join(home, ".codex"),
       XDG_CONFIG_HOME: join(home, ".config"),
       XDG_CACHE_HOME: join(home, ".cache"),
       XDG_DATA_HOME: join(home, ".local", "share"),
@@ -533,12 +531,10 @@ export class QaseySandboxRuntime {
       NO_BROWSER: "1",
       GH_PROMPT_DISABLED: "1",
       GIT_TERMINAL_PROMPT: "0",
-      QASEY_ACP_COMMAND: process.env.QASEY_ACP_COMMAND?.trim() || "codex-acp",
-      QASEY_ACP_ARGS: JSON.stringify(process.env.QASEY_ACP_ARGS?.trim().split(/\s+/u).filter(Boolean) ?? []),
       QASEY_IMAGE_DIGEST: process.env.QASEY_IMAGE_DIGEST?.trim() || "unknown-internal-image",
-      QASEY_MASTRA_ACP_VERSION: "0.4.0",
-      QASEY_CODEX_ACP_VERSION: "1.6.2",
-      QASEY_CODEX_VERSION: process.env.QASEY_CODEX_VERSION?.trim() || "0.148.0",
+      QASEY_MASTRA_VERSION: "1.59.0",
+      QASEY_CODE_AGENT_MODEL: process.env.QASEY_CODE_AGENT_MODEL?.trim() || "gpt-5.6-sol",
+      QASEY_CODE_AGENT_MAX_STEPS: process.env.QASEY_CODE_AGENT_MAX_STEPS?.trim() || "80",
     };
     for (const key of allowed) {
       const value = process.env[key];

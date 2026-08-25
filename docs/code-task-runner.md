@@ -50,13 +50,20 @@ Git lifecycle is owned by `CodeTaskRunner` and the Sandbox runtime:
 5. Collect and validate the patch and artifacts.
 
 Inside the worker, Mastra `LocalFilesystem` is rooted at that worktree with
-containment enabled. A local Mastra `Workspace` is passed to `AcpAgent`, which
-starts `codex-acp`. Mastra provides the Agent's file boundary; it does not clone
-repositories or choose worktrees.
+containment enabled. A dedicated native Mastra `Agent` receives the repository
+Workspace and discovers only the frozen repository-local Skill paths. Write
+tools are guarded by the frozen `allowedPaths`; delete and arbitrary shell tools
+are not exposed. Mastra provides the Agent's file boundary; it does not clone
+repositories, choose worktrees, or decide which checks to run.
 
 Author, repair, and verifier attempts therefore share Git objects but never a
-working directory or ACP session. The verifier always receives the persisted
+working directory or Agent session. The verifier always receives the persisted
 patch in a fresh detached worktree.
+
+`qasey-main` remains the supervisor and lifecycle entrypoint, but it does not
+receive repository write access. The durable E2E workflow invokes the dedicated
+code Agent in the isolated execution plane. This keeps lifecycle decisions,
+repository mutation, and deterministic verification as separate trust zones.
 
 ## Fixed Web E2E configuration
 
@@ -98,7 +105,9 @@ QASEY_E2E_BASE_URL -> BASE_URL
 `moego-e2e-autotest` reads `BASE_URL`. If `QASEY_E2E_BASE_URL` is absent from
 the Sandbox runtime, no alias is injected and the repository's own T2 default
 remains active. Request payloads cannot provide either value. Model credentials
-are absent from the verifier profile.
+and the matching `OPENAI_BASE_URL`, when configured, are available only to
+Agent-backed author, repair, and read-only review profiles. They are absent
+from the deterministic verifier profile.
 
 ## Local verification
 

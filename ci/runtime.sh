@@ -29,6 +29,12 @@ case "${1:-api}" in
     exec node .mastra/worker/index.mjs
     ;;
   sandbox)
+    if [ "${NODE_ENV:-development}" = "production" ] \
+      && [ -z "${CODEX_API_KEY:-}" ] \
+      && [ -z "${OPENAI_API_KEY:-}" ]; then
+      echo "Sandbox authoring requires CODEX_API_KEY or OPENAI_API_KEY" >&2
+      exit 78
+    fi
     exec node dist/sandbox-runtime.mjs
     ;;
   *)

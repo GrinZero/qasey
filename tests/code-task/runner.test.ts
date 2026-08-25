@@ -54,6 +54,6 @@ function reviewSpec(): CodeTaskSpec {
 function successfulResult(): CodeTaskResult {
   return {
     status: "succeeded", summary: "reviewed", changedPaths: [], changes: [], checks: [], artifacts: [],
-    provenance: { imageDigest: "sha256:test", profileHash: "c".repeat(64), mastraAcpVersion: "0.4.0", codexAcpVersion: "1.6.2", codexVersion: "0.148.0" },
+    provenance: { imageDigest: "sha256:test", profileHash: "c".repeat(64), agentBackend: "native-mastra", mastraVersion: "1.59.0", model: "gpt-5.6-sol" },
   };
 }

@@ -36,4 +36,14 @@ describe("fixed Web E2E repository execution configuration", () => {
   it("maps the Sandbox profile base URL name to the target repository name", () => {
     expect(executionProfile("web-e2e-verifier").environmentAliases).toEqual({ QASEY_E2E_BASE_URL: "BASE_URL" });
   });
+
+  it("passes the configured model endpoint only to agent-backed profiles", () => {
+    expect(executionProfile("web-e2e-author").allowedEnvironmentKeys).toEqual(expect.arrayContaining([
+      "OPENAI_API_KEY",
+      "OPENAI_BASE_URL",
+    ]));
+    expect(executionProfile("web-e2e-repair").allowedEnvironmentKeys).toContain("OPENAI_BASE_URL");
+    expect(executionProfile("code-review-readonly").allowedEnvironmentKeys).toContain("OPENAI_BASE_URL");
+    expect(executionProfile("web-e2e-verifier").allowedEnvironmentKeys).not.toContain("OPENAI_BASE_URL");
+  });
 });

@@ -115,7 +115,7 @@ export class E2ECoordinator {
     run = await this.transition(owner, run, "preparing_workspace", "Preparing pooled Sandbox CodeTask workspace");
     const branch = run.branch ?? `qasey/${run.id}`;
     run = await this.repository.update(owner, run.id, { branch, baseSha: run.baseSha });
-    run = await this.transition(owner, run, "authoring", isQaRepair ? "Applying QA feedback in Sandbox ACP worker" : "Delegating E2E authoring to Sandbox ACP worker");
+    run = await this.transition(owner, run, "authoring", isQaRepair ? "Applying QA feedback with the Sandbox Mastra code agent" : "Delegating E2E authoring to the Sandbox Mastra code agent");
     const runner = await this.options.codeTasks!.forScope({ ...owner, sessionId: run.sourceSessionId });
     let inputPatchRef = isQaRepair ? run.artifacts.find(item => item.kind === "patch" && item.id === `${run.id}:patch`) : undefined;
     let priorFailure = "";

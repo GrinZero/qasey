@@ -117,8 +117,8 @@ export const ConfigSchema = z.object({
   QASEY_SANDBOX_DESKTOP_HEIGHT: z.coerce.number().int().min(600).max(2160).default(900),
   QASEY_WORKSPACE_RETENTION_MS: z.coerce.number().int().min(60_000).default(7 * 24 * 60 * 60_000),
   QASEY_SANDBOX_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(10_000).default(30 * 60_000),
-  QASEY_ACP_COMMAND: z.string().default("codex-acp"),
-  QASEY_ACP_ARGS: z.string().default("").transform(value => value.trim() ? value.trim().split(/\s+/) : []),
+  QASEY_CODE_AGENT_MODEL: z.string().min(1).default("gpt-5.6-sol"),
+  QASEY_CODE_AGENT_MAX_STEPS: z.coerce.number().int().min(1).max(500).default(80),
 }).superRefine((value, context) => {
   if (value.QASEY_MEMORY_INPUT_TOKEN_LIMIT <= value.QASEY_MEMORY_MESSAGE_TOKENS + value.QASEY_MEMORY_OBSERVATION_TOKENS) {
     context.addIssue({

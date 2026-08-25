@@ -227,9 +227,9 @@ export type CodeTaskChange = z.infer<typeof CodeTaskChangeSchema>;
 export const CodeTaskProvenanceSchema = z.object({
   imageDigest: z.string().min(1),
   profileHash: z.string().regex(/^[a-f0-9]{64}$/u),
-  mastraAcpVersion: z.string().min(1),
-  codexAcpVersion: z.string().min(1),
-  codexVersion: z.string().min(1),
+  agentBackend: z.literal("native-mastra"),
+  mastraVersion: z.string().min(1),
+  model: z.string().min(1),
 }).strict();
 export const CodeTaskResultSchema = z.object({
   status: z.enum(["succeeded", "failed", "cancelled", "lost"]),
