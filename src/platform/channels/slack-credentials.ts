@@ -26,14 +26,18 @@ export function encryptSlackCredential(
   value: string,
   masterKey: string,
   context: SlackCredentialContext,
+  keyId = "default",
 ): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u.test(keyId)) {
+    throw new Error("Slack credential key ID is invalid");
+  }
   const nonce = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", keyFrom(masterKey), nonce);
   cipher.setAAD(additionalData(context));
   const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
   return [
     "v1",
-    "default",
+    keyId,
     nonce.toString("base64url"),
     cipher.getAuthTag().toString("base64url"),
     encrypted.toString("base64url"),
@@ -44,9 +48,10 @@ export function decryptSlackCredential(
   value: string,
   masterKey: string,
   context: SlackCredentialContext,
+  expectedKeyId = "default",
 ): string {
   const [version, keyId, nonce, tag, encrypted] = value.split(".");
-  if (version !== "v1" || keyId !== "default" || !nonce || !tag || !encrypted) {
+  if (version !== "v1" || keyId !== expectedKeyId || !nonce || !tag || !encrypted) {
     throw new Error("Unsupported Slack credential format");
   }
   const decipher = createDecipheriv("aes-256-gcm", keyFrom(masterKey), Buffer.from(nonce, "base64url"));

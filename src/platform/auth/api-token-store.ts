@@ -34,18 +34,23 @@ export interface CreatedApiToken {
   record: ApiTokenRecord;
 }
 
+export type ApiTokenUsePolicy = (record: ApiTokenRecord) => boolean | Promise<boolean>;
+
 export interface ApiTokenStore {
   init?(): Promise<void>;
   healthCheck?(): Promise<void>;
   create(input: CreateApiTokenInput): Promise<CreatedApiToken>;
   list(tenantId: string): Promise<readonly ApiTokenRecord[]>;
   revoke(tenantId: string, id: string): Promise<boolean>;
+  revokeByCreator(tenantId: string, createdBy: string): Promise<number>;
   authenticate(token: string): Promise<OAuthPrincipal | undefined>;
   close?(): Promise<void>;
 }
 
 export class InMemoryApiTokenStore implements ApiTokenStore {
   private readonly records = new Map<string, StoredApiToken>();
+
+  constructor(private readonly authorizeUse: ApiTokenUsePolicy = () => true) {}
 
   async init(): Promise<void> {}
   async healthCheck(): Promise<void> {}
@@ -70,10 +75,23 @@ export class InMemoryApiTokenStore implements ApiTokenStore {
     return true;
   }
 
+  async revokeByCreator(tenantId: string, createdBy: string): Promise<number> {
+    const revokedAt = new Date().toISOString();
+    let count = 0;
+    for (const record of this.records.values()) {
+      if (record.tenantId === tenantId && record.createdBy === createdBy && !record.revokedAt) {
+        record.revokedAt = revokedAt;
+        count += 1;
+      }
+    }
+    return count;
+  }
+
   async authenticate(token: string): Promise<OAuthPrincipal | undefined> {
     const id = tokenId(token);
     const record = id ? this.records.get(id) : undefined;
     if (!record || !isUsable(record) || !tokensEqual(record.tokenHash, tokenHash(token))) return undefined;
+    if (!await this.authorizeUse(publicRecord(record))) return undefined;
     record.lastUsedAt = new Date().toISOString();
     return tokenPrincipal(record);
   }
@@ -84,7 +102,7 @@ export class InMemoryApiTokenStore implements ApiTokenStore {
 export class PrismaApiTokenStore implements ApiTokenStore {
   private initialized?: Promise<void>;
 
-  constructor(private readonly prisma: PrismaClient) {}
+  constructor(private readonly prisma: PrismaClient, private readonly authorizeUse: ApiTokenUsePolicy = () => true) {}
 
   init(): Promise<void> {
     this.initialized ??= this.prisma.$connect();
@@ -134,6 +152,14 @@ export class PrismaApiTokenStore implements ApiTokenStore {
     return result.count > 0;
   }
 
+  async revokeByCreator(tenantId: string, createdBy: string): Promise<number> {
+    await this.ready();
+    const result = await this.prisma.platformApiToken.updateMany({
+      where: { tenantId, createdBy, revokedAt: null }, data: { revokedAt: new Date() },
+    });
+    return result.count;
+  }
+
   async authenticate(token: string): Promise<OAuthPrincipal | undefined> {
     const id = tokenId(token);
     if (!id) return undefined;
@@ -141,8 +167,10 @@ export class PrismaApiTokenStore implements ApiTokenStore {
     const row = await this.prisma.platformApiToken.findUnique({ where: { id } });
     if (!row || row.revokedAt || (row.expiresAt && row.expiresAt.getTime() <= Date.now())
       || !tokensEqual(Buffer.from(row.tokenHash), tokenHash(token))) return undefined;
+    const record = rowToRecord(row);
+    if (!await this.authorizeUse(record)) return undefined;
     await this.prisma.platformApiToken.update({ where: { id }, data: { lastUsedAt: new Date() } });
-    return tokenPrincipal(rowToRecord(row));
+    return tokenPrincipal(record);
   }
 
   async close(): Promise<void> {}

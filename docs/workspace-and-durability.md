@@ -23,7 +23,7 @@ agent directory. Global reusable Skills remain on the global Workspace. Skills
 are read-only definitions and do not require per-session filesystem isolation.
 
 E2E does not use a second local `WorkspaceManager`. The Sandbox CodeTask
-runtime owns the shared Git mirror, attempt-specific worktrees, allowed-path
+runtime owns the trusted Git mirror, attempt-specific independent checkouts, allowed-path
 validation, and artifact collection. The author/verifier clean-workspace
 discipline remains a Qasey domain workflow, while its paths and artifacts are
 owner scoped. The repository storage invariant is documented in

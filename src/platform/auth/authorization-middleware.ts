@@ -174,6 +174,11 @@ export function createAuthorizationMiddleware(options: AuthorizationMiddlewareOp
     const resource = classified?.resourceType === "protocol"
       ? await agentResourceForProtocolRequest(c.req, classified, catalog)
       : classified;
+    if (resource) {
+      requestContext.set("platform-route-id", resource.resourceId);
+      requestContext.set("platform-resource-type", resource.resourceType);
+      requestContext.set("applicationId", resource.applicationId);
+    }
     if (resource?.public) return next();
     const principal = await options.resolvePrincipal(requestContext, c.req);
     if (!principal && resource?.downstreamAuthenticated) {

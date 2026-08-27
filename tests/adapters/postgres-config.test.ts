@@ -1,9 +1,8 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { databaseUrlsFromPgParts, loadConfig } from "../../packages/adapters/src/config.ts";
 
 const splitPostgresEnv = {
-  PG_URL: "postgres.testing.internal",
+  PG_URL: "postgres.testing.example.com",
   PG_PORT: "5432",
   PG_QASEY_USER_NAME: "qasey-user",
   PG_QASEY_PASSWORD: "password/with:special@chars",
@@ -12,8 +11,8 @@ const splitPostgresEnv = {
 describe("split PostgreSQL configuration", () => {
   it("derives application and observability URLs on the same instance", () => {
     expect(databaseUrlsFromPgParts(splitPostgresEnv)).toEqual({
-      application: "postgresql://qasey-user:password%2Fwith%3Aspecial%40chars@postgres.testing.internal:5432/moego_qasey",
-      observability: "postgresql://qasey-user:password%2Fwith%3Aspecial%40chars@postgres.testing.internal:5432/moego_qasey_observability",
+      application: "postgresql://qasey-user:password%2Fwith%3Aspecial%40chars@postgres.testing.example.com:5432/qasey",
+      observability: "postgresql://qasey-user:password%2Fwith%3Aspecial%40chars@postgres.testing.example.com:5432/qasey_observability",
     });
   });
 
@@ -30,31 +29,31 @@ describe("split PostgreSQL configuration", () => {
   it("satisfies production storage requirements from split values", () => {
     const config = loadConfig({
       NODE_ENV: "production",
+      QASEY_DEPLOYMENT_MODE: "distributed",
+      QASEY_INSTANCE_ID: "production-a",
+      QASEY_DEPLOYMENT_ID: "production",
+      DD_VERSION: "sha256-release-a",
       ...splitPostgresEnv,
-      QASEY_ENABLE_STUDIO_EDITOR: "true",
       GOOGLE_CLIENT_ID: "google-client-id",
       GOOGLE_CLIENT_SECRET: "google-client-secret",
       GOOGLE_COOKIE_PASSWORD: "a-secure-cookie-password-over-32-chars",
-      WORKER_TOKEN: "dedicated-worker-token",
-      REDIS_HOST: "redis.internal",
+      GOOGLE_ALLOWED_DOMAINS: "example.com",
+      QASEY_SINGLE_TENANT_ID: "example",
+      QASEY_CREDENTIAL_ENCRYPTION_KEY: "connection-credential-key-over-32-bytes",
+      WORKER_TOKEN: "dedicated-worker-token-with-at-least-32-bytes",
+      REDIS_HOST: "redis.example.com",
       REDIS_PORT: "6379",
       REDIS_PASSWORD: "redis-password",
       REDIS_TLS: "true",
-      QASEY_SANDBOX_ENDPOINT_TEMPLATE: "http://moego-qasey-sandbox-{ordinal}.internal:4120",
+      QASEY_ARTIFACT_STORE: "s3",
+      QASEY_ARTIFACT_S3_BUCKET: "qasey-production-artifacts",
+      QASEY_ARTIFACT_S3_REGION: "us-east-1",
+      QASEY_SANDBOX_ENDPOINT_TEMPLATE: "https://qasey-sandbox-{ordinal}.example.com",
+      QASEY_SANDBOX_CONTROL_KEY: "sandbox-control-key-with-32-bytes-minimum",
+      QASEY_SANDBOX_LEASE_KEY: "sandbox-lease-key-that-is-separate-32-bytes",
     });
-    expect(config.DATABASE_URL).toContain("/moego_qasey");
-    expect(config.EDITOR_DATABASE_URL).toBeUndefined();
-    expect(config.OBSERVABILITY_DATABASE_URL).toContain("/moego_qasey_observability");
-  });
-
-  it("keeps the local Editor on filesystem storage without an explicit URL", () => {
-    const config = loadConfig({
-      NODE_ENV: "development",
-      ...splitPostgresEnv,
-      QASEY_ENABLE_STUDIO_EDITOR: "true",
-    });
-
-    expect(config.EDITOR_DATABASE_URL).toBeUndefined();
+    expect(config.DATABASE_URL).toContain("/qasey");
+    expect(config.OBSERVABILITY_DATABASE_URL).toContain("/qasey_observability");
   });
 
   it("keeps local observability on DuckDB unless a remote URL is explicit", () => {
@@ -63,12 +62,12 @@ describe("split PostgreSQL configuration", () => {
       ...splitPostgresEnv,
     });
 
-    expect(config.DATABASE_URL).toContain("/moego_qasey");
+    expect(config.DATABASE_URL).toContain("/qasey");
     expect(config.OBSERVABILITY_DATABASE_URL).toBeUndefined();
   });
 
   it("rejects incomplete split configuration", () => {
-    expect(() => databaseUrlsFromPgParts({ PG_URL: "postgres.testing.internal" })).toThrow(
+    expect(() => databaseUrlsFromPgParts({ PG_URL: "postgres.testing.example.com" })).toThrow(
       /PG_URL, PG_PORT, PG_QASEY_USER_NAME and PG_QASEY_PASSWORD/,
     );
   });
@@ -76,7 +75,7 @@ describe("split PostgreSQL configuration", () => {
   it("ignores deployment-only split values before secrets are injected in tests", () => {
     const config = loadConfig({
       NODE_ENV: "test",
-      PG_URL: "postgres.testing.internal",
+      PG_URL: "postgres.testing.example.com",
       PG_PORT: "5432",
       PG_QASEY_USER_NAME: "qasey-user",
     });
@@ -87,41 +86,10 @@ describe("split PostgreSQL configuration", () => {
   it.each(["development", "production"])("still rejects incomplete split configuration in %s", NODE_ENV => {
     expect(() => loadConfig({
       NODE_ENV,
-      PG_URL: "postgres.testing.internal",
+      PG_URL: "postgres.testing.example.com",
       PG_PORT: "5432",
       PG_QASEY_USER_NAME: "qasey-user",
     })).toThrow(/PG_URL, PG_PORT, PG_QASEY_USER_NAME and PG_QASEY_PASSWORD/);
   });
 
-  it("keeps only the environment-specific database passwords in AWS secrets", () => {
-    const envJson = JSON.parse(
-      readFileSync(new URL("../../ci/env.json", import.meta.url), "utf8"),
-    ) as { env: Record<string, string>; environments: Record<string, Record<string, string>> };
-    expect(envJson.environments.testing).toEqual({
-      PG_QASEY_PASSWORD: "datasource.postgres.password",
-    });
-    expect(envJson.environments.devops).toEqual({
-      PG_QASEY_PASSWORD: "datasource.postgres.moego_qasey.password",
-    });
-    expect(envJson.env).toMatchObject({
-      WORKER_TOKEN: "qasey.mastra.worker.token",
-      MASTRA_WORKER_AUTH_TOKEN: "qasey.mastra.worker.token",
-      REDIS_HOST: "redis.host",
-      REDIS_PORT: "redis.port",
-      REDIS_PASSWORD: "redis.password",
-      REDIS_TLS: "redis.tls",
-    });
-
-    for (const environment of ["testing", "devops"]) {
-      const envFile = readFileSync(
-        new URL(`../../.env.${environment}`, import.meta.url),
-        "utf8",
-      );
-      expect(envFile).toMatch(/^PG_URL=\S+$/m);
-      expect(envFile).toMatch(/^PG_PORT=\d+$/m);
-      expect(envFile).toMatch(/^PG_QASEY_USER_NAME=\S+$/m);
-      expect(envFile).not.toMatch(/^PG_QASEY_PASSWORD=/m);
-      expect(envFile).not.toMatch(/^REDIS_PASSWORD=/m);
-    }
-  });
 });

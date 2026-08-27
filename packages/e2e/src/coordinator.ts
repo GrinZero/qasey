@@ -1,8 +1,20 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { CreateE2ERunSchema } from "../../contracts/src/index.ts";
 import type { CodeTaskChange, CodeTaskSpec, CreateE2ERun, E2ERun, E2ERepositoryExecution, OwnerScope, QaVerdict, TestCaseSpec } from "../../contracts/src/index.ts";
-import { assertRunTransition, createE2EAmendment, freezeE2EContext, freezeE2EExecutionBrief, type E2EContextSource, type RunRepository } from "../../domain/src/index.ts";
+import { assertRunTransition, createE2EAmendment, freezeE2EContext, freezeE2EExecutionBrief, RunRevisionConflictError, type E2EContextSource, type RunRepository } from "../../domain/src/index.ts";
 import { submitAndWaitForCodeTask, type CodeTaskRunner, type CodeTaskRunnerProvider } from "../../code-task/src/index.ts";
 import type { ArtifactStore } from "./artifacts.ts";
+
+export interface SideEffectRunner {
+  execute<T>(input: {
+    owner: OwnerScope;
+    runId: string;
+    stepId: string;
+    businessKey: string;
+    request: unknown;
+    operation: (idempotencyKey: string) => Promise<{ result: T; externalRef?: string }>;
+  }): Promise<T>;
+}
 
 export interface DraftPrBroker {
   publishChanges(run: E2ERun, changes: PublishedChange[], reviewUrl: string): Promise<string | undefined>;
@@ -26,7 +38,7 @@ export class E2ECoordinator {
     private readonly repository: RunRepository,
     private readonly artifacts: ArtifactStore,
     private readonly prBroker: DraftPrBroker,
-    private readonly options: { maxRepairs: number; reviewBaseUrl: string; codeTasks?: CodeTaskRunnerProvider },
+    private readonly options: { maxRepairs: number; reviewBaseUrl: string; codeTasks?: CodeTaskRunnerProvider; effects?: SideEffectRunner },
   ) {}
 
   assertExecutionAvailable(): void {
@@ -37,25 +49,27 @@ export class E2ECoordinator {
 
   async create(owner: OwnerScope, input: CreateE2ERun, sourceInput?: E2EContextSource): Promise<E2ERun> {
     this.assertExecutionAvailable();
-    if (input.platform !== "web" || input.framework !== "playwright") {
+    const trustedInput = CreateE2ERunSchema.parse(input);
+    if (trustedInput.platform !== "web" || trustedInput.framework !== "playwright") {
       throw new Error("CodeTask-backed E2E currently supports Web Playwright only");
     }
     const now = new Date().toISOString();
-    const requestId = input.requestId ?? randomUUID();
+    const requestId = trustedInput.requestId ?? randomUUID();
     const source = sourceInput ?? {
-      sessionId: input.sourceSessionId,
-      threadId: input.sourceSessionId,
+      sessionId: trustedInput.sourceSessionId,
+      threadId: trustedInput.sourceSessionId,
       taskRunId: requestId,
       requestId,
       resourceId: "api",
     };
-    const contextSnapshot = freezeE2EContext(input.handoff, source);
+    const contextSnapshot = freezeE2EContext(trustedInput.handoff, source);
     const run: E2ERun = {
       ...owner,
       id: randomUUID(), requestId, sourceSessionId: source.sessionId,
-      sourceCaseIds: input.sourceCaseIds, contextSnapshot, caseSnapshot: [], amendments: [], codeTaskIds: [],
-      repository: input.repository, platform: input.platform,
-      framework: input.framework, status: "queued", createdAt: now, updatedAt: now, artifacts: [],
+      sourceCaseIds: trustedInput.sourceCaseIds, contextSnapshot, caseSnapshot: [], amendments: [], codeTaskIds: [],
+      repository: trustedInput.repository, platform: trustedInput.platform,
+      playwrightVerification: trustedInput.playwrightVerification,
+      framework: trustedInput.framework, status: "queued", revision: 1, createdAt: now, updatedAt: now, artifacts: [],
     };
     await this.repository.create(owner, run);
     await this.repository.addEvent(owner, run.id, "run.created", "E2E run queued");
@@ -74,14 +88,21 @@ export class E2ECoordinator {
       if (run.executionBrief.briefHash !== run.briefHash) throw new Error("Persisted E2E brief hash is inconsistent");
       return run;
     }
-    const executionBrief = freezeE2EExecutionBrief({ context: run.contextSnapshot, cases, repository: repositoryExecution });
+    if (!run.playwrightVerification) {
+      throw new Error("This legacy E2E run has no frozen Playwright verification mapping; create a new run");
+    }
+    const trustedRepositoryExecution: E2ERepositoryExecution = {
+      ...repositoryExecution,
+      verification: run.playwrightVerification,
+    };
+    const executionBrief = freezeE2EExecutionBrief({ context: run.contextSnapshot, cases, repository: trustedRepositoryExecution });
     const contextArtifact = await this.artifacts.saveContext(owner, run.id, executionBrief);
     const artifacts = [...run.artifacts, contextArtifact];
-    const updated = await this.repository.update(owner, run.id, {
+    const updated = await this.repository.update(owner, run.id, run.revision, {
       caseSnapshot: cases,
       executionBrief,
       briefHash: executionBrief.briefHash,
-      repositoryExecution,
+      repositoryExecution: trustedRepositoryExecution,
       artifacts,
       ...(traceId ? { traceId } : {}),
     });
@@ -114,7 +135,7 @@ export class E2ECoordinator {
     const isQaRepair = run.status === "repairing";
     run = await this.transition(owner, run, "preparing_workspace", "Preparing pooled Sandbox CodeTask workspace");
     const branch = run.branch ?? `qasey/${run.id}`;
-    run = await this.repository.update(owner, run.id, { branch, baseSha: run.baseSha });
+    run = await this.repository.update(owner, run.id, run.revision, { branch, baseSha: run.baseSha });
     run = await this.transition(owner, run, "authoring", isQaRepair ? "Applying QA feedback with the Sandbox Mastra code agent" : "Delegating E2E authoring to the Sandbox Mastra code agent");
     const runner = await this.options.codeTasks!.forScope({ ...owner, sessionId: run.sourceSessionId });
     let inputPatchRef = isQaRepair ? run.artifacts.find(item => item.kind === "patch" && item.id === `${run.id}:patch`) : undefined;
@@ -135,10 +156,14 @@ export class E2ECoordinator {
         kind: attempt === 0 && !isQaRepair ? "author" : "repair",
         ...(inputPatchRef ? { inputPatchRef } : {}),
       });
-      run = await this.repository.update(owner, run.id, { codeTaskIds: [...run.codeTaskIds, taskId] });
+      run = await this.repository.update(owner, run.id, run.revision, { codeTaskIds: [...run.codeTaskIds, taskId] });
       await this.repository.addEvent(owner, run.id, "code_task.submitted", "Sandbox CodeTask submitted", codeTaskMetadata(spec));
       const startedAt = Date.now();
-      const executed = await submitAndWaitForCodeTask(runner, spec, { deadlineMs: spec.deadlineMs + 30_000, lostRetries: 1 });
+      const executed = await submitAndWaitForCodeTask(runner, spec, {
+        deadlineMs: spec.deadlineMs + 30_000,
+        lostRetries: 1,
+        onHeartbeat: throttledHeartbeat(() => this.repository.heartbeat(owner, run.id)),
+      });
       const result = executed.result;
       await this.repository.addEvent(owner, run.id, "code_task.completed", `Sandbox CodeTask ${result.status}`, {
         ...codeTaskMetadata(executed.spec), status: result.status, durationMs: Date.now() - startedAt, provenance: result.provenance,
@@ -171,16 +196,20 @@ export class E2ECoordinator {
     const contextContent = JSON.stringify({ brief: run.executionBrief, purpose: "Apply the immutable patch and run fixed clean verification only." });
     const contextRef = await this.artifacts.saveTaskContext(owner, run.id, taskId, contextContent);
     run = await this.appendArtifacts(owner, run, [contextRef]);
-    run = await this.transition(owner, run, "clean_verifying", "Running immutable patch in a fresh Sandbox verifier worktree");
+    run = await this.transition(owner, run, "clean_verifying", "Running immutable patch in a fresh independent Sandbox verifier checkout");
     const spec = this.codeTaskSpec(run, taskId, 0, contextRef, contextRef.sha256!, {
       profile: "web-e2e-verifier",
       kind: "author",
       inputPatchRef: patchRef,
     });
-    run = await this.repository.update(owner, run.id, { codeTaskIds: [...run.codeTaskIds, taskId] });
+    run = await this.repository.update(owner, run.id, run.revision, { codeTaskIds: [...run.codeTaskIds, taskId] });
     await this.repository.addEvent(owner, run.id, "code_task.submitted", "Sandbox verifier CodeTask submitted", codeTaskMetadata(spec));
     const startedAt = Date.now();
-    const executed = await submitAndWaitForCodeTask(runner, spec, { deadlineMs: spec.deadlineMs + 30_000, lostRetries: 1 });
+    const executed = await submitAndWaitForCodeTask(runner, spec, {
+      deadlineMs: spec.deadlineMs + 30_000,
+      lostRetries: 1,
+      onHeartbeat: throttledHeartbeat(() => this.repository.heartbeat(owner, run.id)),
+    });
     const result = executed.result;
     await this.repository.addEvent(owner, run.id, "code_task.completed", `Sandbox verifier CodeTask ${result.status}`, {
       ...codeTaskMetadata(executed.spec), status: result.status, durationMs: Date.now() - startedAt, provenance: result.provenance,
@@ -189,8 +218,33 @@ export class E2ECoordinator {
     if (result.status !== "succeeded") throw new Error(`Clean verifier CodeTask failed: ${result.summary.slice(-1_500)}`);
     const changes = await this.materializePublishedChanges(runner, result.changes);
     const reviewUrl = `${this.options.reviewBaseUrl.replace(/\/$/, "")}/runs/${run.id}`;
-    const pullRequestUrl = await this.prBroker.publishChanges(run, changes, reviewUrl);
-    if (pullRequestUrl) run = await this.repository.update(owner, run.id, { pullRequestUrl });
+    const publication = this.options.effects
+      ? await this.options.effects.execute({
+          owner,
+          runId: run.id,
+          stepId: "publish-draft-pull-request",
+          businessKey: run.branch ?? run.id,
+          request: {
+            baseSha: run.baseSha,
+            branch: run.branch,
+            changes: changes.map(change => ({
+              path: change.path,
+              deleted: change.deleted,
+              mode: change.mode,
+              ...(change.content ? { sha256: createHash("sha256").update(change.content).digest("hex") } : {}),
+            })),
+          },
+          operation: async () => {
+            const pullRequestUrl = await this.prBroker.publishChanges(run, changes, reviewUrl);
+            return {
+              result: { ...(pullRequestUrl ? { pullRequestUrl } : {}) },
+              ...(pullRequestUrl ? { externalRef: pullRequestUrl } : {}),
+            };
+          },
+        })
+      : { pullRequestUrl: await this.prBroker.publishChanges(run, changes, reviewUrl) };
+    const pullRequestUrl = publication.pullRequestUrl;
+    if (pullRequestUrl) run = await this.repository.update(owner, run.id, run.revision, { pullRequestUrl });
     else await this.repository.addEvent(owner, run.id, "pr.skipped", "Verifier passed; remote Draft PR broker is disabled");
     await this.transition(owner, run, "awaiting_qa", "Clean Sandbox verifier passed; awaiting QA review");
   }
@@ -203,6 +257,10 @@ export class E2ECoordinator {
     contextHash: string,
     options: { profile: CodeTaskSpec["executionProfileId"]; kind: CodeTaskSpec["kind"]; inputPatchRef?: E2ERun["artifacts"][number] },
   ): CodeTaskSpec {
+    const playwrightVerification = run.executionBrief?.repository.verification;
+    if (!playwrightVerification) {
+      throw new Error("CodeTask execution requires the frozen Playwright verification mapping; create a new run");
+    }
     return {
       taskId,
       attemptId: `${attempt}-${randomUUID()}`,
@@ -222,6 +280,7 @@ export class E2ECoordinator {
       executionProfileId: options.profile,
       allowedPaths: run.repository.allowedPaths,
       fixedChecks: [{ id: "repo-install" }, { id: "playwright" }],
+      playwrightVerification,
       deadlineMs: 20 * 60_000,
       traceContext: { ...(run.traceId ? { traceId: run.traceId } : {}) },
       ...(options.inputPatchRef ? { inputPatchRef: options.inputPatchRef } : {}),
@@ -251,10 +310,11 @@ export class E2ECoordinator {
   }
 
   async fail(owner: OwnerScope, runId: string, error: unknown): Promise<void> {
+    if (error instanceof RunRevisionConflictError) throw error;
     const message = error instanceof Error ? error.message : String(error);
     const current = await this.requireRun(owner, runId);
     if (!["failed", "cancelled", "succeeded"].includes(current.status)) {
-      await this.repository.update(owner, runId, { status: "failed", error: message });
+      await this.repository.update(owner, runId, current.revision, { status: "failed", error: message });
       await this.repository.addEvent(owner, runId, "run.failed", message);
     }
   }
@@ -266,9 +326,9 @@ export class E2ECoordinator {
       if (run.pullRequestUrl) await this.prBroker.markReady(run);
       return this.transition(owner, run, "succeeded", `Approved by ${verdict.reviewerId}; Draft PR marked ready`);
     }
-    const repaired = await this.transition(owner, run, "repairing", `Changes requested by ${verdict.reviewerId}`);
+    let repaired = await this.transition(owner, run, "repairing", `Changes requested by ${verdict.reviewerId}`);
     if (verdict.feedback) {
-      await this.repository.update(owner, runId, { amendments: [...repaired.amendments, createE2EAmendment(verdict.reviewerId, verdict.feedback)] });
+      repaired = await this.repository.update(owner, runId, repaired.revision, { amendments: [...repaired.amendments, createE2EAmendment(verdict.reviewerId, verdict.feedback)] });
     }
     await this.repository.addEvent(owner, runId, "qa.feedback", verdict.feedback ?? "Changes requested");
     return repaired;
@@ -284,6 +344,7 @@ export class E2ECoordinator {
       id: randomUUID(),
       requestId: randomUUID(),
       status: "queued",
+      revision: 1,
       createdAt: now,
       updatedAt: now,
       artifacts: previous.executionBrief ? previous.artifacts.filter(item => item.id.endsWith(":execution-brief")) : [],
@@ -311,12 +372,12 @@ export class E2ECoordinator {
   }
 
   private async appendArtifacts(owner: OwnerScope, run: E2ERun, artifacts: E2ERun["artifacts"]): Promise<E2ERun> {
-    return this.repository.update(owner, run.id, { artifacts: [...run.artifacts, ...artifacts] });
+    return this.repository.update(owner, run.id, run.revision, { artifacts: [...run.artifacts, ...artifacts] });
   }
 
   private async transition(owner: OwnerScope, run: E2ERun, status: E2ERun["status"], message: string): Promise<E2ERun> {
     assertRunTransition(run.status, status);
-    const updated = await this.repository.update(owner, run.id, { status, ...(status === "failed" ? { error: message } : {}) });
+    const updated = await this.repository.update(owner, run.id, run.revision, { status, ...(status === "failed" ? { error: message } : {}) });
     await this.repository.addEvent(owner, run.id, `run.${status}`, message);
     return updated;
   }
@@ -341,5 +402,15 @@ function codeTaskMetadata(spec: CodeTaskSpec): Record<string, unknown> {
     contextHash: spec.contextHash,
     baseSha: spec.baseSha,
     ...(spec.traceContext.traceId ? { traceId: spec.traceContext.traceId } : {}),
+  };
+}
+
+function throttledHeartbeat(heartbeat: () => Promise<void>, intervalMs = 15_000): () => Promise<void> {
+  let last = 0;
+  return async () => {
+    const now = Date.now();
+    if (now - last < intervalMs) return;
+    last = now;
+    await heartbeat();
   };
 }

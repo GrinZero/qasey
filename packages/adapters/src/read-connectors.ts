@@ -31,19 +31,58 @@ export const QASEY_READ_CONNECTOR_TOOL_NAMES = [
   "jira_get_issue",
 ] as const;
 
+export interface ReadConnectorCredentials {
+  slackBotToken?: string;
+  slackUserToken?: string;
+  jira?: {
+    baseUrl: string;
+    email: string;
+    apiToken: string;
+  };
+}
+
+export interface ReadConnectorCredentialResolver {
+  resolve(tenantId: string): Promise<ReadConnectorCredentials>;
+}
+
 export class ReadConnectorCatalog {
-  private readonly slackBot: WebClient | undefined;
-  private readonly slackUser: WebClient | undefined;
-  constructor(private readonly config: QaseyConfig) {
-    this.slackBot = config.SLACK_BOT_TOKEN ? new WebClient(config.SLACK_BOT_TOKEN) : undefined;
-    this.slackUser = config.SLACK_USER_TOKEN ? new WebClient(config.SLACK_USER_TOKEN) : undefined;
+  constructor(
+    private readonly config: QaseyConfig,
+    private readonly credentialResolver?: ReadConnectorCredentialResolver,
+  ) {}
+
+  /** Compatibility path for the explicit single-tenant environment profile. */
+  tools(): ToolsInput {
+    return this.toolsForCredentials(this.staticCredentials());
   }
 
-  tools(): ToolsInput {
+  /** Resolve a fresh, tenant-bound catalogue for every trusted request. */
+  async toolsForTenant(tenantId: string | undefined): Promise<ToolsInput> {
+    if (!tenantId) return {};
+    const resolved = this.credentialResolver ? await this.credentialResolver.resolve(tenantId) : {};
+    const credentials = this.config.QASEY_TENANCY_MODE === "multi"
+      ? resolved
+      : { ...this.staticCredentials(), ...resolved };
+    return this.toolsForCredentials(credentials);
+  }
+
+  private toolsForCredentials(credentials: ReadConnectorCredentials): ToolsInput {
+    const slackBot = credentials.slackBotToken ? new WebClient(credentials.slackBotToken) : undefined;
+    const slackUser = credentials.slackUserToken ? new WebClient(credentials.slackUserToken) : undefined;
     return {
-      ...(this.slackBot ? this.slackBotTools(this.slackBot) : {}),
-      ...(this.slackUser ? this.slackSearchTool(this.slackUser) : {}),
-      ...(this.config.JIRA_BASE_URL && this.config.JIRA_EMAIL && this.config.JIRA_API_TOKEN ? this.jiraTools() : {}),
+      ...(slackBot ? this.slackBotTools(slackBot) : {}),
+      ...(slackUser ? this.slackSearchTool(slackUser) : {}),
+      ...(credentials.jira ? this.jiraTools(credentials.jira) : {}),
+    };
+  }
+
+  private staticCredentials(): ReadConnectorCredentials {
+    return {
+      ...(this.config.SLACK_BOT_TOKEN ? { slackBotToken: this.config.SLACK_BOT_TOKEN } : {}),
+      ...(this.config.SLACK_USER_TOKEN ? { slackUserToken: this.config.SLACK_USER_TOKEN } : {}),
+      ...(this.config.JIRA_BASE_URL && this.config.JIRA_EMAIL && this.config.JIRA_API_TOKEN
+        ? { jira: { baseUrl: this.config.JIRA_BASE_URL, email: this.config.JIRA_EMAIL, apiToken: this.config.JIRA_API_TOKEN } }
+        : {}),
     };
   }
 
@@ -92,31 +131,32 @@ export class ReadConnectorCatalog {
     };
   }
 
-  private jiraTools(): ToolsInput {
+  private jiraTools(credentials: NonNullable<ReadConnectorCredentials["jira"]>): ToolsInput {
     return {
       jira_search_issues: createTool({
         id: "jira_search_issues", description: "使用 JQL 搜索 Jira issue。只读。",
         inputSchema: z.object({ jql: z.string().min(1), maxResults: z.number().int().min(1).max(50).default(20), fields: z.array(z.string()).default(["summary", "status", "description", "attachment"]) }),
         outputSchema: ReadConnectorOutputSchema,
-        execute: async ({ jql, maxResults, fields }) => readResult("jira", "search_issues", { jql, maxResults }, await this.jiraFetch("/rest/api/3/search/jql", { jql, maxResults: String(maxResults), fields: fields.join(",") })),
+        execute: async ({ jql, maxResults, fields }) => readResult("jira", "search_issues", { jql, maxResults }, await this.jiraFetch(credentials, "/rest/api/3/search/jql", { jql, maxResults: String(maxResults), fields: fields.join(",") })),
         toModelOutput: boundedModelOutput,
       }),
       jira_get_issue: createTool({
         id: "jira_get_issue", description: "读取 Jira issue，包括附件元数据。只读。",
         inputSchema: z.object({ issueKey: z.string().min(1) }),
         outputSchema: ReadConnectorOutputSchema,
-        execute: async ({ issueKey }) => readResult("jira", "get_issue", { issueKey }, await this.jiraFetch(`/rest/api/3/issue/${encodeURIComponent(issueKey)}`)),
+        execute: async ({ issueKey }) => readResult("jira", "get_issue", { issueKey }, await this.jiraFetch(credentials, `/rest/api/3/issue/${encodeURIComponent(issueKey)}`)),
         toModelOutput: boundedModelOutput,
       }),
     };
   }
 
-  private async jiraFetch(path: string, query: Record<string, string> = {}): Promise<unknown> {
-    const url = new URL(path, this.config.JIRA_BASE_URL);
+  private async jiraFetch(credentials: NonNullable<ReadConnectorCredentials["jira"]>, path: string, query: Record<string, string> = {}): Promise<unknown> {
+    const url = new URL(path, credentials.baseUrl);
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
     const response = await fetch(url, {
-      headers: { Authorization: `Basic ${Buffer.from(`${this.config.JIRA_EMAIL}:${this.config.JIRA_API_TOKEN}`).toString("base64")}`, Accept: "application/json" },
+      headers: { Authorization: `Basic ${Buffer.from(`${credentials.email}:${credentials.apiToken}`).toString("base64")}`, Accept: "application/json" },
       signal: AbortSignal.timeout(30_000),
+      redirect: "error",
     });
     if (!response.ok) throw new Error(`Jira read failed with ${response.status}`);
     return response.json();

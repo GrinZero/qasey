@@ -1,6 +1,6 @@
 # Permissions and trusted identity
 
-Authentication uses platform-owned Google OAuth/OIDC with encrypted browser cookies for people, deployment-owned Bearer tokens for service callers, and verified Slack/Jira ingress for channels. The official Mastra orchestration Worker has a dedicated token resolved by the platform middleware; it receives only workflow step permissions and does not reuse `PLATFORM_SERVICE_TOKEN`. Mastra Enterprise auth is not configured. `platform-admin` is a bootstrap bypass only when the email comes from `PLATFORM_BOOTSTRAP_ADMIN_EMAILS`; it must not be accepted from request data.
+Authentication uses platform-owned Google OAuth/OIDC or single-tenant password credentials with opaque browser sessions for people, deployment-owned Bearer tokens for service callers, and verified Slack/Jira ingress for channels. The official Mastra orchestration Worker has a dedicated token resolved by the platform middleware; it receives only workflow step permissions and does not reuse `PLATFORM_SERVICE_TOKEN`. Mastra Enterprise auth is not configured. `platform-admin` is a bootstrap bypass only when the email is verified by Google and comes from `PLATFORM_BOOTSTRAP_ADMIN_EMAILS`; an unverified local-password email and request data can never activate it.
 
 The permission middleware classifies each request as `{ applicationId, resourceType, resourceId, action }`, checks audience and tenant-scoped role permissions, writes an audit decision, and then injects trusted RequestContext. Unknown routes and unknown primitive IDs are denied.
 

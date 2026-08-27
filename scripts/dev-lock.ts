@@ -83,10 +83,10 @@ export async function acquireDevelopmentLock(
       const childAlive = existing?.childPid ? processExists(existing.childPid) : false;
       if (ownerAlive || childAlive) {
         const pid = childAlive ? existing?.childPid : existing?.ownerPid;
-        throw new Error(`A moego-qasey dev server is already running${pid ? ` (PID ${pid})` : ""}. Stop it before starting another instance.`);
+        throw new Error(`A Qasey dev server is already running${pid ? ` (PID ${pid})` : ""}. Stop it before starting another instance.`);
       }
       await rm(lockPath, { force: true });
     }
   }
-  throw new Error("Unable to acquire the moego-qasey development server lock.");
+  throw new Error("Unable to acquire the Qasey development server lock.");
 }

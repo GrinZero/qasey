@@ -110,8 +110,8 @@ describe("Qasey Slack progress", () => {
       step: 1,
       toolCallId: "github-1",
       toolName: "mastra_workspace_execute_command",
-      args: { command: "gh pr diff 6582 --repo MoeGolibrary/Boarding_Desktop" },
-    })).toBe("正在核对 GitHub PR #6582 与相关代码…");
+      args: { command: "gh pr diff 42 --repo example-org/web-app" },
+    })).toBe("正在核对 GitHub PR #42 与相关代码…");
 
     expect(projector.project({
       type: "tool-result",

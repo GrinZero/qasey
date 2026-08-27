@@ -4,11 +4,11 @@ import { SERVICE_ROLE_PERMISSIONS, seedServiceRolePermissions, serviceRoleGrants
 import { createServicePrincipal } from "../../src/platform/auth/oauth-principal.ts";
 
 describe("service role permissions", () => {
-  it("maps Jira to its installation tenant and keeps internal services isolated", () => {
-    expect(serviceRoleGrants("https://example.atlassian.net/jira")).toEqual([
-      { tenantId: "example.atlassian.net", role: "qasey-ingress", permissions: SERVICE_ROLE_PERMISSIONS["qasey-ingress"] },
-      { tenantId: "trusted-ingress", role: "orchestration-worker", permissions: SERVICE_ROLE_PERMISSIONS["orchestration-worker"] },
-      { tenantId: "trusted-ingress", role: "platform-service", permissions: SERVICE_ROLE_PERMISSIONS["platform-service"] },
+  it("uses an explicit tenant instead of deriving authorization from a provider URL", () => {
+    expect(serviceRoleGrants("tenant-1")).toEqual([
+      { tenantId: "tenant-1", role: "qasey-ingress", permissions: SERVICE_ROLE_PERMISSIONS["qasey-ingress"] },
+      { tenantId: "tenant-1", role: "orchestration-worker", permissions: SERVICE_ROLE_PERMISSIONS["orchestration-worker"] },
+      { tenantId: "tenant-1", role: "platform-service", permissions: SERVICE_ROLE_PERMISSIONS["platform-service"] },
     ]);
   });
 
@@ -17,13 +17,13 @@ describe("service role permissions", () => {
     const batch = vi.spyOn(store, "grantRolePermissions");
     const permissions = new PermissionService(store);
 
-    await seedServiceRolePermissions(permissions, "https://example.atlassian.net");
+    await seedServiceRolePermissions(permissions, "tenant-1");
 
     expect(batch).toHaveBeenCalledTimes(3);
     await expect(permissions.authorize({
       principal: createServicePrincipal({
         subjectId: "platform-service",
-        tenantId: "trusted-ingress",
+        tenantId: "tenant-1",
         roles: ["platform-service"],
       }),
       applicationId: "qasey",

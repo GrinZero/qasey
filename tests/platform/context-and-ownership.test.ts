@@ -53,8 +53,24 @@ describe("trusted context and ownership", () => {
     await expect(repository.get({ ...owner, applicationId: "other" }, run.id)).resolves.toBeUndefined();
     await expect(repository.list({ ...owner, tenantId: "tenant-b" })).resolves.toEqual([]);
     await expect(repository.list(owner)).resolves.toEqual([run]);
-    await expect(repository.update({ ...owner, tenantId: "tenant-b" }, run.id, { status: "failed" })).rejects.toThrow(/not found/u);
+    await expect(repository.update({ ...owner, tenantId: "tenant-b" }, run.id, run.revision, { status: "failed" })).rejects.toThrow(/not found/u);
     await expect(repository.addEvent({ ...owner, applicationId: "other" }, run.id, "x", "x")).rejects.toThrow(/not found/u);
+  });
+
+  it("tracks liveness independently from CAS revisions and finds only stale active runs", async () => {
+    let now = new Date("2026-08-26T00:00:00.000Z");
+    const repository = new InMemoryRunRepository(() => now);
+    const owner: OwnerScope = { applicationId: "qasey", tenantId: "tenant-a" };
+    const run = testRun(owner, "stale-run");
+    await repository.create(owner, run);
+    now = new Date("2026-08-26T00:10:00.000Z");
+    await expect(repository.listStale(new Date("2026-08-26T00:05:00.000Z"), ["queued"])).resolves.toEqual([run]);
+
+    await repository.heartbeat(owner, run.id);
+
+    expect((await repository.get(owner, run.id))?.revision).toBe(1);
+    await expect(repository.listStale(new Date("2026-08-26T00:05:00.000Z"), ["queued"])).resolves.toEqual([]);
+    await expect(repository.listStale(new Date("2026-08-26T00:20:00.000Z"), ["awaiting_qa"])).resolves.toEqual([]);
   });
 });
 
@@ -67,6 +83,6 @@ function testRun(owner: OwnerScope, id: string): E2ERun {
   return {
     ...owner, id, requestId: "request", sourceSessionId: "session", status: "queued", platform: "web", framework: "playwright",
     repository: { owner: "o", repository: "r", cloneUrl: "https://example.test/r.git", baseRef: "main", allowedPaths: ["tests"], skillsPaths: [] }, sourceCaseIds: ["case"],
-    contextSnapshot, caseSnapshot: [], amendments: [], codeTaskIds: [], artifacts: [], createdAt: now, updatedAt: now,
+    contextSnapshot, caseSnapshot: [], amendments: [], codeTaskIds: [], artifacts: [], revision: 1, createdAt: now, updatedAt: now,
   };
 }

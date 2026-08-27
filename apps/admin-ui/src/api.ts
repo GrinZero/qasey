@@ -1,4 +1,4 @@
-import type { AgentApplication, ApiTokenRecord, AuditRecord, CatalogEntry, QaseyRun, SandboxSessionState, Session, TriggerConnection, TriggerProvider, TriggerTarget } from "./types";
+import type { AgentApplication, ApiTokenRecord, AuditRecord, AuthConfig, AuthRedirect, CatalogEntry, OrganizationSelection, QaseyRun, SandboxSessionState, Session, TriggerConnection, TriggerProvider, TriggerTarget } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -10,7 +10,11 @@ export class ApiError extends Error {
   }
 }
 
-async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
+async function requestJson<T>(
+  url: string,
+  init?: RequestInit,
+  options: { broadcastUnauthorized?: boolean } = {},
+): Promise<T> {
   const response = await fetch(url, {
     ...init,
     headers: {
@@ -20,7 +24,9 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-    if (response.status === 401) window.dispatchEvent(new Event("qasey:unauthorized"));
+    if (response.status === 401 && options.broadcastUnauthorized !== false) {
+      window.dispatchEvent(new Event("qasey:unauthorized"));
+    }
     const message = typeof body.message === "string"
       ? body.message
       : response.status === 401
@@ -47,7 +53,11 @@ async function requestBlob(url: string): Promise<{ blob: Blob; url?: string; tit
 }
 
 export const api = {
-  session: () => requestJson<Session>("/admin/api/session"),
+  session: () => requestJson<Session>(
+    "/admin/api/session",
+    undefined,
+    { broadcastUnauthorized: false },
+  ),
   catalog: () => requestJson<CatalogEntry[]>("/admin/api/catalog"),
   applications: () => requestJson<AgentApplication[]>("/admin/api/applications"),
   listRuns: () => requestJson<{ runs: QaseyRun[] }>("/v1/runs?limit=100"),
@@ -57,7 +67,9 @@ export const api = {
   ),
   cancelRun: (runId: string) => requestJson<QaseyRun>(`/v1/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
   rerun: (runId: string) => requestJson<QaseyRun>(`/v1/runs/${encodeURIComponent(runId)}/rerun`, { method: "POST" }),
-  sandboxState: (sessionId: string) => requestJson<SandboxSessionState>(`/v1/sandbox-sessions/${encodeURIComponent(sessionId)}`),
+  sandboxState: (sessionId: string) => requestJson<SandboxSessionState>(
+    `/v1/sandbox-sessions/${encodeURIComponent(sessionId)}`,
+  ),
   browserStart: (sessionId: string, url?: string) => requestJson<SandboxSessionState>(
     `/v1/sandbox-sessions/${encodeURIComponent(sessionId)}/browser/start`,
     { method: "POST", body: JSON.stringify({ ...(url ? { url } : {}) }) },
@@ -135,6 +147,26 @@ export const api = {
   loginUrl: (redirectUri = "/admin") => requestJson<{ url: string }>(
     `/auth/google/login?${new URLSearchParams({ redirect_uri: redirectUri })}`,
   ),
+  authConfig: () => requestJson<AuthConfig>(
+    "/auth/config",
+    undefined,
+    { broadcastUnauthorized: false },
+  ),
+  passwordLogin: (input: { email: string; password: string; redirectUri: string }) => requestJson<AuthRedirect>(
+    "/auth/password/login",
+    { method: "POST", body: JSON.stringify(input) },
+    { broadcastUnauthorized: false },
+  ),
+  passwordRegister: (input: { displayName: string; email: string; password: string; redirectUri: string }) => requestJson<AuthRedirect>(
+    "/auth/password/register",
+    { method: "POST", body: JSON.stringify(input) },
+    { broadcastUnauthorized: false },
+  ),
+  organizationSelection: () => requestJson<{ selection: OrganizationSelection | null }>("/auth/organization-selection"),
+  selectOrganization: (organizationId: string) => requestJson<{ redirectTo: string }>("/auth/organization-selection", {
+    method: "POST",
+    body: JSON.stringify({ organizationId }),
+  }),
   logout: () => requestJson<{ success: boolean }>("/auth/logout", { method: "POST" }),
 };
 

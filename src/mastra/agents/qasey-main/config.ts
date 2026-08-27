@@ -13,7 +13,7 @@ export default agentConfig({
   id: "qasey-main",
   name: "Qasey",
   durable: { maxSteps: QASEY_AGENT_SAFETY_MAX_STEPS },
-  description: "MoeGo QA 需求分析、测试用例设计与 E2E 编写智能体",
+  description: "QA 需求分析、测试用例设计与 E2E 编写智能体",
   model: [{
     model: qaseyResponsesModel,
     maxRetries: 2,

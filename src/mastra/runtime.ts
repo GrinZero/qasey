@@ -1,9 +1,10 @@
 import "../load-env.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomBytes } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DuckDBStore } from "@mastra/duckdb";
-import { FilesystemStore, MastraCompositeStore } from "@mastra/core/storage";
+import { MastraCompositeStore } from "@mastra/core/storage";
 import { createCodeMode, createTool } from "@mastra/core/tools";
 import type { RequestContext } from "@mastra/core/request-context";
 import type { CodeModeTransport, ToolObserve } from "@mastra/core/tools";
@@ -17,9 +18,9 @@ import type { ToolsInput } from "@mastra/core/agent";
 import {
   InMemoryRunRepository, PrismaRunRepository,
 } from "../../packages/domain/src/index.ts";
-import { assertOpenAICompatibleToolSchemas, createGitHubClient, GitHubInstallationTokenProvider, GitHubPublisher, loadConfig, QaseyMcpCatalog, JiraClient, ReadConnectorCatalog } from "../../packages/adapters/src/index.ts";
+import { assertOpenAICompatibleToolSchemas, createGitHubClient, GitHubInstallationTokenProvider, GitHubPublisher, loadConfig, QaseyMcpCatalog, JiraClient, ReadConnectorCatalog, resolveCredentialKeyring } from "../../packages/adapters/src/index.ts";
 import {
-  E2ECoordinator, LocalArtifactStore, NoopDraftPrBroker,
+  E2ECoordinator, LocalArtifactStore, NoopDraftPrBroker, S3ArtifactStore,
 } from "../../packages/e2e/src/index.ts";
 import { ownerScopeFromRequestContext } from "../platform/context/owner-scope.ts";
 import { createCompositeStore } from "../platform/storage/create-composite-store.ts";
@@ -28,10 +29,15 @@ import { runtimeReadiness } from "../platform/storage/readiness.ts";
 import { InMemorySandboxLeaseStore, PrismaSandboxLeaseStore } from "../platform/workspace/sandbox-lease-store.ts";
 import { SandboxPoolClient } from "../platform/workspace/sandbox-client.ts";
 import { PooledSandboxCodeTaskRunnerProvider } from "../platform/code-task/pooled-sandbox-runner.ts";
-import { webE2ERepositoryFromSkill } from "../platform/code-task/e2e-repository-skill.ts";
+import { webE2EConfigurationFromSkill } from "../platform/code-task/e2e-repository-skill.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../platform/context/schema.ts";
 import { applyDevRuntimeApprovalGate } from "./applications/qasey/dev-runtime-approval-gate.ts";
 import { createApplicationDatabase } from "../platform/storage/prisma.ts";
+import { InMemoryExternalConnectionStore, PrismaExternalConnectionStore } from "../platform/connections/connection-store.ts";
+import { ConnectionBackedReadConnectorResolver } from "../platform/connections/read-connector-resolver.ts";
+import { TenantGitHubConnectionResolver } from "../platform/connections/github-connection-resolver.ts";
+import { InMemoryFailureInboxStore, PrismaFailureInboxStore } from "../platform/recovery/failure-inbox.ts";
+import { InMemoryEffectReceiptStore, PrismaEffectReceiptStore, SideEffectExecutor } from "../platform/recovery/effect-receipts.ts";
 
 const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
 const resolveProjectPath = (value: string) => isAbsolute(value) ? value : resolve(projectRoot, value);
@@ -46,52 +52,71 @@ export const config = {
   QASEY_GIT_CACHE_DIR: resolveProjectPath(loadedConfig.QASEY_GIT_CACHE_DIR),
   QASEY_DATA_ROOT: resolveProjectPath(loadedConfig.QASEY_DATA_ROOT),
 };
-export const studioEditorEnabled = config.QASEY_ENABLE_STUDIO_EDITOR
-  ?? config.NODE_ENV === "development";
 export const studioMcpPreviewEnabled = config.QASEY_ENABLE_STUDIO_MCP_PREVIEW
   ?? false;
 export const QASEY_REQUEST_CONTEXT_REQUIRED_MESSAGE = "Qasey request context has not been initialized";
 export const applicationDatabase = config.DATABASE_URL ? createApplicationDatabase(config.DATABASE_URL) : undefined;
 
 /**
- * Compose Mastra domains explicitly: application state, editor definitions,
- * and telemetry have different scaling and lifecycle requirements.
+ * Compose Mastra application state and telemetry domains explicitly.
  */
 const runtimeStore = createCompositeStore({
   environment: config.NODE_ENV,
   projectRoot,
   ...(config.DATABASE_URL ? { databaseUrl: config.DATABASE_URL } : {}),
   ...(config.OBSERVABILITY_DATABASE_URL ? { observabilityDatabaseUrl: config.OBSERVABILITY_DATABASE_URL } : {}),
-  ...(config.EDITOR_DATABASE_URL ? { editorDatabaseUrl: config.EDITOR_DATABASE_URL } : {}),
   observabilityDbPath: config.QASEY_OBSERVABILITY_DB_PATH,
-  editorEnabled: studioEditorEnabled,
 });
 export const mastraStorage = runtimeStore.primary;
 export function createMastraRuntimeStorage(): MastraCompositeStore { return runtimeStore.storage; }
 export const runRepository = applicationDatabase ? new PrismaRunRepository(applicationDatabase.client) : new InMemoryRunRepository();
+export const failureInboxStore = applicationDatabase
+  ? new PrismaFailureInboxStore(applicationDatabase.client)
+  : new InMemoryFailureInboxStore();
+export const effectReceiptStore = applicationDatabase
+  ? new PrismaEffectReceiptStore(applicationDatabase.client)
+  : new InMemoryEffectReceiptStore();
+export const sideEffectExecutor = new SideEffectExecutor(effectReceiptStore);
 export const channelDeliveryInbox = config.DATABASE_URL
   ? new PrismaChannelDeliveryInbox(applicationDatabase!.client)
   : new InMemoryChannelDeliveryInbox();
+export const credentialKeyring = resolveCredentialKeyring(
+  config,
+  config.NODE_ENV === "production" ? undefined : randomBytes(32).toString("base64url"),
+);
+export const externalConnectionStore = config.NODE_ENV === "production" && applicationDatabase
+  ? new PrismaExternalConnectionStore(applicationDatabase.client, credentialKeyring)
+  : new InMemoryExternalConnectionStore(credentialKeyring);
+export const tenantGitHubConnections = new TenantGitHubConnectionResolver(externalConnectionStore);
 export const githubReadTokens = config.GITHUB_APP_ID && config.GITHUB_APP_INSTALLATION_ID && config.GITHUB_APP_PRIVATE_KEY
   ? new GitHubInstallationTokenProvider(config)
   : undefined;
-const sandboxLeaseOptions = {
-  replicas: config.QASEY_SANDBOX_REPLICAS,
-  maxSessionsPerReplica: config.QASEY_SANDBOX_MAX_SESSIONS,
-  idleTtlMs: config.QASEY_SANDBOX_IDLE_TTL_MS,
-  encryptionKey: config.GOOGLE_COOKIE_PASSWORD ?? config.MASTRA_ENCRYPTION_KEY ?? "qasey-local-sandbox-lease-key",
-};
+const githubTokenForScope = config.QASEY_TENANCY_MODE === "multi"
+  ? (scope: { tenantId: string }) => tenantGitHubConnections.installationToken(scope.tenantId)
+  : githubReadTokens
+    ? () => githubReadTokens.readToken()
+    : undefined;
 const sandboxEndpointTemplate = config.QASEY_SANDBOX_ENDPOINT_TEMPLATE;
+const sandboxLeaseOptions = config.QASEY_SANDBOX_LEASE_KEY
+  ? {
+      replicas: config.QASEY_SANDBOX_REPLICAS,
+      maxSessionsPerReplica: config.QASEY_SANDBOX_MAX_SESSIONS,
+      idleTtlMs: config.QASEY_SANDBOX_IDLE_TTL_MS,
+      encryptionKey: config.QASEY_SANDBOX_LEASE_KEY,
+    }
+  : undefined;
 export const sandboxLeaseStore = sandboxEndpointTemplate
-  ? config.DATABASE_URL
+  ? config.DATABASE_URL && sandboxLeaseOptions
     ? new PrismaSandboxLeaseStore(applicationDatabase!.client, sandboxLeaseOptions)
-    : new InMemorySandboxLeaseStore(sandboxLeaseOptions)
+    : new InMemorySandboxLeaseStore(sandboxLeaseOptions!)
   : undefined;
 export const sandboxPoolClient = sandboxLeaseStore
   ? new SandboxPoolClient(sandboxLeaseStore, {
       endpointTemplate: sandboxEndpointTemplate!,
+      controlKey: config.QASEY_SANDBOX_CONTROL_KEY!,
+      replicas: config.QASEY_SANDBOX_REPLICAS,
       requestTimeoutMs: config.QASEY_SANDBOX_REQUEST_TIMEOUT_MS,
-      ...(githubReadTokens ? { githubTokenForScope: () => githubReadTokens.readToken() } : {}),
+      ...(githubTokenForScope ? { githubTokenForScope } : {}),
     })
   : undefined;
 export const codeTaskRunnerProvider = sandboxPoolClient
@@ -105,30 +130,64 @@ runtimeReadiness.register("mastra-storage", async () => {
 });
 if (applicationDatabase) runtimeReadiness.register("application-database", () => applicationDatabase.healthCheck());
 runtimeReadiness.register("run-repository", () => runRepository.healthCheck?.() ?? Promise.resolve());
+runtimeReadiness.register("failure-inbox", () => failureInboxStore.healthCheck?.() ?? Promise.resolve());
+runtimeReadiness.register("effect-receipts", () => effectReceiptStore.healthCheck?.() ?? Promise.resolve());
 runtimeReadiness.register("channel-delivery-inbox", () => channelDeliveryInbox.healthCheck?.() ?? Promise.resolve());
+runtimeReadiness.register("external-connections", () => externalConnectionStore.healthCheck?.() ?? Promise.resolve());
 if (sandboxLeaseStore) runtimeReadiness.register("sandbox-lease-store", () => sandboxLeaseStore.healthCheck());
+if (sandboxPoolClient) runtimeReadiness.register("sandbox-pool", () => sandboxPoolClient.healthCheck());
 export const mcpCatalog = new QaseyMcpCatalog(config, {
   ...(applicationDatabase ? { database: applicationDatabase.client } : {}),
+  connectionStore: externalConnectionStore,
 });
 runtimeReadiness.register("mcp-oauth-storage", () => mcpCatalog.healthCheck());
-runtimeReadiness.register("metersphere-mcp-tools", () => mcpCatalog.healthCheckRequiredMeterSphereTools());
+if (config.QASEY_REQUIRE_METERSPHERE_MCP) {
+  runtimeReadiness.register("metersphere-mcp-tools", () => mcpCatalog.healthCheckRequiredMeterSphereTools());
+}
 export const githubClient = createGitHubClient(config);
-export const readConnectorCatalog = new ReadConnectorCatalog(config);
+export const readConnectorCatalog = new ReadConnectorCatalog(
+  config,
+  new ConnectionBackedReadConnectorResolver(externalConnectionStore),
+);
 export const jiraClient = new JiraClient(config.JIRA_BASE_URL, config.JIRA_EMAIL, config.JIRA_API_TOKEN);
-export const artifactStore = new LocalArtifactStore(config.QASEY_ARTIFACT_DIR);
+export const artifactStore = config.QASEY_ARTIFACT_STORE === "s3"
+  ? new S3ArtifactStore({
+      bucket: config.QASEY_ARTIFACT_S3_BUCKET!,
+      region: config.QASEY_ARTIFACT_S3_REGION!,
+      prefix: config.QASEY_ARTIFACT_S3_PREFIX,
+      retentionDays: config.QASEY_ARTIFACT_RETENTION_DAYS,
+      ...(config.QASEY_ARTIFACT_S3_ENDPOINT ? { endpoint: config.QASEY_ARTIFACT_S3_ENDPOINT } : {}),
+      ...(config.QASEY_ARTIFACT_S3_FORCE_PATH_STYLE !== undefined
+        ? { forcePathStyle: config.QASEY_ARTIFACT_S3_FORCE_PATH_STYLE }
+        : {}),
+      ...(config.QASEY_ARTIFACT_S3_KMS_KEY_ID ? { kmsKeyId: config.QASEY_ARTIFACT_S3_KMS_KEY_ID } : {}),
+    })
+  : new LocalArtifactStore(config.QASEY_ARTIFACT_DIR);
+runtimeReadiness.register("artifact-store", () => artifactStore.healthCheck());
 export const githubPublisher = new GitHubPublisher(githubClient);
-const draftPrBroker = githubPublisher.configured
+const draftPrBroker = githubPublisher.configured || config.QASEY_TENANCY_MODE === "multi"
   ? {
-      publishChanges: (run: E2ERun, changes: Array<{ path: string; deleted: boolean; mode?: "100644" | "100755" | "120000"; content?: Buffer }>, reviewUrl: string) => githubPublisher.publishChanges({
-        repository: run.repository,
-        baseSha: run.baseSha!,
-        branch: run.branch ?? `qasey/${run.id}`,
-        title: `test(e2e): Qasey run ${run.id}`,
-        body: [`## Qasey generated E2E`, ``, `Cases: ${run.sourceCaseIds.join(", ")}`, `Review and evidence: ${reviewUrl}`, ``, `Clean verifier passed. QA approval is still required.`].join("\n"),
-        changes,
-        ...(run.pullRequestUrl ? { existingPullRequestUrl: run.pullRequestUrl } : {}),
-      }),
-      markReady: (run: E2ERun) => run.pullRequestUrl ? githubPublisher.markPullRequestReady(run.pullRequestUrl) : Promise.resolve(),
+      publishChanges: async (run: E2ERun, changes: Array<{ path: string; deleted: boolean; mode?: "100644" | "100755" | "120000"; content?: Buffer }>, reviewUrl: string) => {
+        const publisher = config.QASEY_TENANCY_MODE === "multi"
+          ? await tenantGitHubConnections.publisher(run.tenantId, run.repository.owner)
+          : githubPublisher;
+        return publisher.publishChanges({
+          repository: run.repository,
+          baseSha: run.baseSha!,
+          branch: run.branch ?? `qasey/${run.id}`,
+          title: `test(e2e): Qasey run ${run.id}`,
+          body: [`## Qasey generated E2E`, ``, `Cases: ${run.sourceCaseIds.join(", ")}`, `Review and evidence: ${reviewUrl}`, ``, `Clean verifier passed. QA approval is still required.`].join("\n"),
+          changes,
+          ...(run.pullRequestUrl ? { existingPullRequestUrl: run.pullRequestUrl } : {}),
+        });
+      },
+      markReady: async (run: E2ERun) => {
+        if (!run.pullRequestUrl) return;
+        const publisher = config.QASEY_TENANCY_MODE === "multi"
+          ? await tenantGitHubConnections.publisher(run.tenantId, run.repository.owner)
+          : githubPublisher;
+        await publisher.markPullRequestReady(run.pullRequestUrl);
+      },
     }
   : new NoopDraftPrBroker();
 export const e2eCoordinator = new E2ECoordinator(
@@ -138,6 +197,7 @@ export const e2eCoordinator = new E2ECoordinator(
   {
     maxRepairs: config.QASEY_MAX_REPAIRS,
     reviewBaseUrl: config.QASEY_PUBLIC_BASE_URL,
+    effects: sideEffectExecutor,
     ...(codeTaskRunnerProvider ? { codeTasks: codeTaskRunnerProvider } : {}),
   },
 );
@@ -150,8 +210,11 @@ export function initializeQaseyInfrastructure(): Promise<void> {
     runtimeStore.storage.init(),
     applicationDatabase?.init(),
     runRepository.init?.(),
+    failureInboxStore.init?.(),
+    effectReceiptStore.init?.(),
     channelDeliveryInbox.init?.(),
     sandboxLeaseStore?.init(),
+    externalConnectionStore.init?.(),
     mcpCatalog.init(),
   ]).then(() => undefined);
   return infrastructureInitialization;
@@ -159,7 +222,7 @@ export function initializeQaseyInfrastructure(): Promise<void> {
 
 export async function closeQaseyInfrastructure(): Promise<void> {
   const resources: Array<{ close(): Promise<void> }> = [
-    mcpCatalog, channelDeliveryInbox, runRepository, runtimeStore.storage,
+    mcpCatalog, externalConnectionStore, effectReceiptStore, failureInboxStore, artifactStore, channelDeliveryInbox, runRepository, runtimeStore.storage,
     ...(sandboxLeaseStore ? [sandboxLeaseStore] : []),
     ...(applicationDatabase ? [applicationDatabase] : []),
   ];
@@ -336,11 +399,13 @@ function e2eTools() {
         const resourceId = String(requestContext.get(MASTRA_RESOURCE_ID_KEY));
         const threadId = String(requestContext.get(MASTRA_THREAD_ID_KEY) ?? sessionId);
         const taskRunId = String(requestContext.get("taskId") ?? requestContext.get("executionId") ?? requestId);
+        const webE2EConfiguration = webE2EConfigurationFromSkill();
         const created = await e2eCoordinator.create(owner, {
           ...input,
           requestId,
           sourceSessionId: sessionId,
-          repository: webE2ERepositoryFromSkill(),
+          repository: webE2EConfiguration.target,
+          playwrightVerification: webE2EConfiguration.verification,
         }, { sessionId, threadId, taskRunId, requestId, resourceId });
         if (!mastra) throw new Error("Mastra runtime is required to start the E2E workflow");
         const workflowResourceId = getRuntimeContext(requestContext)["qasey-context"].actor.id;
@@ -403,14 +468,16 @@ export async function toolsForRequest(requestContext?: RequestContext<any>) {
           readOnly: true,
         })
       : {};
-    return { getCurrentTime, ...readConnectorCatalog.tools(), ...external };
+    const readTools = await readConnectorCatalog.toolsForTenant(subject?.tenantId);
+    return { getCurrentTime, ...readTools, ...external };
   }
+  const subject = mcpSubject(requestContext);
   const external = await mcpCatalog.toolsForDiscovery(
     context.channel,
-    mcpSubject(requestContext),
+    subject,
     { readOnly: false },
   );
-  const readTools = readConnectorCatalog.tools();
+  const readTools = await readConnectorCatalog.toolsForTenant(subject?.tenantId);
   const executionTools = e2eTools();
   const progressSession = requestContext?.get("agent-progress-session") instanceof AgentProgressSession
     ? requestContext.get("agent-progress-session") as AgentProgressSession

@@ -5,6 +5,7 @@ export default defineConfig({
     "mcp-login": "apps/cli/src/mcp-login.ts",
     "gh-wrapper": "apps/cli/src/gh-wrapper.ts",
     "sandbox-runtime": "src/sandbox/main.ts",
+    "worker-supervisor": "src/worker/main.ts",
     "code-task-worker": "src/sandbox/code-task-worker.ts",
     "cua-driver-worker": "src/sandbox/cua-driver-worker.ts",
   },

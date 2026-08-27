@@ -15,8 +15,8 @@ System prompt 已识别的 intent 决定执行 `e2e_generate`、`e2e_rerun`、`e
 
 ## e2e_generate：创建 run
 
-- E2E Case 落地 Web 目标仓库固定读取 [repositories.json](references/repositories.json)，不得从用户文本选择、替换或扩大目标仓库和允许路径。
-- Web 仓库的 BWeb、OBC、Enterprise 路径和 Playwright config 同样固定读取该引用。Verifier 根据 patch 涉及的 project 选择 config；有具体变更 spec 时只验证这些 spec，否则验证受影响 project。
+- E2E Case 落地 Web 目标仓库固定读取部署方通过 `QASEY_E2E_REPOSITORY_CONFIG_FILE` 提供的、未提交到 Git 的配置，不得从用户文本选择、替换或扩大目标仓库和允许路径。
+- Web 项目根目录、允许路径、Playwright config 和 project 名称都从该配置读取。Verifier 根据 patch 涉及的 project 选择 config；有具体变更 spec 时只验证这些 spec，否则验证受影响 project。
 - 调用创建工具前，把当前消息、thread memory、附件及前序工具证据整理成结构化 handoff：目标、需求摘要、范围、已确认决策、约束、假设、关键流、边界、负向场景、数据需求、仓库发现、阻塞问题和证据引用。
 - MeterSphere 是结构化用例基线，不是唯一上下文来源；不得丢弃前序对话中已经确认但未写入 MeterSphere 的信息。
 - 有未解决的阻塞问题时先向用户澄清，不得启动 E2E。

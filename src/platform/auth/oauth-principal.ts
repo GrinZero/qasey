@@ -42,3 +42,17 @@ export function createServicePrincipal(input: {
 }): OAuthPrincipal {
   return OAuthPrincipalSchema.parse({ ...input, roles: [...input.roles], audience: "service", service: true });
 }
+
+/** Production bootstrap requires verification; a separate operator-owned list supports local development. */
+export function browserUserRoles(
+  user: { email?: string; emailVerified: boolean },
+  bootstrapAdminEmails: ReadonlySet<string>,
+  localAdminEmails: ReadonlySet<string> = new Set(),
+): string[] {
+  const roles = ["user"];
+  const email = user.email?.toLowerCase();
+  if (email && (user.emailVerified && bootstrapAdminEmails.has(email) || localAdminEmails.has(email))) {
+    roles.push("platform-admin");
+  }
+  return roles;
+}

@@ -27,6 +27,7 @@ import { MeterSphereCaseCompletionReceiptSchema } from "../../workflows/metersph
 import { QASEY_AGENT_SAFETY_MAX_STEPS } from "../../agents/qasey-main/processors.ts";
 import { conversationScope } from "../../../platform/context/conversation-scope.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../../../platform/context/schema.ts";
+import { productionSignals } from "../../../platform/observability/production-signals.ts";
 
 export interface QaseyResponse {
   text: string;
@@ -332,6 +333,7 @@ export async function runQaseyAgentPhase(
   }
   abortSignal.throwIfAborted();
   const completedResult = restoreProcessedAgentOutput(result, finishSnapshot);
+  recordModelUsage(context.actor.tenantId, completedResult);
   return {
     context,
     runId,
@@ -339,6 +341,34 @@ export async function runQaseyAgentPhase(
     completionState: inspectAgentCompletion(completedResult),
     progress: agentProgress,
   };
+}
+
+function recordModelUsage(tenantId: string | undefined, result: unknown): void {
+  if (!tenantId || !result || typeof result !== "object") return;
+  const usage = (result as { usage?: unknown }).usage;
+  if (!usage || typeof usage !== "object") return;
+  const inputTokens = nonNegativeUsage((usage as Record<string, unknown>).inputTokens);
+  const outputTokens = nonNegativeUsage((usage as Record<string, unknown>).outputTokens);
+  if (inputTokens === undefined && outputTokens === undefined) return;
+  const input = inputTokens ?? 0;
+  const output = outputTokens ?? 0;
+  const inputRate = config.QASEY_MODEL_INPUT_COST_MICROUSD_PER_TOKEN;
+  const outputRate = config.QASEY_MODEL_OUTPUT_COST_MICROUSD_PER_TOKEN;
+  try {
+    productionSignals.addModelUsage({
+      tenantId,
+      model: config.QASEY_MAIN_MODEL,
+      inputTokens: input,
+      outputTokens: output,
+      ...(inputRate !== undefined && outputRate !== undefined
+        ? { costMicrousd: input * inputRate + output * outputRate }
+        : {}),
+    });
+  } catch { /* Metrics must never change Agent completion semantics. */ }
+}
+
+function nonNegativeUsage(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 export function prepareQaseyRequestContext(

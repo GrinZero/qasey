@@ -35,7 +35,11 @@ describe("immutable E2E context", () => {
     });
     const brief = freezeE2EExecutionBrief({
       context: snapshot, cases: [testCase],
-      repository: { owner: "MoeGolibrary", repository: "moego-e2e-autotest", workspacePath: "repos/MoeGolibrary/moego-e2e-autotest", baseSha: "a".repeat(40), allowedPaths: ["tests"], skillPaths: [".agents/skills"], specGlobs: ["tests"], artifactGlobs: ["artifacts/**"] },
+      repository: {
+        owner: "example-org", repository: "web-e2e", workspacePath: "repos/example-org/web-e2e", baseSha: "a".repeat(40),
+        allowedPaths: ["tests"], skillPaths: [".agents/skills"], specGlobs: ["tests"], artifactGlobs: ["artifacts/**"],
+        verification: playwrightVerification,
+      },
       now: new Date("2026-08-25T00:01:00.000Z"),
     });
 
@@ -45,5 +49,32 @@ describe("immutable E2E context", () => {
     expect(brief.cases[0]!.steps[0]).toEqual({ action: "1. Submit order", expected: ["Success page is shown"] });
     expect(brief.cases[0]!.testData.password).toBe("[REDACTED]");
     expect(brief.briefHash).toMatch(/^[a-f0-9]{64}$/u);
+    const differentVerification = freezeE2EExecutionBrief({
+      context: snapshot,
+      cases: [testCase],
+      repository: {
+        ...brief.repository,
+        verification: {
+          ...brief.repository.verification,
+          projects: brief.repository.verification.projects.map(project => ({
+            ...project,
+            playwrightProject: "firefox",
+          })),
+        },
+      },
+      now: new Date("2026-08-25T00:01:00.000Z"),
+    });
+    expect(differentVerification.briefHash).not.toBe(brief.briefHash);
   });
 });
+
+const playwrightVerification = {
+  strategy: "changed-project-playwright" as const,
+  projects: [{
+    id: "tests",
+    root: "tests",
+    testRoot: "tests",
+    config: "tests/playwright.config.ts",
+    playwrightProject: "chromium",
+  }],
+};

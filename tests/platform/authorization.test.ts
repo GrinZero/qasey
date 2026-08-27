@@ -4,7 +4,7 @@ import manifest from "../fixtures/mastra-route-permissions.json";
 import type { CatalogEntry } from "../../src/runtime/application.ts";
 import { classifyMastraStudioRoute, classifyRuntimeRoute, createAuthorizationMiddleware, isMastraStudioRequest, isPublicRuntimePath, resolveRequestUser, studioLoginRedirect } from "../../src/platform/auth/authorization-middleware.ts";
 import { InMemoryPermissionStore, PermissionService } from "../../src/platform/auth/permission-store.ts";
-import { createServicePrincipal, OAuthPrincipalSchema } from "../../src/platform/auth/oauth-principal.ts";
+import { browserUserRoles, createServicePrincipal, OAuthPrincipalSchema } from "../../src/platform/auth/oauth-principal.ts";
 
 const entries: CatalogEntry[] = [
   { applicationId: "alpha", resourceType: "agent", resourceId: "alpha-main", permission: "alpha.agent.execute", audiences: ["api", "channel"] },
@@ -16,6 +16,22 @@ const entries: CatalogEntry[] = [
 ];
 
 describe("permission route coverage", () => {
+  it("never grants bootstrap administration to an unverified password email", () => {
+    const bootstrapAdmins = new Set(["owner@example.invalid"]);
+    expect(browserUserRoles({ email: "OWNER@EXAMPLE.INVALID", emailVerified: false }, bootstrapAdmins)).toEqual(["user"]);
+    expect(browserUserRoles({ email: "OWNER@EXAMPLE.INVALID", emailVerified: true }, bootstrapAdmins))
+      .toEqual(["user", "platform-admin"]);
+  });
+
+  it("allows an explicitly configured local password email to administer development", () => {
+    const localAdmins = new Set(["owner@example.invalid"]);
+    expect(browserUserRoles(
+      { email: "OWNER@EXAMPLE.INVALID", emailVerified: false },
+      new Set(),
+      localAdmins,
+    )).toEqual(["user", "platform-admin"]);
+  });
+
   it("delegates managed Slack webhook authentication to the signing-secret verifier", () => {
     expect(classifyRuntimeRoute("/channels/slack/apps/1f7a91aa/events", "POST", new Map(), [])).toMatchObject({
       applicationId: "qasey",
@@ -549,6 +565,9 @@ describe("permission route coverage", () => {
     await store.bindSubjectRole("tenant-b", "subject", "delegated");
     store.grant("tenant-b", "delegated", "alpha.agent.execute");
     await expect(check("tenant-b", ["user"])).resolves.toBe(true);
+    await expect(permissions.revokeSubjectRoles("tenant-b", "subject")).resolves.toBe(1);
+    await expect(check("tenant-b", ["user"])).resolves.toBe(false);
+    await expect(permissions.revokeSubjectRoles("tenant-b", "subject")).resolves.toBe(0);
     await expect(check("tenant-b", ["platform-admin"])).resolves.toBe(true);
   });
 });

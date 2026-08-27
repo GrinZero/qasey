@@ -31,10 +31,10 @@ export interface MaterializedRepository {
 }
 
 /**
- * One Git mirror/store per repository namespace. Coding attempts should call
- * createWorktree() so author, repair, and verifier checkouts share this single
- * object store. materialize() remains for callers that explicitly need a
- * standalone clone.
+ * One preparation mirror per repository namespace. Code Tasks call
+ * createIsolatedCheckout() so only fetch work is shared; every attempt owns
+ * its Git metadata and object files. createWorktree() remains for trusted
+ * callers that intentionally share the mirror's object store.
  */
 export class SharedRepositoryCache {
   constructor(
@@ -106,6 +106,56 @@ export class SharedRepositoryCache {
     });
   }
 
+  /**
+   * Materialize a Code Task checkout with its own Git directory and object
+   * files. The shared mirror is only a preparation source: no alternates,
+   * hardlinks, or worktree metadata point back to the shared cache at runtime.
+   */
+  async createIsolatedCheckout(
+    source: RepositoryCacheSource,
+    destinationInput: string,
+    options: CreateRepositoryWorktreeOptions,
+  ): Promise<MaterializedRepository> {
+    const cacheRoot = resolve(this.root);
+    const namespaceRoot = containedPath(cacheRoot, safeSegment(source.namespace));
+    const mirrorPath = containedPath(namespaceRoot, `${repositoryKey(source)}.git`);
+    const destination = resolve(destinationInput);
+    await Promise.all([
+      mkdir(namespaceRoot, { recursive: true, mode: 0o700 }),
+      mkdir(dirname(destination), { recursive: true, mode: 0o700 }),
+    ]);
+    if (await exists(destination)) throw new Error(`Repository checkout destination already exists: ${destination}`);
+
+    return this.withRepositoryLock(mirrorPath, async () => {
+      const prepared = await prepareMirror(source, mirrorPath, options);
+      const baseSha = options.baseSha ?? prepared.resolvedSha;
+      if (!baseSha) throw new Error("A pinned base SHA is required to create an isolated checkout");
+      const hasCommit = await git(mirrorPath, ["cat-file", "-e", `${baseSha}^{commit}`], options);
+      assertGit(hasCommit, `verify pinned base commit ${baseSha}`);
+      const clone = await git(dirname(destination), [
+        "clone", "--local", "--no-hardlinks", "--no-checkout", "--", mirrorPath, destination,
+      ], options);
+      if (clone.exitCode !== 0) {
+        await rm(destination, { recursive: true, force: true });
+        assertGit(clone, "git isolated clone");
+      }
+      const setRemote = await git(join(destination, ".git"), ["remote", "set-url", "origin", source.cloneUrl], options, true);
+      assertGit(setRemote, "git isolated origin configuration");
+      const checkout = await git(destination, ["checkout", "--detach", "--force", baseSha], options);
+      if (checkout.exitCode !== 0) {
+        await rm(destination, { recursive: true, force: true });
+        assertGit(checkout, `git checkout pinned commit ${baseSha}`);
+      }
+      const head = await git(destination, ["rev-parse", "HEAD"], options);
+      assertGit(head, "verify isolated checkout HEAD");
+      if (head.stdout.trim() !== baseSha) throw new Error(`Isolated checkout resolved ${head.stdout.trim()} instead of ${baseSha}`);
+      if (await exists(join(destination, ".git", "objects", "info", "alternates"))) {
+        throw new Error("Isolated checkout unexpectedly references a shared Git object store");
+      }
+      return { ...prepared, mirrorPath, destination, resolvedSha: baseSha };
+    });
+  }
+
   private async withRepositoryLock<T>(mirrorPath: string, operation: () => Promise<T>): Promise<T> {
     const lockPath = `${mirrorPath}.lock`;
     const timeoutMs = this.options.lockTimeoutMs ?? 120_000;
@@ -148,7 +198,11 @@ async function prepareMirror(
     const clone = await git(dirname(mirrorPath), ["clone", "--mirror", "--", source.cloneUrl, mirrorPath], options);
     assertGit(clone, "git mirror clone");
   } else {
-    const configuredRemote = await git(mirrorPath, ["remote", "get-url", "origin"], options);
+    // Read the literal configuration value. `git remote get-url` expands
+    // url.<base>.insteadOf rules, so a trusted CI rewrite from an HTTPS URL to
+    // a local fixture would otherwise look like cache-key poisoning on the
+    // second checkout of the same repository.
+    const configuredRemote = await git(mirrorPath, ["config", "--get", "remote.origin.url"], options);
     assertGit(configuredRemote, "git mirror remote inspection");
     if (normalizeRemote(configuredRemote.stdout) !== normalizeRemote(source.cloneUrl)) {
       throw new Error("Repository cache key resolved to a different origin URL");

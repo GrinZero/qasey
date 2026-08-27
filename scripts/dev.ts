@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -26,6 +27,11 @@ const removeOwnedLockOnExit = (): void => {
 process.once("exit", removeOwnedLockOnExit);
 
 const localSandboxPort = 4120;
+// The local control plane and Sandbox share ephemeral process-scoped keys.
+// They are deliberately not written to an .env file or inherited by task
+// commands; restarting the development stack invalidates old capabilities.
+const localSandboxControlKey = randomBytes(32).toString("base64url");
+const localSandboxLeaseKey = randomBytes(32).toString("base64url");
 const developmentEnv: NodeJS.ProcessEnv = {
   ...process.env,
   NODE_ENV: "development",
@@ -35,6 +41,8 @@ const developmentEnv: NodeJS.ProcessEnv = {
   QASEY_SANDBOX_REPLICAS: "1",
   QASEY_SANDBOX_MAX_SESSIONS: "1",
   QASEY_SANDBOX_DESKTOP_ENABLED: "false",
+  QASEY_SANDBOX_CONTROL_KEY: localSandboxControlKey,
+  QASEY_SANDBOX_LEASE_KEY: localSandboxLeaseKey,
   PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH ?? defaultPlaywrightBrowsersPath(),
 };
 
@@ -153,16 +161,12 @@ try {
         process.exitCode = exitCode(browserInstall);
       } else {
         forwardedSignal = undefined;
-        const sandbox = spawnChild("moego-aws-secret-env", [
-          "run", "--default-environment", "testing", "--", "node", "dist/sandbox-runtime.mjs",
-        ], developmentEnv);
+        const sandbox = spawnChild(process.execPath, ["dist/sandbox-runtime.mjs"], developmentEnv);
         await waitForSpawn(sandbox);
         await lock.setChildPid(sandbox.pid!);
         await waitForSandboxReady(sandbox);
 
-        const mastra = spawnChild("moego-aws-secret-env", [
-          "run", "--default-environment", "testing", "--", "mastra", "dev", "--dir", "src/mastra",
-        ], developmentEnv);
+        const mastra = spawnChild("pnpm", ["exec", "mastra", "dev", "--dir", "src/mastra"], developmentEnv);
         await waitForSpawn(mastra);
         await lock.setChildPid(mastra.pid!);
 

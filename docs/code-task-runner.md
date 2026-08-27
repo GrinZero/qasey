@@ -2,42 +2,47 @@
 
 ## Repository storage invariant
 
-Within one Sandbox replica, one canonical repository has one Git mirror/object
-store. Sessions, tasks, and attempts never clone that repository again. They
-only create independent Git worktrees pinned to an immutable base SHA.
+Within one Sandbox replica, one canonical repository has one trusted Git mirror
+used only to prepare attempts. Every attempt receives a full, independent
+checkout pinned to an immutable base SHA. The checkout has its own `.git`
+directory and copied object files: it has no worktree pointer, alternates file,
+or hardlink back to the shared mirror.
 
 ```text
 Sandbox replica
 ├── git-cache/code-task-repository-pool-v1/<repository-key>.git
-│   ├── objects/                         # shared once
-│   └── worktrees/                       # Git administrative metadata
-└── workspaces/<workspace-id>/repo/code-tasks/
-    ├── <task-id>/<author-attempt>/repositories/target
-    ├── <task-id>/<repair-attempt>/repositories/target
-    └── <task-id>/<verifier-attempt>/repositories/target
+│   └── objects/                         # trusted preparation cache
+└── code-tasks/<workspace-id>/<task-id>/<attempt-id>/
+    ├── repositories/target/.git/objects # private, no hardlinks/alternates
+    ├── repositories/reference/.git/     # optional read-only secondary repo
+    ├── control/                         # worker state, never task-code mounted
+    ├── artifacts/                       # terminal immutable read layer
+    └── check-output/                    # fixed-check private HOME/output
 ```
 
 The first authorized use creates the mirror. Every later use refreshes it
-through the repository broker and creates a worktree directly from the same
-store. There is no session-local or attempt-local bare clone. Missing worktree
-directories are pruned from Git metadata before a new worktree is added.
-
-This deduplicates Git objects, which are often the largest persistent part of
-a repository checkout. Worktree files and attempt-local `node_modules` still
-consume space; package-manager content-addressable stores may deduplicate
-package contents, but this design does not claim that worktrees are free.
+and performs `git clone --local --no-hardlinks --no-checkout`, followed by an
+exact detached checkout and `HEAD` verification. The mirror is never mounted
+into a task namespace. This deliberately trades some disk deduplication for a
+security invariant: untrusted Git commands cannot mutate or traverse metadata
+shared by another tenant or attempt. Attempt data is removed by the configured
+workspace retention policy.
 
 ## Authorization boundary
 
-The repository broker obtains the current GitHub read credential and performs
-the mirror clone or refresh. A cache hit does not bypass authorization: refresh
-must succeed before a worktree is handed to a task. The mirror stores a
-credential-free canonical remote URL. GitHub tokens, `extraHeader`, and Git
-credential configuration are not copied into the worktree or worker process.
+The trusted Sandbox runtime obtains the current GitHub read credential and uses
+it only for the mirror refresh and isolated checkout preparation. A cache hit
+does not bypass authorization: refresh must succeed before a checkout is handed
+to a task. The mirror and checkout store credential-free canonical remote URLs.
+GitHub tokens, `extraHeader`, and Git credential configuration are not copied
+into the checkout or worker process; there is no task-reachable repository
+broker endpoint or broker bearer token.
 
-The shared store is keyed by canonical repository within the Sandbox replica,
-not by session. This is a storage optimization only. The writable filesystem
-visible to the Agent remains its attempt worktree.
+The shared preparation store is keyed by canonical repository within the
+Sandbox replica, not by session. The only repository filesystem visible to the
+Agent remains its private attempt checkout. Secondary `read` repositories are
+mounted read-only and their pinned `HEAD`, status, and tree hash are checked
+again after all deterministic checks.
 
 ## Mastra and Git responsibilities
 
@@ -45,20 +50,31 @@ Git lifecycle is owned by `CodeTaskRunner` and the Sandbox runtime:
 
 1. Authorize and refresh the shared repository store.
 2. Validate that the frozen base SHA exists.
-3. Create an attempt-specific detached worktree.
-4. Start the `code-task-worker` process in that worktree.
+3. Create an attempt-specific detached, independent checkout.
+4. Start the `code-task-worker` process in that independent checkout.
 5. Collect and validate the patch and artifacts.
 
-Inside the worker, Mastra `LocalFilesystem` is rooted at that worktree with
+Inside the worker, Mastra `LocalFilesystem` is rooted at that checkout with
 containment enabled. A dedicated native Mastra `Agent` receives the repository
 Workspace and discovers only the frozen repository-local Skill paths. Write
-tools are guarded by the frozen `allowedPaths`; delete and arbitrary shell tools
-are not exposed. Mastra provides the Agent's file boundary; it does not clone
-repositories, choose worktrees, or decide which checks to run.
+tools are guarded both by the frozen `allowedPaths` and by canonical nearest-
+ancestor checks, so an allowed lexical path cannot escape through a symlink.
+Delete and arbitrary shell tools are not exposed. Mastra provides the Agent's
+file boundary; it does not clone repositories, choose checkouts, or decide
+which checks to run.
 
-Author, repair, and verifier attempts therefore share Git objects but never a
-working directory or Agent session. The verifier always receives the persisted
-patch in a fresh detached worktree.
+Model credentials are excluded from the worker's initial environment and sent
+once as a bounded JSON line over the worker's stdin. They remain in the trusted
+worker's memory. Repository-controlled install and Playwright processes run in
+a second bubblewrap PID/mount namespace which cannot see the worker process,
+control state, final artifact root, or credentials through `/proc`.
+
+Author, repair, and verifier attempts therefore share only a trusted preparation
+cache, never Git objects mounted at runtime, a working directory, or an Agent
+session. The verifier always receives the persisted patch in a fresh detached
+checkout. Completed artifacts become readable only after terminal state through
+the `sandbox://code-task-artifacts/...` virtual read-only layer; the active task
+root is not exposed through the generic session filesystem.
 
 `qasey-main` remains the supervisor and lifecycle entrypoint, but it does not
 receive repository write access. The durable E2E workflow invokes the dedicated
@@ -67,30 +83,41 @@ repository mutation, and deterministic verification as separate trust zones.
 
 ## Fixed Web E2E configuration
 
-The versioned repository configuration lives in
-`src/mastra/agents/qasey-main/skills/e2e-lifecycle/references/repositories.json`.
+The deployment-owned repository configuration is selected by
+`QASEY_E2E_REPOSITORY_CONFIG_FILE`. Start by copying
+`config/e2e-repository.example.json` to the ignored
+`config/e2e-repository.json` file.
 It owns:
 
-- the fixed `MoeGolibrary/moego-e2e-autotest` repository and base ref;
-- writable paths for BWeb, OBC, and Enterprise tests, page objects, and helpers;
+- the target repository and base ref;
+- writable paths for tests, page objects, and helpers;
 - the Playwright config and project name for each product project.
 
-Neither an API caller nor the coding Agent can provide a command. After the
-patch is present, the worker derives the affected project from changed paths.
+Neither an API caller nor the coding Agent can provide a command or replace the
+verification mapping. The Service strictly parses the target and mapping in one
+read when it creates a run, persists that server-owned snapshot, includes it in
+the hashed execution brief, and copies it into every Code Task spec. The
+Sandbox image does not contain or mount the ignored deployment file, and the
+worker never reads it. Missing, malformed, duplicate, escaping, partially
+covered, or unmatched mappings fail closed; legacy in-flight runs without a
+snapshot must be recreated.
+
+After the patch is present, the worker derives the affected project only from
+the frozen mapping and changed paths.
 When changed spec files exist, it invokes the repository-local Playwright CLI
 for those specs. When only project support code changed, it invokes the whole
 affected project. A path outside every configured project fails closed.
 
-Conceptually, a BWeb change becomes:
+With the redacted example configuration, a Web project change becomes:
 
 ```text
-pnpm exec playwright test <changed BWeb specs>
-  --config=project/BWeb/playwright.config.ts
-  --project=t2
+pnpm exec playwright test <changed Web specs>
+  --config=web/playwright.config.ts
+  --project=chromium
 ```
 
 Reports, JUnit output, logs, and test results are written under the attempt
-artifact directory rather than the repository worktree.
+artifact directory rather than the repository checkout.
 
 ## Execution environment mapping
 
@@ -102,8 +129,8 @@ profile derives the target repository environment:
 QASEY_E2E_BASE_URL -> BASE_URL
 ```
 
-`moego-e2e-autotest` reads `BASE_URL`. If `QASEY_E2E_BASE_URL` is absent from
-the Sandbox runtime, no alias is injected and the repository's own T2 default
+The configured E2E repository reads `BASE_URL`. If `QASEY_E2E_BASE_URL` is absent
+from the Sandbox runtime, no alias is injected and the repository's own default
 remains active. Request payloads cannot provide either value. Model credentials
 and the matching `OPENAI_BASE_URL`, when configured, are available only to
 Agent-backed author, repair, and read-only review profiles. They are absent
@@ -139,6 +166,9 @@ pnpm exec vitest run \
 ```
 
 A live author/verifier test additionally requires the built Sandbox worker,
-model credentials for authoring, GitHub broker credentials for the private
-repository, MeterSphere access, target repository package access, and the
+model credentials for authoring, a control-plane GitHub read credential for the
+private repository, MeterSphere access, target repository package access, and the
 Playwright browsers. `QASEY_IMAGE_DIGEST` is not required locally.
+Production sandbox startup rejects a missing or non-immutable value, and the
+exact release smoke asserts that every task provenance record matches the
+digest-addressed candidate that executed it.

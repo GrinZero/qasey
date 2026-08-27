@@ -164,6 +164,20 @@ export class SlackIntegrationManager {
     }));
   }
 
+  async rotateCredentials(input: {
+    tenantId: string;
+    actorId: string;
+    id: string;
+    revision: number;
+  }): Promise<SlackConnectionView> {
+    return this.view(await this.repository.rotateCredentials(
+      input.tenantId,
+      input.id,
+      input.revision,
+      input.actorId,
+    ));
+  }
+
   async rebind(input: { tenantId: string; actorId: string; id: string; revision: number; agentId: string }): Promise<SlackConnectionView> {
     this.assertTarget(input.agentId);
     return this.view(await this.repository.rebind(input.tenantId, input.id, input.agentId, input.revision, input.actorId));

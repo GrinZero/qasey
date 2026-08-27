@@ -12,6 +12,8 @@ import {
   ClipboardCheck,
   Copy,
   Clock3,
+  Eye,
+  EyeOff,
   FileSearch,
   FileText,
   FolderOpen,
@@ -49,9 +51,13 @@ import { api, ApiError, errorMessage } from "./api";
 import { canRunQaseyTask } from "./catalog";
 import { adminPaths, legacyAdminPath, viewForAdminPath, type View } from "./routes";
 import { presentScope } from "./scopes";
-import type { AgentApplication, ApiTokenRecord, AuditRecord, CatalogEntry, QaseyRun, RunStatus, SandboxSessionState, Session, TriggerConnection, TriggerConnectionStatus, TriggerProvider, TriggerTarget } from "./types";
+import type { AgentApplication, ApiTokenRecord, AuditRecord, AuthConfig, CatalogEntry, OrganizationSelection, QaseyRun, RunStatus, SandboxSessionState, Session, TriggerConnection, TriggerConnectionStatus, TriggerProvider, TriggerTarget } from "./types";
 
-type AuthState = { kind: "loading" } | { kind: "anonymous"; message?: string } | { kind: "authenticated"; session: Session };
+type AuthState =
+  | { kind: "loading" }
+  | { kind: "anonymous"; message?: string }
+  | { kind: "selecting-organization"; selection: OrganizationSelection }
+  | { kind: "authenticated"; session: Session };
 
 const statusMeta: Record<RunStatus, { label: string; tone: string; step: number }> = {
   queued: { label: "等待开始", tone: "neutral", step: 0 },
@@ -110,7 +116,17 @@ export function App() {
         if (!active) return;
         setAuth({ kind: "authenticated", session });
       })
-      .catch(() => {
+      .catch(async () => {
+        try {
+          const { selection } = await api.organizationSelection();
+          if (!active) return;
+          if (selection) {
+            setAuth({ kind: "selecting-organization", selection });
+            return;
+          }
+        } catch {
+          // Authentication failures remain intentionally indistinguishable here.
+        }
         if (active) setAuth({ kind: "anonymous", ...(error ? { message: friendlySsoError(error) } : {}) });
       });
     const unauthorized = () => setAuth({ kind: "anonymous", message: "登录已过期。重新登录后，你的草稿仍会保留。" });
@@ -134,6 +150,7 @@ export function App() {
 
   if (auth.kind === "loading") return <BootScreen />;
   if (auth.kind === "anonymous") return <LoginScreen message={auth.message} redirectUri={loginRedirect} />;
+  if (auth.kind === "selecting-organization") return <OrganizationSelectionScreen initialSelection={auth.selection} />;
 
   const activeCount = runs.filter(run => activeStatuses.includes(run.status)).length;
   const reviewCount = runs.filter(run => run.status === "awaiting_qa").length;
@@ -181,7 +198,7 @@ export function App() {
       <aside className={menuOpen ? "sidebar sidebar--open" : "sidebar"}>
         <div className="brand">
           <BrandMark />
-          <div><strong>MoeGo Agents</strong><span>Application platform</span></div>
+          <div><strong>Qasey</strong><span>Application platform</span></div>
           <button className="icon-button sidebar-close" onClick={() => setMenuOpen(false)} aria-label="关闭导航"><X size={20} /></button>
         </div>
         <button className="new-task" onClick={() => openView("qasey-overview")}>
@@ -210,7 +227,7 @@ export function App() {
       <main className="main-area">
         <header className="topbar">
           <button className="icon-button mobile-menu" onClick={() => setMenuOpen(true)} aria-label="打开导航"><Menu size={21} /></button>
-          <div className="breadcrumbs"><span>MoeGo Agents</span><ChevronRight size={14} />{qaseyActive && <><span>Qasey</span><ChevronRight size={14} /></>}<strong>{currentLabel}</strong></div>
+          <div className="breadcrumbs"><span>Qasey</span><ChevronRight size={14} />{qaseyActive && <><span>QA Agent</span><ChevronRight size={14} /></>}<strong>{currentLabel}</strong></div>
           <div className="topbar-actions">
             <div className="search-box"><Search size={16} /><span>搜索 Agent、任务或运行</span><kbd>⌘ /</kbd></div>
             <button className="avatar-button" aria-label="账户菜单"><Avatar label={auth.session.email ?? auth.session.subjectId} /></button>
@@ -245,22 +262,92 @@ function BootScreen() {
 }
 
 function LoginScreen({ message, redirectUri }: { message: string | undefined; redirectUri: string }) {
-  const [loading, setLoading] = useState(false);
+  const [config, setConfig] = useState<AuthConfig | null>(null);
+  const [configError, setConfigError] = useState("");
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [displayName, setDisplayName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [passwordConfirmation, setPasswordConfirmation] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [busy, setBusy] = useState<"" | "password" | "google">("");
   const [error, setError] = useState(message ?? "");
-  const login = async () => {
-    setLoading(true);
+
+  const loadConfig = useCallback(async () => {
+    setConfigError("");
+    try {
+      const nextConfig = await api.authConfig();
+      setConfig(nextConfig);
+      if (!nextConfig.password || !nextConfig.registration) setMode("login");
+    } catch (cause) {
+      setConfig(null);
+      setConfigError(errorMessage(cause));
+    }
+  }, []);
+
+  useEffect(() => { void loadConfig(); }, [loadConfig]);
+  useEffect(() => { if (message) setError(message); }, [message]);
+
+  const switchMode = (nextMode: "login" | "register") => {
+    setMode(nextMode);
+    setPassword("");
+    setPasswordConfirmation("");
+    setShowPassword(false);
+    setError("");
+  };
+  const googleLogin = async () => {
+    setBusy("google");
     setError("");
     try {
       const { url } = await api.loginUrl(redirectUri);
       window.location.assign(url);
     } catch (cause) {
       setError(errorMessage(cause));
-    } finally { setLoading(false); }
+    } finally { setBusy(""); }
   };
+  const submitCredentials = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!config?.password) return;
+    if (mode === "register" && password !== passwordConfirmation) {
+      setError("两次输入的密码不一致，请重新确认。");
+      return;
+    }
+    setBusy("password");
+    setError("");
+    try {
+      const result = mode === "register"
+        ? await api.passwordRegister({
+            displayName: displayName.trim(),
+            email: email.trim(),
+            password,
+            redirectUri,
+          })
+        : await api.passwordLogin({ email: email.trim(), password, redirectUri });
+      window.location.assign(result.redirectTo);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally { setBusy(""); }
+  };
+
+  const passwordEnabled = Boolean(config?.password);
+  const registrationEnabled = passwordEnabled && Boolean(config?.registration);
+  const googleEnabled = Boolean(config?.google);
+  const credentialBusy = busy === "password";
+  const title = mode === "register" ? "创建 Qasey 账号" : "登录 Agent Platform";
+  const note = !config
+    ? "正在确认平台为你提供的登录方式。"
+    : mode === "register"
+      ? "创建密码账户，进入当前单租户工作空间。"
+      : passwordEnabled
+        ? "输入邮箱和密码，也可以使用组织的企业账号。"
+        : googleEnabled
+          ? "使用管理员配置的 Google Workspace 账户继续。"
+          : "平台管理员尚未启用登录方式。";
+
   return (
     <main className="login-page">
       <section className="login-story">
-        <div className="login-brand"><BrandMark /><strong>MoeGo Agents</strong><span>Application platform</span></div>
+        <div className="login-brand"><BrandMark /><strong>Qasey</strong><span>Application platform</span></div>
         <div className="story-copy">
           <p className="eyebrow">Agent applications, one place</p>
           <h1>让每一个 Agent，<br />都有自己的工作方式。</h1>
@@ -277,21 +364,137 @@ function LoginScreen({ message, redirectUri }: { message: string | undefined; re
             return <div className="login-rail-step" key={String(title)}><span><RailIcon size={17} /></span><div><strong>{String(title)}</strong><small>{String(text)}</small></div>{index < 3 && <i />}</div>;
           })}
         </div>
-        <div className="story-foot">MoeGo Agent Platform · Protected workspace</div>
+        <div className="story-foot">Qasey Agent Platform · Protected workspace</div>
       </section>
       <section className="login-panel">
         <div className="login-box">
-          <p className="eyebrow">欢迎回来</p>
-          <h2>登录 Agent Platform</h2>
-          <p className="login-note">使用你的 MoeGo Google Workspace 账户继续。</p>
+          <p className="eyebrow">{mode === "register" ? "开始使用" : "欢迎回来"}</p>
+          <h2>{title}</h2>
+          <p className="login-note">{note}</p>
+
+          {registrationEnabled && (
+            <div className="auth-mode-tabs" role="tablist" aria-label="账号入口">
+              <button id="auth-login-tab" type="button" role="tab" aria-selected={mode === "login"} aria-controls="credential-form" className={mode === "login" ? "active" : ""} disabled={Boolean(busy)} onClick={() => switchMode("login")}>密码登录</button>
+              <button id="auth-register-tab" type="button" role="tab" aria-selected={mode === "register"} aria-controls="credential-form" className={mode === "register" ? "active" : ""} disabled={Boolean(busy)} onClick={() => switchMode("register")}>注册账号</button>
+            </div>
+          )}
+
+          {!config && !configError && <div className="auth-method-status" role="status"><LoaderCircle className="spin" size={17} />正在读取登录方式…</div>}
+          {configError && <div className="login-error" role="alert"><CircleAlert size={18} /><span>无法读取登录方式。{configError}</span></div>}
           {error && <div className="login-error" role="alert"><CircleAlert size={18} /><span>{error}</span></div>}
-          <button className="google-button" onClick={login} disabled={loading}>
-            {loading ? <LoaderCircle className="spin" size={19} /> : <GoogleGlyph />}
-            {loading ? "正在前往 Google…" : "使用 Google 登录"}
-            {!loading && <ArrowRight size={18} />}
-          </button>
-          <div className="security-note"><ShieldCheck size={16} /><span>仅允许已获授权的组织账户。MoeGo Agents 不会存储你的 Google 密码。</span></div>
+
+          {passwordEnabled && (
+            <form
+              id="credential-form"
+              className="credential-form"
+              role={registrationEnabled ? "tabpanel" : undefined}
+              aria-labelledby={registrationEnabled ? `auth-${mode}-tab` : undefined}
+              onSubmit={submitCredentials}
+            >
+              {mode === "register" && (
+                <label htmlFor="auth-display-name">姓名
+                  <input id="auth-display-name" name="name" type="text" autoComplete="name" value={displayName} disabled={Boolean(busy)} required maxLength={100} onChange={event => setDisplayName(event.target.value)} placeholder="你的姓名" />
+                </label>
+              )}
+              <label htmlFor="auth-email">邮箱
+                <input id="auth-email" name="email" type="email" inputMode="email" autoComplete="email" value={email} disabled={Boolean(busy)} required maxLength={320} autoFocus onChange={event => setEmail(event.target.value)} placeholder="name@example.com" />
+              </label>
+              <label htmlFor="auth-password">密码
+                <span className="password-field">
+                  <input id="auth-password" name="password" type={showPassword ? "text" : "password"} autoComplete={mode === "register" ? "new-password" : "current-password"} value={password} disabled={Boolean(busy)} required minLength={15} maxLength={128} onChange={event => setPassword(event.target.value)} placeholder={mode === "register" ? "至少 15 位，建议使用长密码短语" : "输入你的密码"} />
+                  <button type="button" className="password-toggle" aria-label={showPassword ? "隐藏密码" : "显示密码"} aria-pressed={showPassword} disabled={Boolean(busy)} onClick={() => setShowPassword(current => !current)}>{showPassword ? <EyeOff size={17} /> : <Eye size={17} />}</button>
+                </span>
+              </label>
+              {mode === "register" && (
+                <label htmlFor="auth-password-confirmation">确认密码
+                  <input id="auth-password-confirmation" name="password-confirmation" type={showPassword ? "text" : "password"} autoComplete="new-password" value={passwordConfirmation} disabled={Boolean(busy)} required minLength={15} maxLength={128} onChange={event => setPasswordConfirmation(event.target.value)} placeholder="再次输入密码" />
+                </label>
+              )}
+              <button className="credential-submit" type="submit" disabled={Boolean(busy)}>
+                {credentialBusy ? <LoaderCircle className="spin" size={18} /> : mode === "register" ? <UserRound size={17} /> : <KeyRound size={17} />}
+                {credentialBusy ? (mode === "register" ? "正在创建账号…" : "正在登录…") : (mode === "register" ? "创建账号并继续" : "使用密码登录")}
+                {!credentialBusy && <ArrowRight size={17} />}
+              </button>
+            </form>
+          )}
+
+          {googleEnabled && passwordEnabled && <div className="auth-divider"><span>或使用企业账号</span></div>}
+          {googleEnabled && (
+            <button type="button" className="google-button" onClick={() => void googleLogin()} disabled={Boolean(busy)}>
+              {busy === "google" ? <LoaderCircle className="spin" size={19} /> : <GoogleGlyph />}
+              {busy === "google" ? "正在前往 Google…" : "使用 Google 继续"}
+              {busy !== "google" && <ArrowRight size={18} />}
+            </button>
+          )}
+
+          {config && !passwordEnabled && !googleEnabled && <div className="login-error" role="alert"><CircleAlert size={18} /><span>当前没有可用的登录方式，请联系平台管理员。</span></div>}
+          {configError && <button type="button" className="secondary-button auth-retry" onClick={() => void loadConfig()}>重新读取</button>}
+          {config && (passwordEnabled || googleEnabled) && <div className="security-note"><ShieldCheck size={16} /><span>密码只保存带随机盐的单向哈希；登录会话保存在受保护的 HttpOnly Cookie 中。</span></div>}
         </div>
+      </section>
+    </main>
+  );
+}
+
+function OrganizationSelectionScreen({ initialSelection }: { initialSelection: OrganizationSelection }) {
+  const [selection, setSelection] = useState(initialSelection);
+  const [submittingId, setSubmittingId] = useState("");
+  const [error, setError] = useState("");
+
+  const restartLogin = async () => {
+    setError("");
+    try {
+      const { url } = await api.loginUrl(selection.redirectTo);
+      window.location.assign(url);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    }
+  };
+  const choose = async (organizationId: string) => {
+    setSubmittingId(organizationId);
+    setError("");
+    try {
+      const result = await api.selectOrganization(organizationId);
+      window.location.assign(result.redirectTo);
+    } catch (cause) {
+      setError(errorMessage(cause));
+      try {
+        const refreshed = await api.organizationSelection();
+        if (refreshed.selection) setSelection(refreshed.selection);
+      } catch {
+        // Keep the original, tenant-safe choices visible with the retry action.
+      }
+    } finally {
+      setSubmittingId("");
+    }
+  };
+
+  return (
+    <main className="organization-selection-page">
+      <section className="organization-selection-card">
+        <div className="login-brand"><BrandMark /><strong>Qasey</strong><span>Application platform</span></div>
+        <p className="eyebrow">选择工作空间</p>
+        <h1>你要进入哪个组织？</h1>
+        <p className="login-note">你的账户属于多个组织。选择只影响本次登录，权限会在进入前再次验证。</p>
+        {error && <div className="login-error" role="alert"><CircleAlert size={18} /><span>{error}</span></div>}
+        <div className="organization-choice-list">
+          {selection.organizations.map(organization => (
+            <button
+              key={organization.id}
+              className="organization-choice"
+              disabled={Boolean(submittingId)}
+              onClick={() => void choose(organization.id)}
+            >
+              <span className="organization-choice-mark"><Boxes size={19} /></span>
+              <span><strong>{organization.displayName}</strong><small>{organization.id}</small></span>
+              {submittingId === organization.id ? <LoaderCircle className="spin" size={19} /> : <ArrowRight size={18} />}
+            </button>
+          ))}
+        </div>
+        <button className="text-button organization-login-restart" onClick={() => void restartLogin()} disabled={Boolean(submittingId)}>
+          重新开始登录
+        </button>
+        <div className="security-note"><ShieldCheck size={16} /><span>页面不会接收用户 ID；只能选择登录事务中已验证的组织成员关系。</span></div>
       </section>
     </main>
   );
@@ -301,7 +504,7 @@ function PlatformHome({ applications, runs, loading, onOpenApplication, onOpenIn
   const active = runs.filter(run => activeStatuses.includes(run.status));
   const review = runs.filter(run => run.status === "awaiting_qa");
   return <>
-    <PageHeading eyebrow="MoeGo Agent Platform" title="工作交给 Agent，判断留给人" description="从一个入口找到合适的 Agent Application，并集中处理所有需要你介入的工作。" />
+    <PageHeading eyebrow="Qasey Agent Platform" title="工作交给 Agent，判断留给人" description="从一个入口找到合适的 Agent Application，并集中处理所有需要你介入的工作。" />
     <section className="surface handoff-runway" aria-label="Agent 工作流概览">
       <div className="runway-copy"><span className="platform-kicker">Live workstream</span><h2>每项工作都进入正确的 Application</h2><p>平台负责路由、身份和交接；Application 保留自己的业务流程。</p></div>
       <div className="runway-flow">
@@ -511,7 +714,7 @@ function CuaView({ subjectId }: { subjectId: string }) {
   };
 
   return <>
-    <PageHeading eyebrow="Computer use" title="Ubuntu 工作台" description="每个 sandbox Pod 是一台长期运行的 Ubuntu；会话独占 GUI 桌面，并使用自己的持久 workspace 与 home。" />
+    <PageHeading eyebrow="Computer use" title="Ubuntu 工作台" description="每个远程 sandbox 实例都是长期运行的 Ubuntu 环境；会话独占 GUI 桌面，并使用自己的持久 workspace 与 home。" />
     {error && <InlineError message={error} />}
     <div className="segmented cua-mode" role="tablist" aria-label="控制模式">
       <button role="tab" aria-selected={mode === "desktop"} className={mode === "desktop" ? "active" : ""} disabled={Boolean(running)} onClick={() => { setMode("desktop"); setFrameUrl(""); }}>完整桌面</button>
@@ -524,7 +727,7 @@ function CuaView({ subjectId }: { subjectId: string }) {
         : <button className="secondary-button danger-text" disabled={busy} onClick={() => void stop()}><Square size={15} />停止</button>}
     </section>
     <section className="surface cua-stage">
-      <div className="cua-stage-head"><div><span className={running ? "health-dot" : "health-dot offline"} /><strong>{mode === "desktop" ? "Ubuntu Desktop" : state?.browser.title || "Sandbox browser"}</strong><small>{mode === "desktop" ? (state?.desktop.applications?.join(" · ") || "等待租用桌面") : state?.browser.url || "尚未启动"}</small></div>{state && <span>Pod {state.ordinal} · generation {state.generation}{mode === "desktop" && state.desktop.recording ? " · 正在录制" : ""}</span>}</div>
+      <div className="cua-stage-head"><div><span className={running ? "health-dot" : "health-dot offline"} /><strong>{mode === "desktop" ? "Ubuntu Desktop" : state?.browser.title || "Sandbox browser"}</strong><small>{mode === "desktop" ? (state?.desktop.applications?.join(" · ") || "等待租用桌面") : state?.browser.url || "尚未启动"}</small></div>{state && <span>实例 {state.ordinal} · generation {state.generation}{mode === "desktop" && state.desktop.recording ? " · 正在录制" : ""}</span>}</div>
       {mode === "desktop" && running && <div className="cua-appbar" aria-label="Ubuntu 应用"><button onClick={() => void launch("browser")} disabled={busy}><MonitorPlay size={15} />浏览器</button><button onClick={() => void launch("terminal")} disabled={busy}><Terminal size={15} />终端</button><button onClick={() => void launch("editor")} disabled={busy}><FileText size={15} />编辑器</button><button onClick={() => void launch("files")} disabled={busy}><FolderOpen size={15} />文件</button></div>}
       <div className="cua-screen">{frameUrl ? <button className="cua-frame-button" onClick={clickFrame} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); clickFrameCenter(); } }} aria-label={`操作 Qasey sandbox ${mode === "desktop" ? "Ubuntu 桌面" : "浏览器"}画面`}><img ref={frameImage} src={frameUrl} alt={mode === "desktop" ? "Qasey Ubuntu desktop live view" : "Qasey sandbox browser live view"} /></button> : <div><MonitorPlay size={34} /><strong>启动后，实时画面会显示在这里</strong><span>{mode === "desktop" ? "可以操作浏览器、终端、编辑器和文件管理器。" : "点击画面可直接发送鼠标操作。"}</span></div>}</div>
       {running && <div className={`cua-controls ${mode === "desktop" ? "desktop" : ""}`}>{mode === "browser" && <><button className="icon-button bordered" onClick={() => void act({ action: "back" })} aria-label="后退">←</button><button className="icon-button bordered" onClick={() => void act({ action: "forward" })} aria-label="前进">→</button><button className="icon-button bordered" onClick={() => void act({ action: "reload" })} aria-label="刷新"><RefreshCw size={15} /></button></>}<label className="cua-type-field"><span>键盘输入</span><input value={typing} onChange={event => setTyping(event.target.value)} placeholder="输入发送到当前焦点…" onKeyDown={event => { if (event.key === "Enter" && typing) { void act({ action: "type", text: typing }); setTyping(""); } }} /></label><button className="secondary-button" disabled={!typing} onClick={() => { void act({ action: "type", text: typing }); setTyping(""); }}>发送</button></div>}
@@ -772,7 +975,7 @@ function AccessView({ session }: { session: Session }) {
     if (!window.confirm(`确认在租户 ${session.tenantId} 中为 ${subject} 绑定 ${bindingRole}？`)) return;
     try { await api.bind(subject.trim(), bindingRole.trim()); setNotice("成员角色已绑定，并已写入审计记录。"); setError(""); await load(); } catch (cause) { setError(errorMessage(cause)); }
   };
-  return <><PageHeading eyebrow="平台管理" title="访问与审计" description={`所有变更仅作用于 ${session.tenantId}，并记录操作人与请求 ID。`} />{error && <InlineError message={error} />}{notice && <div className="success-notice"><CheckCircle2 size={17} />{notice}</div>}<ApiTokenVault onAuditChanged={() => void load()} onError={setError} /><div className="access-grid"><section className="surface access-card"><div className="section-title"><div><span className="section-icon"><KeyRound size={18} /></span><div><h2>角色权限</h2><p>为已有或新的角色授予一项权限。</p></div></div></div><label>角色<input value={role} onChange={event => setRole(event.target.value)} placeholder="例如 qa-lead" /></label><label>权限<input value={permission} onChange={event => setPermission(event.target.value)} placeholder="例如 qasey.runs.approve" /></label><button className="secondary-button" onClick={() => void grant()}>预览并授予</button></section><section className="surface access-card"><div className="section-title"><div><span className="section-icon"><UserRound size={18} /></span><div><h2>成员角色</h2><p>将组织成员绑定到一个角色。</p></div></div></div><label>成员标识<input value={subject} onChange={event => setSubject(event.target.value)} placeholder="Google subject ID" /></label><label>角色<input value={bindingRole} onChange={event => setBindingRole(event.target.value)} placeholder="例如 qa-lead" /></label><button className="secondary-button" onClick={() => void bind()}>预览并绑定</button></section></div><section className="surface audit-section"><div className="list-heading"><div><h2>最近审计</h2><p>访问判定与权限变更</p></div><button className="icon-button bordered" onClick={() => void load()} aria-label="刷新审计"><RefreshCw size={17} /></button></div>{records.length === 0 ? <p className="empty-row">暂无审计记录</p> : <div className="audit-list">{records.slice(0,50).map(record => <div key={`${record.requestId}-${record.resourceType}-${record.resourceId}-${record.action}`}><span className={`decision ${record.decision}`}>{record.decision === "allow" ? "允许" : "拒绝"}</span><div><strong>{record.action} · {record.resourceId}</strong><span>{record.subjectId ?? "匿名请求"} · {record.reason}</span></div><code>{compactId(record.requestId)}</code></div>)}</div>}</section></>;
+  return <><PageHeading eyebrow="平台管理" title="访问与审计" description={`所有变更仅作用于 ${session.tenantId}，并记录操作人与请求 ID。`} />{error && <InlineError message={error} />}{notice && <div className="success-notice"><CheckCircle2 size={17} />{notice}</div>}<ApiTokenVault onAuditChanged={() => void load()} onError={setError} /><div className="access-grid"><section className="surface access-card"><div className="section-title"><div><span className="section-icon"><KeyRound size={18} /></span><div><h2>角色权限</h2><p>为已有或新的角色授予一项权限。</p></div></div></div><label>角色<input value={role} onChange={event => setRole(event.target.value)} placeholder="例如 qa-lead" /></label><label>权限<input value={permission} onChange={event => setPermission(event.target.value)} placeholder="例如 qasey.runs.approve" /></label><button className="secondary-button" onClick={() => void grant()}>预览并授予</button></section><section className="surface access-card"><div className="section-title"><div><span className="section-icon"><UserRound size={18} /></span><div><h2>成员角色</h2><p>将组织成员绑定到一个角色。</p></div></div></div><label>成员标识<input value={subject} onChange={event => setSubject(event.target.value)} placeholder="平台用户 ID" /></label><label>角色<input value={bindingRole} onChange={event => setBindingRole(event.target.value)} placeholder="例如 qa-lead" /></label><button className="secondary-button" onClick={() => void bind()}>预览并绑定</button></section></div><section className="surface audit-section"><div className="list-heading"><div><h2>最近审计</h2><p>访问判定与权限变更</p></div><button className="icon-button bordered" onClick={() => void load()} aria-label="刷新审计"><RefreshCw size={17} /></button></div>{records.length === 0 ? <p className="empty-row">暂无审计记录</p> : <div className="audit-list">{records.slice(0,50).map(record => <div key={`${record.requestId}-${record.resourceType}-${record.resourceId}-${record.action}`}><span className={`decision ${record.decision}`}>{record.decision === "allow" ? "允许" : "拒绝"}</span><div><strong>{record.action} · {record.resourceId}</strong><span>{record.subjectId ?? "匿名请求"} · {record.reason}</span></div><code>{compactId(record.requestId)}</code></div>)}</div>}</section></>;
 }
 
 function EvidenceRail({ run, compact = false }: { run: QaseyRun; compact?: boolean }) {
@@ -820,11 +1023,11 @@ function BrandMark() { return <span className="brand-mark" aria-hidden="true"><i
 function Avatar({ label }: { label: string }) { return <span className="avatar">{label.slice(0,1).toUpperCase()}</span>; }
 function GoogleGlyph() { return <svg width="19" height="19" viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.6 12.2c0-.7-.1-1.5-.2-2.2H12v4h5.4a4.6 4.6 0 0 1-2 3v2.6h3.2c1.9-1.7 3-4.3 3-7.4Z"/><path fill="#34A853" d="M12 22c2.7 0 5-.9 6.6-2.4L15.4 17c-.9.6-2 1-3.4 1a5.8 5.8 0 0 1-5.5-4H3.2v2.7A10 10 0 0 0 12 22Z"/><path fill="#FBBC05" d="M6.5 14a6 6 0 0 1 0-3.9V7.4H3.2a10 10 0 0 0 0 9.2L6.5 14Z"/><path fill="#EA4335" d="M12 6c1.5 0 2.8.5 3.8 1.5l2.9-2.8A9.7 9.7 0 0 0 3.2 7.4l3.3 2.7A5.8 5.8 0 0 1 12 6Z"/></svg>; }
 
-function displayName(session: Session): string { return session.email?.split("@")[0] ?? "QA Member"; }
+function displayName(session: Session): string { return session.displayName ?? session.email?.split("@")[0] ?? "QA Member"; }
 function compactId(value: string): string { return value.length > 12 ? `${value.slice(0,8)}…${value.slice(-4)}` : value; }
 function formatRelative(value: string): string { const seconds = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000)); if (seconds < 60) return "刚刚"; if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`; if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`; return shortDateFormatter.format(new Date(value)); }
 function blobDataUrl(blob: Blob): Promise<string> { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("浏览器画面格式无效。")); reader.onerror = () => reject(reader.error ?? new Error("无法读取浏览器画面。")); reader.readAsDataURL(blob); }); }
-function friendlySsoError(error: string): string { let decoded = error; try { decoded = decodeURIComponent(error); } catch { /* malformed OAuth errors remain safe to display generically */ } if (/domain|hosted/iu.test(decoded)) return "此 Google 账户不属于允许的组织，请切换工作账户。"; if (/expired|state/iu.test(decoded)) return "登录链接已失效，请重新开始登录。"; return "Google 登录未完成，请重试；如果问题持续出现，请联系平台管理员。"; }
+function friendlySsoError(error: string): string { let decoded = error; try { decoded = decodeURIComponent(error); } catch { /* malformed OAuth errors remain safe to display generically */ } if (/domain|hosted/iu.test(decoded)) return "此 Google 账户不属于允许的组织，请切换工作账户。"; if (/expired|state/iu.test(decoded)) return "登录链接已失效，请重新开始登录。"; return "登录未完成，请重试；如果问题持续出现，请联系平台管理员。"; }
 function extractAgentText(response: Record<string, unknown>): string { if (typeof response.text === "string") return response.text; const message = response.message; if (message && typeof message === "object" && "content" in message && typeof message.content === "string") return message.content; return "Qasey 已完成处理。打开运行记录查看后续进度与证据。"; }
 function railDetail(run: QaseyRun, index: number): string { if (index === 0) return `${run.sourceCaseIds.length} 个来源`; if (index === 3) return run.framework === "playwright" ? "Playwright" : "Maestro"; if (index === 4) return `${run.artifacts.length} 项证据`; return index < statusMeta[run.status].step ? "已完成" : index === statusMeta[run.status].step ? statusMeta[run.status].label : "等待中"; }
 function countFor(runs: QaseyRun[], id: "all" | "active" | "review" | "done"): number { if (id === "all") return runs.length; if (id === "active") return runs.filter(run => activeStatuses.includes(run.status)).length; if (id === "review") return runs.filter(run => run.status === "awaiting_qa").length; return runs.filter(run => ["succeeded","failed","cancelled"].includes(run.status)).length; }

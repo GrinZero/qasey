@@ -1,17 +1,25 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { MCPClient, MCPOAuthClientProvider } from "@mastra/mcp";
-import type { MastraMCPServerDefinition, OAuthStorage } from "@mastra/mcp";
+import type { MastraMCPServerDefinition, MCPClientOptions, OAuthStorage } from "@mastra/mcp";
 import type { ToolsInput } from "@mastra/core/agent";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import type { QaseyChannel } from "../../contracts/src/index.ts";
 import { authorizeDiscoveredToolAccess, TOOL_POLICIES } from "../../domain/src/index.ts";
-import type { QaseyConfig } from "./config.ts";
+import { resolveMcpOAuthKeyring, type QaseyConfig } from "./config.ts";
 import { logError, logInfo } from "./logging.ts";
 import { loadMcpServerConfigs, type McpServerConfig, type McpServerConfigs, type McpServerName } from "./mcp-config.ts";
-import { FileOAuthStorage, PrismaOAuthStorage, PrismaOAuthStorageBackend } from "./oauth-storage.ts";
-import { SubjectMcpClientPool } from "../../../src/platform/mcp/create-clients.ts";
+import {
+  FileOAuthStorage,
+  mcpOAuthCredentialNamespace,
+  PrismaOAuthStorage,
+  PrismaOAuthStorageBackend,
+  type McpOAuthCredentialAddress,
+} from "./oauth-storage.ts";
+import type { ExternalConnectionStore } from "../../../src/platform/connections/connection-store.ts";
+import { SubjectMcpClientPool, VersionedMcpClientPool } from "../../../src/platform/mcp/create-clients.ts";
+import { TenantMcpConnectionResolver, type TenantMcpServer } from "../../../src/platform/mcp/tenant-connections.ts";
 import { sanitizeOpenAIToolInputSchema } from "./tool-schema-compat.ts";
 
 const allowedTools = {
@@ -153,13 +161,14 @@ export class McpToolDiscoveryCache {
 function storageFor(
   config: QaseyConfig,
   serverName: McpServerName,
-  subjectKey: string,
+  subject: McpCredentialSubject,
   prismaBackend?: PrismaOAuthStorageBackend,
 ): OAuthStorage {
-  const namespace = `qasey:${subjectKey}:${serverName}`;
+  const address = oauthCredentialAddress(subject, serverName);
+  const namespace = mcpOAuthCredentialNamespace(address);
   if (config.DATABASE_URL && config.MASTRA_ENCRYPTION_KEY) {
     if (!prismaBackend) throw new Error("Prisma OAuth storage backend has not been configured");
-    return new PrismaOAuthStorage(prismaBackend, config.MASTRA_ENCRYPTION_KEY, namespace);
+    return new PrismaOAuthStorage(prismaBackend, resolveMcpOAuthKeyring(config), address);
   }
   if (config.NODE_ENV === "production") {
     throw new Error(`OAuth MCP ${serverName} requires DATABASE_URL and MASTRA_ENCRYPTION_KEY in production`);
@@ -172,7 +181,7 @@ function serverDefinition(
   name: McpServerName,
   spec: McpServerConfig,
   config: QaseyConfig,
-  subjectKey?: string,
+  subject?: McpCredentialSubject,
   onAuthorizationUrl?: (server: McpServerName, url: URL) => void | Promise<void>,
   prismaBackend?: PrismaOAuthStorageBackend,
 ): MastraMCPServerDefinition {
@@ -202,12 +211,12 @@ function serverDefinition(
     };
   }
 
-  if (!subjectKey) throw new Error(`OAuth MCP ${name} requires a credential subject`);
+  if (!subject) throw new Error(`OAuth MCP ${name} requires a credential subject`);
   const clientId = spec.auth.clientIdEnv ? process.env[spec.auth.clientIdEnv] : undefined;
   const clientSecret = spec.auth.clientSecretEnv ? process.env[spec.auth.clientSecretEnv] : undefined;
   if (spec.auth.clientIdEnv && !clientId) throw new Error(`MCP ${name} expects OAuth client ID in ${spec.auth.clientIdEnv}`);
   if (spec.auth.clientSecretEnv && !clientSecret) throw new Error(`MCP ${name} expects OAuth client secret in ${spec.auth.clientSecretEnv}`);
-  const storage = storageFor(config, name, subjectKey, prismaBackend);
+  const storage = storageFor(config, name, subject, prismaBackend);
   const authProvider = new MCPOAuthClientProvider({
     redirectUrl: spec.auth.redirectUrl,
     clientMetadata: {
@@ -225,9 +234,28 @@ function serverDefinition(
   return { ...common, authProvider };
 }
 
+function tenantBearerServerDefinition(spec: TenantMcpServer): MastraMCPServerDefinition {
+  const headers = { Authorization: `Bearer ${spec.bearerToken}` };
+  return {
+    url: new URL(spec.url),
+    allowedHosts: spec.allowedHosts,
+    timeout: spec.timeoutMs ?? defaultTimeouts[spec.serverName],
+    forwardInstructions: false,
+    requestInit: { headers },
+    eventSourceInit: {
+      fetch: (url: string | URL, init?: RequestInit) => fetch(url, {
+        ...init,
+        headers: { ...Object.fromEntries(new Headers(init?.headers).entries()), ...headers },
+      }),
+    },
+  };
+}
+
 export interface QaseyMcpCatalogOptions {
   onAuthorizationUrl?: (server: McpServerName, url: URL) => void | Promise<void>;
   database?: PrismaClient;
+  connectionStore?: ExternalConnectionStore;
+  createClient?: (options: MCPClientOptions) => MCPClient;
 }
 
 function missingPrismaClient(): never {
@@ -273,28 +301,42 @@ export function validateFigmaToolInput(toolName: string, input: unknown): void {
 export class QaseyMcpCatalog {
   private sharedClient?: MCPClient;
   private readonly subjectClients: SubjectMcpClientPool;
+  private readonly tenantClients = new VersionedMcpClientPool(64, 15 * 60_000);
   private readonly toolDiscovery = new McpToolDiscoveryCache();
   private readonly oauthBackend: PrismaOAuthStorageBackend | undefined;
   private readonly servers: McpServerConfigs;
+  private readonly tenantConnections: TenantMcpConnectionResolver | undefined;
+  private readonly createClient: (options: MCPClientOptions) => MCPClient;
 
   constructor(private readonly config: QaseyConfig, private readonly options: QaseyMcpCatalogOptions = {}) {
     this.servers = loadMcpServerConfigs(config);
+    if (config.NODE_ENV === "production" && this.oauthServerNames().length > 0
+      && (!config.DATABASE_URL || !config.MASTRA_ENCRYPTION_KEY)) {
+      throw new Error("Production OAuth MCP servers require DATABASE_URL and MASTRA_ENCRYPTION_KEY at startup");
+    }
+    this.createClient = options.createClient ?? (clientOptions => new MCPClient(clientOptions));
+    this.tenantConnections = config.QASEY_TENANCY_MODE === "multi" && options.connectionStore
+      ? new TenantMcpConnectionResolver(options.connectionStore)
+      : undefined;
     this.oauthBackend = config.DATABASE_URL && config.MASTRA_ENCRYPTION_KEY && this.oauthServerNames().length > 0
       ? new PrismaOAuthStorageBackend(options.database ?? missingPrismaClient())
       : undefined;
-    this.subjectClients = new SubjectMcpClientPool(subjectKey => new MCPClient({
-      id: `qasey-oauth-${createHash("sha256").update(subjectKey).digest("hex").slice(0, 16)}`,
-      servers: Object.fromEntries(this.oauthServerNames().map(name => [
-        name, serverDefinition(
-          name,
-          this.servers[name]!,
-          this.config,
-          subjectKey,
-          this.options.onAuthorizationUrl,
-          this.oauthBackend,
-        ),
-      ])),
-    }), 64, 15 * 60_000);
+    this.subjectClients = new SubjectMcpClientPool(subjectCacheKey => {
+      const subject = subjectFromKey(subjectCacheKey);
+      return this.createClient({
+        id: `qasey-oauth-${createHash("sha256").update(subjectCacheKey).digest("hex").slice(0, 16)}`,
+        servers: Object.fromEntries(this.oauthServerNames().map(name => [
+          name, serverDefinition(
+            name,
+            this.servers[name]!,
+            this.config,
+            subject,
+            this.options.onAuthorizationUrl,
+            this.oauthBackend,
+          ),
+        ])),
+      });
+    }, 64, 15 * 60_000);
   }
 
   configuredServers(): McpServerName[] {
@@ -303,6 +345,7 @@ export class QaseyMcpCatalog {
 
   async init(): Promise<void> {
     await this.oauthBackend?.init();
+    if (this.oauthBackend) await this.oauthBackend.rotateAll(resolveMcpOAuthKeyring(this.config));
   }
 
   async healthCheck(): Promise<void> {
@@ -331,7 +374,7 @@ export class QaseyMcpCatalog {
       serverDefinition(name, this.servers[name]!, this.config),
     ]));
     if (Object.keys(configured).length === 0) return undefined;
-    this.sharedClient = new MCPClient({ id: "qasey-shared-service-mcp", servers: configured });
+    this.sharedClient = this.createClient({ id: "qasey-shared-service-mcp", servers: configured });
     return this.sharedClient;
   }
 
@@ -375,7 +418,12 @@ export class QaseyMcpCatalog {
     const clients: MCPClient[] = [];
     const shared = this.getSharedClient();
     if (shared) clients.push(shared);
-    if (subject && this.oauthServerNames().length > 0) clients.push(await this.subjectClients.get(subjectKey(subject)));
+    if (subject) {
+      const credentialSubjectKey = subjectKey(subject);
+      if (this.oauthServerNames().length > 0) clients.push(await this.subjectClients.get(credentialSubjectKey));
+      const tenantClient = await this.getTenantClient(subject.tenantId);
+      if (tenantClient) clients.push(tenantClient);
+    }
     if (clients.length === 0) return {};
     const discovered = await Promise.all(clients.map(client => this.discoverTools(client)));
     const tools = Object.assign({}, ...discovered.map(result => result.tools)) as ToolsInput;
@@ -441,12 +489,35 @@ export class QaseyMcpCatalog {
     await Promise.allSettled([
       this.sharedClient?.disconnect() ?? Promise.resolve(),
       this.subjectClients.close(),
+      this.tenantClients.close(),
       this.oauthBackend?.close() ?? Promise.resolve(),
     ]);
   }
 
   private async discoverTools(client: MCPClient): Promise<ToolDiscoveryResult> {
     return this.toolDiscovery.get(client);
+  }
+
+  private async getTenantClient(tenantId: string): Promise<MCPClient | undefined> {
+    if (!this.tenantConnections) return undefined;
+    const normalizedTenantId = tenantId.trim();
+    const snapshot = await this.tenantConnections.resolve(normalizedTenantId, this.configuredServers());
+    const servers = Object.values(snapshot.servers);
+    if (servers.length === 0) {
+      await this.tenantClients.remove(normalizedTenantId);
+      return undefined;
+    }
+    return this.tenantClients.get(normalizedTenantId, snapshot.version, () => this.createClient({
+      id: [
+        "qasey-tenant-mcp",
+        createHash("sha256").update(normalizedTenantId).digest("hex").slice(0, 16),
+        snapshot.version.slice(0, 16),
+      ].join("-"),
+      servers: Object.fromEntries(servers.map(server => [
+        server.serverName,
+        tenantBearerServerDefinition(server),
+      ])),
+    }));
   }
 }
 
@@ -463,6 +534,30 @@ export function boundedMcpModelOutput(output: unknown): unknown {
     type: "text",
     value: `${truncated ? serialized.slice(0, maxChars) : serialized}${truncated ? `\n[model output truncated from ${serialized.length} characters; narrow or paginate the MCP query for more detail]` : ""}`,
   };
+}
+
+function oauthCredentialAddress(subject: McpCredentialSubject, connectorId: McpServerName): McpOAuthCredentialAddress {
+  return {
+    owner: { applicationId: subject.applicationId, tenantId: subject.tenantId },
+    connectorId,
+    accountId: subject.subjectId,
+  };
+}
+
+function subjectFromKey(value: string): McpCredentialSubject {
+  try {
+    const segments = value.split(":");
+    if (segments.length !== 3) throw new Error("invalid subject key");
+    const subject = {
+      applicationId: decodeURIComponent(segments[0]!),
+      tenantId: decodeURIComponent(segments[1]!),
+      subjectId: decodeURIComponent(segments[2]!),
+    };
+    if (subjectKey(subject) !== value) throw new Error("non-canonical subject key");
+    return subject;
+  } catch {
+    throw new Error("MCP credential subject key is not canonical");
+  }
 }
 
 function subjectKey(subject: McpCredentialSubject): string {

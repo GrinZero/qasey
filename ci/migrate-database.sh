@@ -16,8 +16,12 @@ fi
 case "$deploy_output" in
   *P3005*)
     echo "Adopting the existing application schema as the Prisma baseline..."
+    # Never infer that an old Qasey table is structurally complete from its
+    # name. Existing application schemas require an explicit reviewed upgrade;
+    # automatic adoption is reserved for Mastra-only databases.
+    node ci/verify-baseline-adoption.mjs
     # The baseline SQL uses IF NOT EXISTS and duplicate-object guards so it can
-    # safely fill missing application tables before migration history is added.
+    # safely initialize application tables before migration history is added.
     node "$prisma_cli" db execute --file "$baseline_sql"
 
     # API and worker pods can reach this branch concurrently. One resolve may

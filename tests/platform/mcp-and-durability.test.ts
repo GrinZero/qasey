@@ -1,6 +1,6 @@
 import type { MCPClient } from "@mastra/mcp";
 import { describe, expect, it, vi } from "vitest";
-import { SubjectMcpClientPool } from "../../src/platform/mcp/create-clients.ts";
+import { SubjectMcpClientPool, VersionedMcpClientPool } from "../../src/platform/mcp/create-clients.ts";
 import { assertJsonSafeSnapshot, externalWriteIdempotencyKey } from "../../src/platform/workflows/durability.ts";
 
 describe("subject MCP lifecycle", () => {
@@ -21,6 +21,27 @@ describe("subject MCP lifecycle", () => {
     await pool.close();
     expect(clients.get("tenant:user-2")?.disconnect).toHaveBeenCalledOnce();
     expect(clients.get("tenant:user-3")?.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it("disconnects and replaces a tenant client when its connection version changes", async () => {
+    const clients: Array<{ disconnect: ReturnType<typeof vi.fn> }> = [];
+    const pool = new VersionedMcpClientPool(2, 60_000);
+    const create = vi.fn(async () => {
+      const client = { disconnect: vi.fn(async () => undefined) };
+      clients.push(client);
+      return client as unknown as MCPClient;
+    });
+
+    const first = await pool.get("tenant-a", "revision-1", create);
+    await expect(pool.get("tenant-a", "revision-1", create)).resolves.toBe(first);
+    expect(create).toHaveBeenCalledOnce();
+
+    const second = await pool.get("tenant-a", "revision-2", create);
+    expect(second).not.toBe(first);
+    expect(clients[0]?.disconnect).toHaveBeenCalledOnce();
+    await pool.remove("tenant-a");
+    expect(clients[1]?.disconnect).toHaveBeenCalledOnce();
+    await pool.close();
   });
 });
 

@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose a portable improvement
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Describe the behavior, alternatives, and migration impact.
+    validations:
+      required: true
+  - type: checkboxes
+    id: portability
+    attributes:
+      label: Portability
+      options:
+        - label: The proposal keeps a self-hosted path or explains why one is impossible.
+          required: true

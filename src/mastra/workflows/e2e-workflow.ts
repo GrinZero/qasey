@@ -37,6 +37,10 @@ const freezeExecutionBriefStep = createStep({
     const run = await runRepository.get(owner, inputData.runId);
     if (!run) throw new Error(`E2E run ${inputData.runId} not found`);
     if (run.executionBrief) return inputData;
+    if (!run.playwrightVerification) {
+      throw new Error("This legacy E2E run has no frozen Playwright verification mapping; create a new run");
+    }
+    const playwrightVerification = run.playwrightVerification;
     if (run.contextSnapshot.blockingQuestions.length > 0) {
       throw new Error(`E2E context has unresolved blocking questions: ${run.contextSnapshot.blockingQuestions.join("; ")}`);
     }
@@ -78,7 +82,7 @@ const freezeExecutionBriefStep = createStep({
       const commit = await githubClient.repos.getCommit({ owner: run.repository.owner, repo: run.repository.repository, ref: run.repository.baseRef });
       baseSha = commit.data.sha;
     }
-    await tracedE2EOperation(mastra, requestContext, "qasey e2e context freeze", { runId: run.id, caseCount: cases.length, baseSha }, () => e2eCoordinator.freezeExecutionBrief(owner, run.id, cases, {
+    const frozen = await tracedE2EOperation(mastra, requestContext, "qasey e2e context freeze", { runId: run.id, caseCount: cases.length, baseSha }, () => e2eCoordinator.freezeExecutionBrief(owner, run.id, cases, {
       owner: run.repository.owner,
       repository: run.repository.repository,
       workspacePath: `repos/${run.repository.owner}/${run.repository.repository}`,
@@ -86,11 +90,12 @@ const freezeExecutionBriefStep = createStep({
       allowedPaths: run.repository.allowedPaths,
       skillPaths: run.repository.skillsPaths,
       ...(run.repository.installCommand ? { installCommand: run.repository.installCommand } : {}),
-      testCommand: ["pnpm", "exec", "playwright", "test", "--config=<changed-project>", "--project=t2"],
+      testCommand: ["pnpm", "exec", "playwright", "test", "--config=<changed-project>", "--project=<configured-project>"],
       specGlobs: run.repository.allowedPaths,
       artifactGlobs: ["artifacts/**", "playwright-report/**", "test-results/**"],
+      verification: playwrightVerification,
     }, requestContext.get("qasey__traceId") as string | undefined));
-    await runRepository.update(owner, run.id, { baseSha });
+    await runRepository.update(owner, run.id, frozen.revision, { baseSha });
     return inputData;
   },
 });

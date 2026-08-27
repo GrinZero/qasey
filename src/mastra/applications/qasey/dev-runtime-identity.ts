@@ -17,7 +17,7 @@ function findRepositoryRoot(): string {
     for (;;) {
       try {
         const packageJson = JSON.parse(readFileSync(resolve(current, "package.json"), "utf8")) as { name?: unknown };
-        if (packageJson.name === "moego-qasey") return current;
+        if (packageJson.name === "qasey") return current;
       } catch {
         // Keep walking until the repository package manifest is found.
       }

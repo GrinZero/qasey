@@ -3,7 +3,23 @@ export interface Session {
   tenantId: string;
   roles: string[];
   email?: string;
+  displayName?: string;
   isAdmin: boolean;
+}
+
+export interface OrganizationSelection {
+  redirectTo: string;
+  organizations: Array<{ id: string; displayName: string }>;
+}
+
+export interface AuthConfig {
+  google: boolean;
+  password: boolean;
+  registration: boolean;
+}
+
+export interface AuthRedirect {
+  redirectTo: string;
 }
 
 export interface CatalogEntry {

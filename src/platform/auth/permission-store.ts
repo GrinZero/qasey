@@ -18,6 +18,7 @@ export interface PermissionStore {
   grantRolePermissions?(tenantId: string, role: string, permissions: readonly string[]): Promise<void>;
   grantRolePermission?(tenantId: string, role: string, permission: string): Promise<void>;
   bindSubjectRole?(tenantId: string, subjectId: string, role: string): Promise<void>;
+  revokeSubjectRoles?(tenantId: string, subjectId: string): Promise<number>;
   close?(): Promise<void>;
 }
 
@@ -52,6 +53,11 @@ export class PermissionService {
   async bindSubjectRole(tenantId: string, subjectId: string, role: string): Promise<void> {
     if (!this.store.bindSubjectRole) throw new Error("Permission store does not support mutations");
     await this.store.bindSubjectRole(tenantId, subjectId, role);
+  }
+
+  async revokeSubjectRoles(tenantId: string, subjectId: string): Promise<number> {
+    if (!this.store.revokeSubjectRoles) throw new Error("Permission store does not support subject deprovisioning");
+    return this.store.revokeSubjectRoles(tenantId, subjectId);
   }
 }
 
@@ -94,6 +100,13 @@ export class InMemoryPermissionStore implements PermissionStore {
     const roles = this.subjectRoles.get(key) ?? new Set<string>();
     roles.add(role);
     this.subjectRoles.set(key, roles);
+  }
+
+  async revokeSubjectRoles(tenantId: string, subjectId: string): Promise<number> {
+    const key = `${tenantId}:${subjectId}`;
+    const count = this.subjectRoles.get(key)?.size ?? 0;
+    this.subjectRoles.delete(key);
+    return count;
   }
 
   async close(): Promise<void> {}
@@ -169,6 +182,12 @@ export class PrismaPermissionStore implements PermissionStore {
         create: { tenantId, subjectId, roleId: role }, update: {},
       });
     });
+  }
+
+  async revokeSubjectRoles(tenantId: string, subjectId: string): Promise<number> {
+    await this.ready();
+    const result = await this.prisma.platformSubjectRole.deleteMany({ where: { tenantId, subjectId } });
+    return result.count;
   }
 
   async close(): Promise<void> {

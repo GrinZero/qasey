@@ -12,4 +12,4 @@ export function createResponsesModel(modelId: string) {
 
 // Qasey uses the native OpenAI Responses API deliberately. Do not replace these
 // with openai.chat(...) for OpenAI-compatible gateways.
-export const qaseyResponsesModel = createResponsesModel("gpt-5.6-sol");
+export const qaseyResponsesModel = createResponsesModel(process.env.QASEY_MAIN_MODEL?.trim() || "gpt-5.6-sol");

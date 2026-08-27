@@ -26,10 +26,19 @@ export interface CodeTaskRunnerProvider {
   forScope(scope: CodeTaskSpec["scope"]): Promise<CodeTaskRunner>;
 }
 
+export interface WaitForCodeTaskOptions {
+  signal?: AbortSignal;
+  pollMs?: number;
+  deadlineMs?: number;
+  onEvents?: (events: CodeTaskEvent[]) => Promise<void> | void;
+  onHeartbeat?: () => Promise<void> | void;
+  lostRetries?: number;
+}
+
 export async function waitForCodeTask(
   runner: CodeTaskRunner,
   taskId: string,
-  options: { signal?: AbortSignal; pollMs?: number; deadlineMs?: number } = {},
+  options: WaitForCodeTaskOptions = {},
 ): Promise<CodeTaskResult> {
   const deadline = Date.now() + (options.deadlineMs ?? 30 * 60_000);
   let cursor: string | undefined;
@@ -46,6 +55,7 @@ export async function waitForCodeTask(
       await runner.cancel(taskId, "Control-plane deadline exceeded").catch(() => undefined);
       throw new Error(`Code task ${taskId} exceeded its deadline`);
     }
+    await options.onHeartbeat?.();
     await new Promise(resolve => setTimeout(resolve, options.pollMs ?? 500));
   }
 }
@@ -53,7 +63,7 @@ export async function waitForCodeTask(
 export async function submitAndWaitForCodeTask(
   runner: CodeTaskRunner,
   spec: CodeTaskSpec,
-  options: { signal?: AbortSignal; pollMs?: number; deadlineMs?: number; onEvents?: (events: CodeTaskEvent[]) => Promise<void> | void; lostRetries?: number } = {},
+  options: WaitForCodeTaskOptions = {},
 ): Promise<{ result: CodeTaskResult; spec: CodeTaskSpec }> {
   let current = spec;
   const retries = options.lostRetries ?? 1;
@@ -73,7 +83,7 @@ export async function submitAndWaitForCodeTask(
 async function waitForCodeTaskWithEvents(
   runner: CodeTaskRunner,
   taskId: string,
-  options: { signal?: AbortSignal; pollMs?: number; deadlineMs?: number; onEvents?: (events: CodeTaskEvent[]) => Promise<void> | void },
+  options: WaitForCodeTaskOptions,
 ): Promise<CodeTaskResult> {
   const deadline = Date.now() + (options.deadlineMs ?? 30 * 60_000);
   let cursor: string | undefined;
@@ -91,6 +101,7 @@ async function waitForCodeTaskWithEvents(
       await runner.cancel(taskId, "Control-plane deadline exceeded").catch(() => undefined);
       throw new Error(`Code task ${taskId} exceeded its deadline`);
     }
+    await options.onHeartbeat?.();
     await new Promise(resolve => setTimeout(resolve, options.pollMs ?? 500));
   }
 }

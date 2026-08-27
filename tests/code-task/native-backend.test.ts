@@ -3,12 +3,12 @@ import { nativeCodingBackendPolicy } from "../../packages/code-task/src/index.ts
 
 describe("native Mastra coding backend policy", () => {
   it("accepts writes only inside frozen allowed paths", () => {
-    const allowed = nativeCodingBackendPolicy.normalizeAllowedPaths(["./project/BWeb/tests/", "project/BWeb/pages"]);
+    const allowed = nativeCodingBackendPolicy.normalizeAllowedPaths(["./web/tests/e2e/", "web/pages"]);
 
-    expect(nativeCodingBackendPolicy.isAllowedPath("project/BWeb/tests/payment.spec.ts", allowed)).toBe(true);
-    expect(nativeCodingBackendPolicy.isAllowedPath("project/BWeb/pages/payment.ts", allowed)).toBe(true);
-    expect(nativeCodingBackendPolicy.isAllowedPath("project/BWeb/utils/secret.ts", allowed)).toBe(false);
-    expect(nativeCodingBackendPolicy.isAllowedPath("../project/BWeb/tests/escape.ts", allowed)).toBe(false);
+    expect(nativeCodingBackendPolicy.isAllowedPath("web/tests/e2e/payment.spec.ts", allowed)).toBe(true);
+    expect(nativeCodingBackendPolicy.isAllowedPath("web/pages/payment.ts", allowed)).toBe(true);
+    expect(nativeCodingBackendPolicy.isAllowedPath("web/utils/secret.ts", allowed)).toBe(false);
+    expect(nativeCodingBackendPolicy.isAllowedPath("../web/tests/e2e/escape.ts", allowed)).toBe(false);
     expect(nativeCodingBackendPolicy.isAllowedPath("/tmp/escape.ts", allowed)).toBe(false);
   });
 

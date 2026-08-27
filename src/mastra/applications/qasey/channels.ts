@@ -20,6 +20,14 @@ import { DevRuntimeTunnelError, getDevRuntimeTunnelService } from "./dev-runtime
 import { slackTunnelApprovalCard, slackTunnelApprovalStatusCard } from "./slack-tunnel-delivery.ts";
 import type { QaseyAgentRuntimeEvent, QaseyResponse } from "./service.ts";
 import { createDatadogTraceCarrier } from "../../instrumentation.ts";
+import {
+  createRedisSlackIngressState,
+  slackDeliveryId,
+  SlackIngressRetryableError,
+  type SlackDeliveryClaim,
+  type SlackIngressStateAdapter,
+} from "../../../platform/channels/slack-ingress-state.ts";
+import { productionSignals } from "../../../platform/observability/production-signals.ts";
 
 type NativeMessage = Parameters<ChannelHandler>[1];
 type NativeThread = Parameters<ChannelHandler>[0];
@@ -53,11 +61,14 @@ export interface QaseySlackChannelOptions {
   slackWorkspaceId?: string;
   /** Installation-level opt-in for the testing Local Runtime tunnel. */
   devRuntimeTunnelEnabled?: boolean;
+  /** Shared ingress state override for focused tests and embedding hosts. */
+  ingressState?: SlackIngressStateAdapter;
 }
 
 /** Build one isolated Slack bot identity while sharing Qasey's domain behavior. */
 export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions): ChannelConfig {
   const mode = options.mode ?? "webhook";
+  const ingressState = options.ingressState ?? createDistributedSlackIngressState(options.installationId, options.tenantId);
   const adapter = createSlackAdapter({
     mode,
     botToken: options.botToken,
@@ -70,6 +81,25 @@ export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions)
     if (!mastra) throw new Error("Mastra runtime is required for the Qasey Slack workflow");
     const tenantId = options.tenantId ?? slackTenantId(message);
     const workspaceId = options.slackWorkspaceId ?? slackTenantId(message);
+    const deliveryId = slackDeliveryId({
+      ...(options.installationId ? { installationId: options.installationId } : {}),
+      workspaceId,
+      messageId: message.id,
+    });
+    let deliveryClaim: SlackDeliveryClaim | undefined;
+    if (ingressState) {
+      const admission = await ingressState.claimDelivery(deliveryId, message.id);
+      if (admission.status === "duplicate") return;
+      if (admission.status === "in-flight") {
+        throw new SlackIngressRetryableError(
+          `Slack delivery ${deliveryId} is already owned by another replica`,
+          "SLACK_INGRESS_BUSY",
+          deliveryId,
+          admission.retryAfterMs,
+        );
+      }
+      deliveryClaim = admission.claim;
+    }
     const scope = scopeFor(thread, message, tenantId, options.installationId);
     requestContext.set("requestId", `slack:${message.id}`);
     requestContext.set("applicationId", "qasey");
@@ -286,10 +316,12 @@ export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions)
           },
         });
       }
-      const completionCards = slackCaseCompletionCards(result.completionReceipt, {
-        baseUrl: config.METERSPHERE_BASE_URL,
-        projectId: config.METERSPHERE_PROJECT_ID,
-      });
+      const completionCards = config.METERSPHERE_BASE_URL && config.METERSPHERE_PROJECT_ID
+        ? slackCaseCompletionCards(result.completionReceipt, {
+            baseUrl: config.METERSPHERE_BASE_URL,
+            projectId: config.METERSPHERE_PROJECT_ID,
+          })
+        : [];
       const sourceFooter = executionSource ? `\n\n_运行环境：${executionSource}_` : "";
       const finalText = `${result.text}${sourceFooter}`;
       await traceQaseyOperation(
@@ -310,9 +342,23 @@ export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions)
           }
         },
       );
+      if (deliveryClaim && ingressState && !await ingressState.ackDelivery(deliveryClaim)) {
+        throw new SlackIngressRetryableError(
+          `Slack delivery ${deliveryId} lost ownership before acknowledgement`,
+          "SLACK_INGRESS_BUSY",
+          deliveryId,
+        );
+      }
       outcome = "success";
     } catch (error) {
       requestError = error;
+      if (deliveryClaim && ingressState) {
+        try {
+          await ingressState.retryDelivery(deliveryClaim);
+        } catch (retryError) {
+          logError("slack.ingress.retry_release_failed", retryError, { deliveryId });
+        }
+      }
       if (tunnel && pendingApprovalIds.length > 0) {
         const status = error instanceof DevRuntimeTunnelError && error.code === "runtime_disconnected"
           ? "runtime_disconnected" as const
@@ -382,6 +428,7 @@ export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions)
     }
   };
   return {
+    ...(ingressState ? { state: ingressState } : {}),
     adapters: {
       // The adapter and Mastra core use the same chat runtime; their generated
       // declaration files differ only in whether botUserId is optional.
@@ -405,11 +452,45 @@ export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions)
       options.installationId,
     ).threadId,
     chatOptions: {
-      concurrency: { strategy: "queue", maxQueueSize: 10, onQueueFull: "drop-oldest", queueEntryTtlMs: 90_000 },
+      concurrency: {
+        strategy: "queue",
+        maxQueueSize: 10,
+        // The shared adapter rejects the new delivery atomically and exposes a
+        // retryable outcome. Standalone keeps Mastra's process-memory adapter
+        // but never evicts an older accepted message.
+        onQueueFull: "drop-newest",
+        queueEntryTtlMs: 90_000,
+      },
       dedupeTtlMs: 10 * 60_000,
     },
     inlineMedia: ["image/png", "image/jpeg", "image/webp", "application/pdf"],
   };
+}
+
+function createDistributedSlackIngressState(installationId?: string, tenantId?: string): SlackIngressStateAdapter | undefined {
+  if (config.QASEY_DEPLOYMENT_MODE !== "distributed") return undefined;
+  if (!config.REDIS_HOST) {
+    throw new Error("Distributed Slack ingress requires REDIS_HOST");
+  }
+  return createRedisSlackIngressState({
+    host: config.REDIS_HOST,
+    port: config.REDIS_PORT ?? 6379,
+    ...(config.REDIS_USERNAME ? { username: config.REDIS_USERNAME } : {}),
+    ...(config.REDIS_PASSWORD ? { password: config.REDIS_PASSWORD } : {}),
+    ...(config.REDIS_TLS !== undefined ? { tls: config.REDIS_TLS } : {}),
+    ...(config.REDIS_TLS_SERVERNAME ? { tlsServername: config.REDIS_TLS_SERVERNAME } : {}),
+    keyPrefix: `qasey:${config.QASEY_DEPLOYMENT_ID ?? config.NODE_ENV}:${installationId ?? "default"}`,
+    onQueueDepth: (threadId, depth) => productionSignals.setQueueDepth({
+      tenantId: tenantId ?? config.QASEY_SINGLE_TENANT_ID ?? "trusted-ingress",
+      channel: "slack",
+      partition: threadId,
+      depth,
+    }),
+    onQueueOverload: () => productionSignals.incrementQueueOverload(
+      tenantId ?? config.QASEY_SINGLE_TENANT_ID ?? "trusted-ingress",
+      "slack",
+    ),
+  });
 }
 
 function scopeFor(thread: NativeThread, message: NativeMessage, tenantId: string, installationId?: string) {

@@ -1,0 +1,191 @@
+groups:
+  - name: qasey-production
+    interval: 30s
+    rules:
+      - alert: QaseyMetricsMissing
+        expr: absent(qasey_build_info)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Qasey operational metrics are missing
+          runbook: docs/operations.md#metrics-or-process-missing
+
+      - alert: QaseyScrapeTargetDown
+        expr: up{job=~"qasey-(api|worker)"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: A configured Qasey scrape target is down
+          runbook: docs/operations.md#metrics-or-process-missing
+
+      - alert: QaseyWorkerMetricsMissing
+        expr: |
+          (max(qasey_deployment_mode_info{mode="distributed"}) == 1)
+          and on()
+          absent_over_time(qasey_worker_process_up[5m])
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: All Qasey Worker supervisor metrics are missing
+          runbook: docs/operations.md#worker-unavailable
+
+      - alert: QaseyDependencyUnavailable
+        expr: min by (instance, role, dependency, version) (qasey_dependency_ready) == 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: A required Qasey process dependency is unavailable
+          runbook: docs/operations.md#dependency-unavailable
+
+      - alert: QaseyWorkerProcessDown
+        expr: min by (instance, version) (qasey_worker_process_up) == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: A supervised Mastra Worker process is not running
+          runbook: docs/operations.md#worker-unavailable
+
+      - alert: QaseyWorkerNotReady
+        expr: min by (instance, version) (qasey_worker_ready) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: A Mastra Worker has not reached or retained readiness
+          runbook: docs/operations.md#worker-unavailable
+
+      - alert: QaseySandboxReplicaUnavailable
+        expr: qasey_sandbox_unavailable_replicas > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: One or more Sandbox replicas cannot be probed
+          runbook: docs/operations.md#sandbox-capacity
+
+      - alert: QaseySandboxCapacityLow
+        expr: qasey_sandbox_sessions{state="available"} < 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Qasey Sandbox spare capacity is low
+          runbook: docs/operations.md#sandbox-capacity
+
+      - alert: QaseySlackIngressOverloaded
+        expr: increase(qasey_slack_queue_overload_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Slack deliveries are being rejected before admission
+          runbook: docs/operations.md#slack-ingress-overload
+
+      - alert: QaseySlackQueueBacklog
+        expr: max by (tenant, instance, partition, version) (qasey_slack_queue_depth) >= 8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A tenant Slack ingress partition is close to its admission bound
+          runbook: docs/operations.md#slack-ingress-overload
+
+      - alert: QaseyWorkflowReconciliation
+        expr: increase(qasey_workflow_reconciled_total{outcome="failed"}[15m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: A stale workflow was moved to the failure inbox
+          runbook: docs/operations.md#stale-workflow-or-failure-inbox
+
+      - alert: QaseyWorkflowStuckRunAgeHigh
+        expr: max by (tenant, run, instance, version) (qasey_workflow_stuck_run_age_seconds) > 1800
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: A workflow exceeded the default stale-run heartbeat window
+          runbook: docs/operations.md#stale-workflow-or-failure-inbox
+
+      - alert: QaseyHttpErrorBudgetFastBurn
+        expr: |
+          sum by (application, version) (rate(qasey_http_requests_total{status_class="5xx"}[5m]))
+          /
+          clamp_min(sum by (application, version) (rate(qasey_http_requests_total[5m])), 0.001)
+          > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Qasey is rapidly consuming its API availability error budget
+          runbook: docs/operations.md#http-slo-burn-or-latency
+
+      - alert: QaseyHttpErrorBudgetSlowBurn
+        expr: |
+          sum by (application, version) (rate(qasey_http_requests_total{status_class="5xx"}[1h]))
+          /
+          clamp_min(sum by (application, version) (rate(qasey_http_requests_total[1h])), 0.001)
+          > 0.01
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Qasey is persistently consuming its API availability error budget
+          runbook: docs/operations.md#http-slo-burn-or-latency
+
+      - alert: QaseyHttpP95LatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le, application, route, version) (rate(qasey_http_request_duration_seconds_bucket[10m]))
+          ) > 60
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: A Qasey route has sustained high p95 latency
+          runbook: docs/operations.md#http-slo-burn-or-latency
+
+      - alert: QaseyTrafficGovernanceStoreError
+        expr: increase(qasey_traffic_store_error_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Traffic governance could not reliably admit or release a request
+          runbook: docs/operations.md#traffic-governance
+
+      - alert: QaseyExpensiveConcurrencySaturated
+        expr: increase(qasey_traffic_rejected_total{policy="expensive",reason="concurrency"}[10m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: A tenant exhausted its expensive-request concurrency budget
+          runbook: docs/operations.md#traffic-governance
+
+      - alert: QaseyModelCostRatesMissing
+        expr: qasey_model_cost_reporting_configured == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Model cost rates are not configured; cost alerts are incomplete
+          runbook: docs/operations.md#model-cost
+
+      # Example budget: USD 100/hour per tenant. Tune this to the approved
+      # tenant budget before installing the rule in production.
+      - alert: QaseyTenantModelCostHigh
+        expr: sum by (tenant, version) (increase(qasey_model_cost_microusd_total[1h])) > 100000000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Tenant model cost exceeded the configured example budget
+          runbook: docs/operations.md#model-cost

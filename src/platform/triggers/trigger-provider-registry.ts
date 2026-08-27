@@ -20,6 +20,7 @@ export interface TriggerProviderManifest {
   fields: readonly TriggerConfigurationField[];
   capabilities: {
     configurationUpdate: boolean;
+    credentialRotation?: boolean;
     enableDisable: boolean;
     rebind: boolean;
     delete: boolean;
@@ -42,6 +43,7 @@ export interface TriggerConnection {
   status: TriggerConnectionStatus;
   statusDetail: string;
   revision: number;
+  credentialKeyId?: string;
   target: TriggerTarget;
   identity?: {
     label: string;
@@ -88,6 +90,7 @@ export interface PlatformTriggerProvider {
     revision: number;
     configuration: Readonly<Record<string, string>>;
   }): Promise<TriggerConnection>;
+  rotateCredentials?(input: TriggerMutationContext & { id: string; revision: number }): Promise<TriggerConnection>;
   rebind?(input: TriggerMutationContext & { id: string; revision: number; targetId: string }): Promise<TriggerConnection>;
   setEnabled?(input: TriggerMutationContext & { id: string; revision: number; enabled: boolean }): Promise<TriggerConnection>;
   delete?(input: TriggerMutationContext & { id: string; revision: number }): Promise<void>;
@@ -133,6 +136,14 @@ export class TriggerProviderRegistry {
     const provider = this.require(providerId);
     if (!provider.updateConfiguration) throw unsupported(providerId, "configuration updates");
     return provider.updateConfiguration(input);
+  }
+
+  rotateCredentials(providerId: string, input: TriggerMutationContext & {
+    id: string; revision: number;
+  }): Promise<TriggerConnection> {
+    const provider = this.require(providerId);
+    if (!provider.rotateCredentials) throw unsupported(providerId, "credential rotation");
+    return provider.rotateCredentials(input);
   }
 
   rebind(providerId: string, input: TriggerMutationContext & { id: string; revision: number; targetId: string }): Promise<TriggerConnection> {

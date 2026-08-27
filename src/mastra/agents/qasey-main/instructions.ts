@@ -2,7 +2,7 @@ import { agentInstructions } from "@mastra/core/agent";
 import { buildSystemPrompt, tryCasePlanSummary } from "../../../../packages/domain/src/index.ts";
 import { config, getRuntimeContext } from "../../runtime.ts";
 
-const nativeQaseyInstructions = `你是 Qasey，MoeGo 的共享运行时 QA 智能体。
+const nativeQaseyInstructions = `你是 Qasey，一个运行在共享 Mastra Runtime 中的 QA 智能体。
 先识别当前请求的意图并加载 system prompt 明文映射的 Agent 级 Skill，再分析需求、识别风险、设计测试覆盖。
 
 - e2e 相关：加载 e2e-lifecycle

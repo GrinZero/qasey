@@ -16,20 +16,70 @@ import type {
   SandboxDesktopStartSchema, SandboxDesktopToolSchema, SandboxLease, SandboxLeaseScope,
   SandboxSessionState,
 } from "./sandbox-protocol.ts";
+import { assertSandboxControlKey, signSandboxControlToken } from "./sandbox-control-token.ts";
 import { SandboxCapacityError, type SandboxLeaseStore } from "./sandbox-lease-store.ts";
 import type { z } from "zod";
 
 export interface SandboxPoolOptions {
   endpointTemplate: string;
+  controlKey: string;
+  replicas?: number;
   requestTimeoutMs?: number;
   githubTokenForScope?(scope: SandboxLeaseScope): Promise<string>;
+}
+
+export interface SandboxPoolCapacity {
+  replicas: number;
+  active: number;
+  maximum: number;
+  available: number;
+  unavailableReplicas: number;
 }
 
 export class SandboxPoolClient {
   private readonly requestTimeoutMs: number;
 
   constructor(private readonly leases: SandboxLeaseStore, private readonly options: SandboxPoolOptions) {
+    assertSandboxControlKey(options.controlKey);
+    if (options.replicas !== undefined && (!Number.isInteger(options.replicas) || options.replicas < 1)) {
+      throw new RangeError("Sandbox replica count must be a positive integer");
+    }
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
+  }
+
+  async healthCheck(): Promise<void> {
+    await this.leases.healthCheck();
+    const results = await Promise.allSettled(this.endpoints().map(async (endpoint, ordinal) => {
+      const response = await fetch(`${endpoint}/readyz`, {
+        signal: AbortSignal.timeout(Math.min(this.requestTimeoutMs, 2_000)),
+      });
+      if (!response.ok) throw new Error(`Sandbox replica ${ordinal} is not ready`);
+    }));
+    const failed = results.flatMap((result, ordinal) => result.status === "rejected" ? [ordinal] : []);
+    if (failed.length > 0) throw new Error(`Sandbox replicas are not ready: ${failed.join(",")}`);
+  }
+
+  async capacity(): Promise<SandboxPoolCapacity> {
+    const results = await Promise.allSettled(this.endpoints().map(async endpoint => {
+      const response = await fetch(`${endpoint}/capacity`, {
+        signal: AbortSignal.timeout(Math.min(this.requestTimeoutMs, 2_000)),
+      });
+      if (!response.ok) throw new Error("Sandbox capacity endpoint is unavailable");
+      const value = await response.json() as Record<string, unknown>;
+      const active = finiteNonNegativeInteger(value.active);
+      const maximum = finiteNonNegativeInteger(value.maximum);
+      const available = finiteNonNegativeInteger(value.available);
+      if (active + available !== maximum) throw new Error("Sandbox capacity response is inconsistent");
+      return { active, maximum, available };
+    }));
+    const available = results.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
+    return {
+      replicas: results.length,
+      active: available.reduce((total, replica) => total + replica.active, 0),
+      maximum: available.reduce((total, replica) => total + replica.maximum, 0),
+      available: available.reduce((total, replica) => total + replica.available, 0),
+      unavailableReplicas: results.length - available.length,
+    };
   }
 
   async session(scope: SandboxLeaseScope): Promise<SandboxRuntimeSession> {
@@ -80,9 +130,9 @@ export class SandboxPoolClient {
   }
 
   private async runtimeSession(scope: SandboxLeaseScope, lease: SandboxLease): Promise<SandboxRuntimeSession> {
-    const endpoint = this.options.endpointTemplate.replace("{ordinal}", String(lease.ordinal)).replace(/\/$/u, "");
+    const endpoint = this.endpoint(lease.ordinal);
     const githubToken = await this.options.githubTokenForScope?.(scope);
-    return new SandboxRuntimeSession(endpoint, lease, this.requestTimeoutMs, () => this.leases.touch(scope), githubToken);
+    return new SandboxRuntimeSession(endpoint, lease, this.requestTimeoutMs, () => this.leases.touch(scope), this.options.controlKey, githubToken);
   }
 
   private async acquireLease(scope: SandboxLeaseScope): Promise<SandboxLease> {
@@ -96,6 +146,21 @@ export class SandboxPoolClient {
       }
     }
   }
+
+  private endpoint(ordinal: number): string {
+    return this.options.endpointTemplate.replace("{ordinal}", String(ordinal)).replace(/\/$/u, "");
+  }
+
+  private endpoints(): string[] {
+    return Array.from({ length: this.options.replicas ?? 1 }, (_value, ordinal) => this.endpoint(ordinal));
+  }
+}
+
+function finiteNonNegativeInteger(value: unknown): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || !Number.isSafeInteger(value)) {
+    throw new Error("Sandbox capacity response is invalid");
+  }
+  return value;
 }
 
 export class SandboxRuntimeSession {
@@ -104,20 +169,24 @@ export class SandboxRuntimeSession {
     readonly lease: SandboxLease,
     private readonly requestTimeoutMs: number,
     private readonly touchLease: () => Promise<void>,
+    private readonly controlKey: string,
     private readonly githubToken?: string,
   ) {}
 
   async claim(): Promise<SandboxSessionState> {
+    const claim = {
+      sessionId: this.lease.sessionId,
+      workspaceId: this.lease.workspaceId,
+      generation: this.lease.generation,
+      token: this.lease.token,
+      repositoryCacheNamespace: repositoryCacheNamespace(this.lease),
+      ...(this.githubToken ? { githubToken: this.githubToken } : {}),
+    };
+    const controlToken = await signSandboxControlToken({ controlKey: this.controlKey, scope: this.lease, claim });
     return this.request("/v1/sessions/claim", {
       method: "POST",
-      body: JSON.stringify({
-        sessionId: this.lease.sessionId,
-        workspaceId: this.lease.workspaceId,
-        generation: this.lease.generation,
-        token: this.lease.token,
-        repositoryCacheNamespace: repositoryCacheNamespace(this.lease),
-        ...(this.githubToken ? { githubToken: this.githubToken } : {}),
-      }),
+      headers: { authorization: `Bearer ${controlToken}` },
+      body: JSON.stringify(claim),
     }, false);
   }
 
@@ -355,7 +424,7 @@ export class RemoteWorkspaceSandbox implements WorkspaceSandbox {
   async destroy(): Promise<void> { await this.stop(); this.status = "destroyed"; }
   async snapshot(): Promise<void> {}
   async isReady(): Promise<boolean> { return this.status === "running"; }
-  getInstructions(): string { return "Commands run in a persistent Qasey session directory inside a private Kubernetes sandbox."; }
+  getInstructions(): string { return "Commands run in a persistent Qasey session directory inside an isolated remote sandbox runtime."; }
   getInfo(): SandboxInfo { return { id: this.id, name: this.name, provider: this.provider, status: this.status, createdAt: new Date() }; }
 
   async executeCommand(command: string, args: string[] = [], options: ExecuteCommandOptions = {}): Promise<CommandResult> {

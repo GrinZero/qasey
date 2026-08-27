@@ -1,14 +1,80 @@
-import { dot, envFileNames, type DotConfigResult } from "@moego/aws-secret-env";
-import { relative } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { relative, resolve } from "node:path";
+import { parseEnv } from "node:util";
+
+export interface RuntimeEnvConfigResult {
+  environment: string;
+  loadedFiles: string[];
+  parsed: Record<string, string>;
+}
 
 export function runtimeEnvironment(env: NodeJS.ProcessEnv = process.env): string | undefined {
-  const namespace = env.NAMESPACE?.trim();
-  if (!namespace) return undefined;
-  return namespace.startsWith("ns-") ? namespace.slice(3) : namespace;
+  return parseRuntimeEnvironment(env.NODE_ENV);
 }
 
 export function runtimeEnvFiles(env: NodeJS.ProcessEnv = process.env): string[] {
-  return envFileNames(runtimeEnvironment(env) ?? "testing");
+  return envFileNames(runtimeEnvironment(env) ?? "development");
+}
+
+export function envFileNames(environment: string): string[] {
+  const safeEnvironment = parseRuntimeEnvironment(environment);
+  if (!safeEnvironment) throw new Error("NODE_ENV is required to select environment files");
+  return [
+    ".env",
+    `.env.${safeEnvironment}`,
+    ".env.local",
+    `.env.${safeEnvironment}.local`,
+  ];
+}
+
+function environmentFromFile(file: string): string | undefined {
+  if (!existsSync(file)) return undefined;
+  return parseRuntimeEnvironment(parseEnv(readFileSync(file, "utf8")).NODE_ENV);
+}
+
+function parseRuntimeEnvironment(value: string | undefined): string | undefined {
+  const environment = value?.trim();
+  if (!environment) return undefined;
+  if (!/^(?:development|test|production)$/u.test(environment)) {
+    throw new Error("NODE_ENV must be development, test, or production");
+  }
+  return environment;
+}
+
+export function resolveRuntimeEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+  cwd = process.cwd(),
+  defaultEnvironment = "development",
+): string {
+  return runtimeEnvironment(env)
+    ?? environmentFromFile(resolve(cwd, ".env.local"))
+    ?? environmentFromFile(resolve(cwd, ".env"))
+    ?? parseRuntimeEnvironment(defaultEnvironment)
+    ?? "development";
+}
+
+export function loadRuntimeEnv(options: {
+  env?: NodeJS.ProcessEnv;
+  cwd?: string;
+  defaultEnvironment?: string;
+} = {}): RuntimeEnvConfigResult {
+  const env = options.env ?? process.env;
+  const cwd = options.cwd ?? process.cwd();
+  const environment = resolveRuntimeEnvironment(env, cwd, options.defaultEnvironment);
+  const parsed: Record<string, string> = {};
+  const loadedFiles: string[] = [];
+
+  for (const candidate of envFileNames(environment)) {
+    const file = resolve(cwd, candidate);
+    if (!existsSync(file)) continue;
+    Object.assign(parsed, parseEnv(readFileSync(file, "utf8")));
+    loadedFiles.push(file);
+  }
+
+  for (const [key, value] of Object.entries(parsed)) {
+    if (!Object.hasOwn(env, key)) env[key] = value;
+  }
+  return { environment, loadedFiles, parsed };
 }
 
 export interface RuntimeEnvLoadReport {
@@ -27,7 +93,7 @@ export interface RuntimeEnvLoadReport {
 }
 
 export function createRuntimeEnvLoadReport(
-  result: DotConfigResult,
+  result: RuntimeEnvConfigResult,
   preexistingKeys: ReadonlySet<string>,
   cwd = process.cwd(),
 ): RuntimeEnvLoadReport {
@@ -39,11 +105,10 @@ export function createRuntimeEnvLoadReport(
     event: "runtime.env.loaded",
     environment: result.environment ?? null,
     environmentResolutionOrder: [
-      "explicit environment option",
-      "process.env.NAMESPACE",
-      ".env.local NAMESPACE",
-      ".env NAMESPACE",
-      "default environment (testing)",
+      "process.env.NODE_ENV",
+      ".env.local NODE_ENV",
+      ".env NODE_ENV",
+      "options.defaultEnvironment (development fallback)",
     ],
     candidateFiles,
     loadedFiles,
@@ -58,8 +123,7 @@ export function createRuntimeEnvLoadReport(
 }
 
 const preexistingEnvKeys = new Set(Object.keys(process.env));
-const envResult = dot.config({ defaultEnvironment: "testing", quiet: true });
-if (envResult.error) throw envResult.error;
+const envResult = loadRuntimeEnv();
 if (process.env.NODE_ENV !== "test") {
   console.info(JSON.stringify({
     timestamp: new Date().toISOString(),

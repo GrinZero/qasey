@@ -10,6 +10,7 @@ import {
   QaseyMcpCatalog,
   QASEY_REQUIRED_METERSPHERE_TOOL_NAMES,
 } from "../../packages/adapters/src/index.ts";
+import type { QaseyConfig } from "../../packages/adapters/src/config.ts";
 
 describe("MCP configuration and OAuth storage", () => {
   it("defines the complete MeterSphere tool set required by the runtime", () => {
@@ -139,6 +140,29 @@ describe("MCP configuration and OAuth storage", () => {
     }
   });
 
+  it("fails production startup when an OAuth server has no durable encryption key", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qasey-mcp-production-"));
+    try {
+      const path = join(root, "mcp.json");
+      await writeFile(path, JSON.stringify({
+        servers: { figma: { url: "https://mcp.example.test/mcp", auth: { type: "oauth" } } },
+      }));
+      const base = loadConfig({ NODE_ENV: "test", QASEY_MCP_CONFIG_FILE: path } as NodeJS.ProcessEnv);
+      const productionWithoutKey = {
+        ...base,
+        NODE_ENV: "production",
+        DATABASE_URL: "postgresql://example.invalid/qasey",
+        MASTRA_ENCRYPTION_KEY: undefined,
+      } as QaseyConfig;
+
+      expect(() => new QaseyMcpCatalog(productionWithoutKey)).toThrow(
+        /OAuth MCP.*DATABASE_URL.*MASTRA_ENCRYPTION_KEY/iu,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("does not fall back to legacy MCP URL and token environment variables", () => {
     const config = loadConfig({
       QASEY_MCP_CONFIG_FILE: "/path/that/does/not/exist.json",
@@ -146,6 +170,38 @@ describe("MCP configuration and OAuth storage", () => {
       METERSPHERE_MCP_TOKEN: "legacy-token",
     } as NodeJS.ProcessEnv);
     expect(loadMcpServerConfigs(config)).toEqual({});
+  });
+
+  it("allows only subject-bound OAuth entries in a multi-tenant static config", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qasey-mcp-multi-config-"));
+    try {
+      const path = join(root, "mcp.json");
+      await writeFile(path, JSON.stringify({
+        servers: {
+          figma: { url: "https://mcp.example.test/mcp", auth: { type: "oauth" } },
+          metersphere: { url: "https://mcp.example.test/mcp", auth: { type: "bearer", tokenEnv: "MCP_FIXTURE_TOKEN" } },
+        },
+      }));
+      const config = loadConfig({
+        NODE_ENV: "test",
+        QASEY_TENANCY_MODE: "multi",
+        QASEY_MCP_CONFIG_FILE: path,
+        MCP_FIXTURE_TOKEN: "must-not-be-read",
+      } as NodeJS.ProcessEnv);
+      expect(() => loadMcpServerConfigs(config)).toThrow(/multi-tenant.*OAuth/u);
+
+      await writeFile(path, JSON.stringify({
+        servers: { figma: { url: "https://mcp.example.test/mcp", auth: { type: "oauth" } } },
+      }));
+      expect(loadMcpServerConfigs(config)).toMatchObject({ figma: { auth: { type: "oauth" } } });
+
+      await writeFile(path, JSON.stringify({
+        servers: { figma: { url: "https://mcp.example.test/mcp", auth: { type: "none" } } },
+      }));
+      expect(() => loadMcpServerConfigs(config)).toThrow(/multi-tenant.*OAuth/u);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("persists local OAuth state outside environment variables", async () => {

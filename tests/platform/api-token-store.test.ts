@@ -58,4 +58,31 @@ describe("API token store", () => {
     await expect(store.revoke("tenant-1", active.record.id)).resolves.toBe(false);
     await expect(store.authenticate(active.token)).resolves.toBeUndefined();
   });
+
+  it("revokes every token created by a suspended member in only that tenant", async () => {
+    const store = new InMemoryApiTokenStore();
+    const tenantA = await store.create({
+      tenantId: "tenant-a", name: "member-a", scopes: ["qasey.runs.read"], createdBy: "user-1",
+    });
+    const tenantB = await store.create({
+      tenantId: "tenant-b", name: "member-b", scopes: ["qasey.runs.read"], createdBy: "user-1",
+    });
+
+    await expect(store.revokeByCreator("tenant-a", "user-1")).resolves.toBe(1);
+    await expect(store.authenticate(tenantA.token)).resolves.toBeUndefined();
+    await expect(store.authenticate(tenantB.token)).resolves.toBeTruthy();
+  });
+
+  it("rechecks the creator's active membership policy on every use", async () => {
+    let active = true;
+    const store = new InMemoryApiTokenStore(record => active && record.tenantId === "tenant-a" && record.createdBy === "user-1");
+    const created = await store.create({
+      tenantId: "tenant-a", name: "member token", scopes: ["qasey.runs.read"], createdBy: "user-1",
+    });
+
+    await expect(store.authenticate(created.token)).resolves.toBeTruthy();
+    active = false;
+    await expect(store.authenticate(created.token)).resolves.toBeUndefined();
+    expect((await store.list("tenant-a"))[0]?.revokedAt).toBeUndefined();
+  });
 });

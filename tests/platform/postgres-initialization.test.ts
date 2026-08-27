@@ -1,5 +1,7 @@
 import type { PrismaClient } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { E2ERun, OwnerScope } from "../../packages/contracts/src/index.ts";
+import { freezeE2EContext } from "../../packages/domain/src/e2e-context.ts";
 import { PrismaRunRepository } from "../../packages/domain/src/run-repository.ts";
 import { PrismaAuditLog } from "../../src/platform/auth/audit-log.ts";
 import { PrismaPermissionStore } from "../../src/platform/auth/permission-store.ts";
@@ -57,4 +59,59 @@ describe("Prisma repository initialization", () => {
     await request(store as never);
     expect(operation()).toHaveBeenCalledTimes(1);
   });
+
+  it("performs owner-scoped run updates as transactional compare-and-set operations", async () => {
+    const owner: OwnerScope = { applicationId: "qasey", tenantId: "tenant-1" };
+    const run = testRun(owner, "run-1");
+    const findUnique = vi.fn(async () => ({ payload: run, revision: 1 }));
+    const updateMany = vi.fn()
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValueOnce({ count: 0 });
+    const executeRaw = vi.fn(async () => 1);
+    const transactionClient = { agentApplicationRun: { findUnique, updateMany }, $executeRawUnsafe: executeRaw };
+    const transaction = vi.fn(async (operation: (client: typeof transactionClient) => Promise<unknown>) => operation(transactionClient));
+    const transactionalDatabase = {
+      $connect: vi.fn(async () => undefined),
+      $transaction: transaction,
+    } as unknown as PrismaClient;
+    const repository = new PrismaRunRepository(transactionalDatabase);
+    await repository.init();
+
+    const results = await Promise.allSettled([
+      repository.update(owner, run.id, 1, { status: "failed" }),
+      repository.update(owner, run.id, 1, { status: "failed" }),
+    ]);
+
+    expect(results.filter(result => result.status === "fulfilled")).toEqual([
+      expect.objectContaining({ value: expect.objectContaining({ status: "failed", revision: 2 }) }),
+    ]);
+    expect(results.filter(result => result.status === "rejected")).toEqual([
+      expect.objectContaining({ reason: expect.objectContaining({
+        name: "RunRevisionConflictError",
+        code: "run_revision_conflict",
+        runId: run.id,
+        expectedRevision: 1,
+      }) }),
+    ]);
+    expect(transaction).toHaveBeenCalledTimes(2);
+    expect(updateMany).toHaveBeenCalledTimes(2);
+    expect(executeRaw).toHaveBeenCalledTimes(1);
+    expect(updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { applicationId: owner.applicationId, tenantId: owner.tenantId, id: run.id, revision: 1 },
+      data: expect.objectContaining({ revision: { increment: 1 } }),
+    }));
+  });
 });
+
+function testRun(owner: OwnerScope, id: string): E2ERun {
+  const now = new Date().toISOString();
+  const contextSnapshot = freezeE2EContext({
+    goal: "test", requirementSummary: "test", inScope: [], outOfScope: [], confirmedDecisions: [], constraints: [], assumptions: [],
+    criticalFlows: [], boundaryCases: [], negativeCases: [], testDataNeeds: [], repositoryFindings: [], blockingQuestions: [], evidenceRefs: [],
+  }, { sessionId: "session", threadId: "thread", taskRunId: "task", requestId: "request", resourceId: "test" });
+  return {
+    ...owner, id, requestId: "request", sourceSessionId: "session", status: "queued", platform: "web", framework: "playwright",
+    repository: { owner: "o", repository: "r", cloneUrl: "https://example.test/r.git", baseRef: "main", allowedPaths: ["tests"], skillsPaths: [] }, sourceCaseIds: ["case"],
+    contextSnapshot, caseSnapshot: [], amendments: [], codeTaskIds: [], artifacts: [], revision: 1, createdAt: now, updatedAt: now,
+  };
+}

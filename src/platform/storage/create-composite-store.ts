@@ -1,6 +1,5 @@
-import { resolve } from "node:path";
 import { DuckDBStore } from "@mastra/duckdb";
-import { FilesystemStore, MastraCompositeStore } from "@mastra/core/storage";
+import { MastraCompositeStore } from "@mastra/core/storage";
 import { ObservabilityStoragePostgresVNext, PostgresStore } from "@mastra/pg";
 
 export interface CompositeStoreOptions {
@@ -8,9 +7,7 @@ export interface CompositeStoreOptions {
   projectRoot: string;
   databaseUrl?: string;
   observabilityDatabaseUrl?: string;
-  editorDatabaseUrl?: string;
   observabilityDbPath: string;
-  editorEnabled: boolean;
   disableInit?: boolean;
 }
 
@@ -31,20 +28,6 @@ export function createCompositeStore(options: CompositeStoreOptions): CompositeS
         ...(options.disableInit === undefined ? {} : { disableInit: options.disableInit }),
       })
     : undefined;
-  const editor = options.editorEnabled
-    ? options.editorDatabaseUrl
-      ? new PostgresStore({
-          id: "shared-mastra-editor",
-          connectionString: options.editorDatabaseUrl,
-          ...(options.disableInit === undefined ? {} : { disableInit: options.disableInit }),
-        })
-      // In production, Editor-owned domains deliberately fall back to the
-      // default PostgresStore. This is MastraCompositeStore's native routing
-      // model and avoids opening a duplicate pool to the same database.
-      : options.environment === "production"
-        ? undefined
-        : new FilesystemStore({ dir: resolve(options.projectRoot, ".qasey/mastra-editor") })
-    : undefined;
   const observability = options.observabilityDatabaseUrl
     ? new ObservabilityStoragePostgresVNext({ connectionString: options.observabilityDatabaseUrl })
     : new DuckDBStore({
@@ -57,7 +40,6 @@ export function createCompositeStore(options: CompositeStoreOptions): CompositeS
     storage: new MastraCompositeStore({
       id: "shared-mastra-runtime",
       ...(primary ? { default: primary } : {}),
-      ...(editor ? { editor } : {}),
       domains: { observability },
       ...(options.disableInit === undefined ? {} : { disableInit: options.disableInit }),
     }),

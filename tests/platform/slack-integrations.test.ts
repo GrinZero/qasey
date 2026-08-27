@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { decryptSlackCredential, encryptSlackCredential } from "../../src/platform/channels/slack-credentials.ts";
 import {
   InMemorySlackInstallationRepository,
+  PrismaSlackInstallationRepository,
   SlackInstallationRepositoryError,
 } from "../../src/platform/channels/slack-installation-repository.ts";
 import {
@@ -20,7 +21,7 @@ const identity = {
   appId: "A123",
   appName: "qasey",
   teamId: "T123",
-  teamName: "MoeGo QA",
+  teamName: "Qasey QA",
   botUserId: "U123",
   botId: "B123",
 };
@@ -35,13 +36,20 @@ describe("managed Slack App credentials", () => {
     expect(() => decryptSlackCredential(encrypted, encryptionKey, { ...context, tenantId: "tenant-2" })).toThrow();
     expect(() => decryptSlackCredential(encrypted, encryptionKey, { ...context, field: "signing-secret" })).toThrow();
   });
+
+  it("binds versioned ciphertext to its declared key ID", () => {
+    const context = { tenantId: "tenant-1", installationId: "installation-1", field: "bot-token" as const };
+    const encrypted = encryptSlackCredential("xoxb-secret", encryptionKey, context, "key-2026-09");
+    expect(decryptSlackCredential(encrypted, encryptionKey, context, "key-2026-09")).toBe("xoxb-secret");
+    expect(() => decryptSlackCredential(encrypted, encryptionKey, context, "default")).toThrow();
+  });
 });
 
 describe("Slack Web API token verifier", () => {
   it("resolves the App identity through bots.info when auth.test omits app_id", async () => {
     const authTest = vi.fn(async () => ({
       ok: true,
-      team: "MoeGo QA",
+      team: "Qasey QA",
       team_id: "T123",
       user_id: "U123",
       bot_id: "B123",
@@ -55,11 +63,12 @@ describe("Slack Web API token verifier", () => {
       bots: { info: botsInfo },
     }));
 
-    await expect(verifier.verify("xoxb-test-token")).resolves.toEqual({
+    const botToken = ["xoxb", "test-token-value"].join("-");
+    await expect(verifier.verify(botToken)).resolves.toEqual({
       appId: "A123",
       appName: "Qasey",
       teamId: "T123",
-      teamName: "MoeGo QA",
+      teamName: "Qasey QA",
       botUserId: "U123",
       botId: "B123",
     });
@@ -85,6 +94,84 @@ describe("managed Slack App repository", () => {
     });
   });
 
+  it("uses the persisted key ID for Prisma reads and keeps plaintext out of CAS persistence", async () => {
+    const oldKey = "legacy-slack-credential-key-that-is-at-least-32-bytes";
+    const nextKey = "next-slack-credential-key-that-is-at-least-32-bytes";
+    const installationId = "4db6dc62-c481-45a4-95d0-00a85e47bc8b";
+    const tenantId = "tenant-1";
+    const databaseToken = ["xoxb", "database-secret"].join("-");
+    let row = {
+      id: installationId,
+      tenant_id: tenantId,
+      webhook_id: "8f669788-11e4-4b88-bc4a-1e7134321319",
+      display_name: "Legacy Slack",
+      slack_app_id: identity.appId,
+      slack_app_name: identity.appName,
+      slack_team_id: identity.teamId,
+      slack_team_name: identity.teamName,
+      slack_bot_user_id: identity.botUserId,
+      slack_bot_id: identity.botId,
+      is_enterprise_install: false,
+      dev_runtime_enabled: false,
+      dev_runtime_command: "/qasey-local",
+      bot_token_ciphertext: encryptSlackCredential(databaseToken, oldKey, {
+        tenantId, installationId, field: "bot-token",
+      }),
+      signing_secret_ciphertext: encryptSlackCredential("database-signing-secret", oldKey, {
+        tenantId, installationId, field: "signing-secret",
+      }),
+      credential_key_id: "default",
+      credential_fingerprint: "redacted-fingerprint",
+      status: "active" as const,
+      webhook_verified_at: new Date("2026-08-01T00:00:00.000Z"),
+      last_token_verified_at: new Date("2026-08-01T00:00:00.000Z"),
+      last_error_code: null,
+      revision: 1,
+      created_at: new Date("2026-08-01T00:00:00.000Z"),
+      updated_at: new Date("2026-08-01T00:00:00.000Z"),
+      agent_id: "qasey-main",
+    };
+    const queryRawUnsafe = vi.fn(async () => [row]);
+    const executeRawUnsafe = vi.fn(async (sql: string, ...parameters: unknown[]) => {
+      if (sql.includes("bot_token_ciphertext=$4")) {
+        row = {
+          ...row,
+          bot_token_ciphertext: String(parameters[3]),
+          signing_secret_ciphertext: String(parameters[4]),
+          credential_key_id: String(parameters[5]),
+          credential_fingerprint: String(parameters[6]),
+          revision: 2,
+          updated_at: new Date("2026-08-02T00:00:00.000Z"),
+        };
+      }
+      return 1;
+    });
+    const prisma = {
+      $connect: vi.fn(async () => undefined),
+      $queryRawUnsafe: queryRawUnsafe,
+      $executeRawUnsafe: executeRawUnsafe,
+    };
+    const repository = new PrismaSlackInstallationRepository(prisma as never, {
+      activeKeyId: "key-2026-09",
+      keys: { default: oldKey, "key-2026-09": nextKey },
+    });
+    await repository.init();
+
+    const rotated = await repository.rotateCredentials(tenantId, installationId, 1, "security-admin");
+    expect(rotated).toMatchObject({ credentialKeyId: "key-2026-09", revision: 2, status: "active" });
+    const updateCall = executeRawUnsafe.mock.calls.find(([sql]) => String(sql).includes("bot_token_ciphertext=$4"));
+    expect(updateCall?.[0]).toContain("credential_key_id=$6");
+    expect(JSON.stringify(updateCall)).not.toContain(databaseToken);
+    expect(JSON.stringify(updateCall)).not.toContain("database-signing-secret");
+    await expect(repository.getRuntimeByWebhookId(row.webhook_id)).resolves.toMatchObject({
+      botToken: databaseToken,
+      signingSecret: "database-signing-secret",
+      credentialKeyId: "key-2026-09",
+    });
+    await expect(repository.rotateCredentials(tenantId, installationId, 1, "security-admin"))
+      .rejects.toMatchObject({ code: "revision_conflict" });
+  });
+
   it("enforces one active App/workspace registration and optimistic revisions", async () => {
     const repository = new InMemorySlackInstallationRepository(encryptionKey);
     const input = {
@@ -103,6 +190,46 @@ describe("managed Slack App repository", () => {
     expect(disabled.status).toBe("disabled");
     await repository.markWebhookVerified(created.webhookId);
     expect((await repository.get("tenant-1", created.id))?.status).toBe("disabled");
+  });
+
+  it("rotates legacy default ciphertext to the active key with CAS and retains previous keys only for reads", async () => {
+    const keys: Record<string, string> = {
+      default: "legacy-slack-credential-key-that-is-at-least-32-bytes",
+      "key-2026-09": "next-slack-credential-key-that-is-at-least-32-bytes",
+    };
+    const keyring = { activeKeyId: "default", keys };
+    const repository = new InMemorySlackInstallationRepository(keyring);
+    const legacyToken = ["xoxb", "legacy-secret"].join("-");
+    const rotatedToken = ["xoxb", "rotated-secret"].join("-");
+    const oldOnly = await repository.create({
+      tenantId: "tenant-1", actorId: "admin-1", displayName: "Legacy Slack", agentId: "qasey-main",
+      identity, botToken: legacyToken, signingSecret: "legacy-signing-secret-value",
+    });
+    const rotatable = await repository.create({
+      tenantId: "tenant-1", actorId: "admin-1", displayName: "Rotatable Slack", agentId: "qasey-main",
+      identity: { ...identity, teamId: "T456" },
+      botToken: rotatedToken, signingSecret: "rotated-signing-secret-value",
+    });
+
+    keyring.activeKeyId = "key-2026-09";
+    const rotated = await repository.rotateCredentials(
+      "tenant-1", rotatable.id, rotatable.revision, "security-admin",
+    );
+    expect(rotated).toMatchObject({ credentialKeyId: "key-2026-09", revision: rotatable.revision + 1 });
+    expect(JSON.stringify(rotated)).not.toContain(rotatedToken);
+    await expect(repository.rotateCredentials("tenant-1", rotatable.id, rotatable.revision, "security-admin"))
+      .rejects.toMatchObject({ code: "revision_conflict" });
+    await expect(repository.getRuntimeByWebhookId(rotatable.webhookId)).resolves.toMatchObject({
+      botToken: rotatedToken, signingSecret: "rotated-signing-secret-value",
+    });
+
+    delete keys.default;
+    await expect(repository.getRuntimeByWebhookId(oldOnly.webhookId)).rejects.toMatchObject({
+      code: "key_unavailable",
+    });
+    await expect(repository.getRuntimeByWebhookId(rotatable.webhookId)).resolves.toMatchObject({
+      botToken: rotatedToken,
+    });
   });
 });
 
@@ -165,6 +292,7 @@ describe("Trigger provider registry", () => {
     });
     expect(created).toMatchObject({
       providerId: "slack",
+      credentialKeyId: "default",
       target: { id: "agent:qasey-main" },
       configurationValues: { devRuntimeEnabled: "true", devRuntimeCommand: "/qa-local" },
     });
@@ -188,6 +316,10 @@ describe("Trigger provider registry", () => {
     });
     expect(cloudOnly.setupFields).toBeUndefined();
     expect(changed).toHaveBeenCalledWith(created.id);
+    const rotated = await registry.rotateCredentials("slack", {
+      tenantId: "tenant-1", actorId: "security-admin", id: created.id, revision: cloudOnly.revision,
+    });
+    expect(rotated.revision).toBe(cloudOnly.revision + 1);
     await expect(registry.listConnections("tenant-1")).resolves.toEqual([expect.objectContaining({
       id: created.id,
       configurationValues: { devRuntimeEnabled: "false", devRuntimeCommand: "/qa-runtime" },

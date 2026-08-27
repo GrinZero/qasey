@@ -174,6 +174,47 @@ export const CodeTaskScopeSchema = z.object({
 const RelativeWorkspacePathSchema = z.string().min(1).max(1_000)
   .refine(value => !value.startsWith("/") && !value.startsWith("\\"), "Workspace paths must be relative")
   .refine(value => value.split(/[\\/]/u).every(segment => segment !== "." && segment !== ".." && segment.length > 0), "Workspace paths cannot contain dot or empty segments");
+const PlaywrightVerificationPathSchema = RelativeWorkspacePathSchema
+  .refine(value => !value.includes("\\"), "Playwright verification paths must use canonical POSIX separators");
+const ChangedProjectPlaywrightProjectSchema = z.object({
+  id: z.string().regex(/^[a-z0-9-]+$/u).max(100),
+  root: PlaywrightVerificationPathSchema,
+  testRoot: PlaywrightVerificationPathSchema,
+  config: PlaywrightVerificationPathSchema,
+  playwrightProject: z.string().min(1).max(100),
+}).strict();
+export const ChangedProjectPlaywrightVerificationSchema = z.object({
+  strategy: z.literal("changed-project-playwright"),
+  projects: z.array(ChangedProjectPlaywrightProjectSchema).min(1).max(20),
+}).strict().superRefine((value, context) => {
+  const ids = new Set<string>();
+  for (const [index, project] of value.projects.entries()) {
+    if (ids.has(project.id)) {
+      context.addIssue({
+        code: "custom",
+        path: ["projects", index, "id"],
+        message: `Playwright verification project id ${project.id} is duplicated`,
+      });
+    }
+    ids.add(project.id);
+    for (const field of ["testRoot", "config"] as const) {
+      if (!workspacePathIsWithin(project[field], project.root)) {
+        context.addIssue({
+          code: "custom",
+          path: ["projects", index, field],
+          message: `${field} must be contained by the project root`,
+        });
+      }
+    }
+  }
+});
+export type ChangedProjectPlaywrightVerification = z.infer<typeof ChangedProjectPlaywrightVerificationSchema>;
+
+function workspacePathIsWithin(path: string, root: string): boolean {
+  const normalizedPath = path.replaceAll("\\", "/");
+  const normalizedRoot = root.replaceAll("\\", "/");
+  return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
+}
 export const RepositoryMountSchema = z.object({
   owner: z.string().min(1),
   repository: z.string().min(1),
@@ -205,7 +246,16 @@ export const CodeTaskSpecSchema = z.object({
   deadlineMs: z.number().int().min(1_000).max(30 * 60_000),
   traceContext: CodeTaskTraceContextSchema.default({}),
   inputPatchRef: ArtifactRefSchema.optional(),
-}).strict();
+  playwrightVerification: ChangedProjectPlaywrightVerificationSchema.optional(),
+}).strict().superRefine((value, context) => {
+  if (value.fixedChecks.some(check => check.id === "playwright") && !value.playwrightVerification) {
+    context.addIssue({
+      code: "custom",
+      path: ["playwrightVerification"],
+      message: "A frozen Playwright verification mapping is required for the playwright fixed check",
+    });
+  }
+});
 export type CodeTaskSpec = z.infer<typeof CodeTaskSpecSchema>;
 
 export const CheckResultSchema = z.object({
@@ -295,6 +345,7 @@ export const E2ERepositoryExecutionSchema = z.object({
   testCommand: z.array(z.string()).optional(),
   specGlobs: z.array(z.string()).default([]),
   artifactGlobs: z.array(z.string()).default([]),
+  verification: ChangedProjectPlaywrightVerificationSchema,
 }).strict();
 export type E2ERepositoryExecution = z.infer<typeof E2ERepositoryExecutionSchema>;
 
@@ -329,6 +380,10 @@ export const E2ERunSchema = z.object({
   executionBrief: E2EExecutionBriefSchema.optional(),
   briefHash: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
   repositoryExecution: E2ERepositoryExecutionSchema.optional(),
+  // Optional only while decoding legacy persisted runs. Every newly-created
+  // run receives a trusted server-owned snapshot and execution fails closed
+  // if an old run reaches the CodeTask workflow without one.
+  playwrightVerification: ChangedProjectPlaywrightVerificationSchema.optional(),
   traceId: z.string().optional(),
   amendments: z.array(E2EAmendmentSchema).default([]),
   codeTaskIds: z.array(z.string()).default([]),
@@ -336,6 +391,7 @@ export const E2ERunSchema = z.object({
   platform: E2EPlatformSchema,
   framework: E2EFrameworkSchema,
   status: RunStatusSchema,
+  revision: z.number().int().positive().default(1),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
   branch: z.string().optional(),
@@ -361,11 +417,17 @@ export const CreateE2ERunSchema = z.object({
   handoff: E2EContextDraftSchema,
   // Execution commands are server-owned and can never be submitted by a browser/API client.
   repository: SubmittedRepositoryProfileSchema,
+  playwrightVerification: ChangedProjectPlaywrightVerificationSchema,
   platform: E2EPlatformSchema,
   framework: E2EFrameworkSchema,
 }).strict();
 export type CreateE2ERun = z.infer<typeof CreateE2ERunSchema>;
-export const CreateE2ERunRequestSchema = CreateE2ERunSchema.omit({ requestId: true, sourceSessionId: true, repository: true }).strict();
+export const CreateE2ERunRequestSchema = CreateE2ERunSchema.omit({
+  requestId: true,
+  sourceSessionId: true,
+  repository: true,
+  playwrightVerification: true,
+}).strict();
 export type CreateE2ERunRequest = z.infer<typeof CreateE2ERunRequestSchema>;
 
 export const QaVerdictSchema = z.object({

@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "web": {
+    "target": {
+      "owner": "example-org",
+      "repository": "web-e2e",
+      "cloneUrl": "https://github.com/example-org/web-e2e.git",
+      "baseRef": "main",
+      "allowedPaths": ["web/tests/e2e", "web/pages"],
+      "skillsPaths": [".agents/skills", "skills"]
+    },
+    "verification": {
+      "strategy": "changed-project-playwright",
+      "projects": [
+        {
+          "id": "web",
+          "root": "web",
+          "testRoot": "web/tests/e2e",
+          "config": "web/playwright.config.ts",
+          "playwrightProject": "chromium"
+        }
+      ]
+    },
+    "contextRepositories": []
+  },
+  "app": {
+    "status": "deferred",
+    "target": { "owner": "example-org", "repository": "mobile-e2e" }
+  }
+}

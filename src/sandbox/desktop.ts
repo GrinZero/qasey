@@ -36,7 +36,10 @@ export class DesktopController {
 
   constructor(readonly options: DesktopControllerOptions) {
     this.environment = {
-      ...process.env,
+      PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+      LANG: process.env.LANG ?? "C.UTF-8",
+      ...(process.env.LC_ALL ? { LC_ALL: process.env.LC_ALL } : {}),
+      ...(process.env.PLAYWRIGHT_BROWSERS_PATH ? { PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH } : {}),
       DISPLAY: `:${options.display}`,
       HOME: options.home,
       XDG_RUNTIME_DIR: options.runtimeDirectory,

@@ -8,13 +8,17 @@ datasource db {
 }
 
 model AgentApplicationRun {
-  applicationId String                     @map("application_id")
-  tenantId      String                     @map("tenant_id")
-  id            String
-  payload       Json
-  createdAt     DateTime                   @default(now()) @map("created_at")
-  updatedAt     DateTime                   @default(now()) @map("updated_at")
-  events        AgentApplicationRunEvent[]
+  applicationId  String                          @map("application_id")
+  tenantId       String                          @map("tenant_id")
+  id             String
+  payload        Json
+  revision       Int                             @default(1)
+  heartbeatAt    DateTime                        @default(now()) @map("heartbeat_at")
+  createdAt      DateTime                        @default(now()) @map("created_at")
+  updatedAt      DateTime                        @default(now()) @map("updated_at")
+  events         AgentApplicationRunEvent[]
+  failures       PlatformWorkflowFailureInbox[]
+  effectReceipts PlatformWorkflowEffectReceipt[]
 
   @@id([applicationId, tenantId, id])
   @@map("agent_application_runs")
@@ -45,10 +49,10 @@ model PlatformChannelDelivery {
 }
 
 model PlatformRole {
-  tenantId       String                   @map("tenant_id")
-  roleId         String                   @map("role_id")
-  permissions    PlatformRolePermission[]
-  subjectRoles   PlatformSubjectRole[]
+  tenantId     String                   @map("tenant_id")
+  roleId       String                   @map("role_id")
+  permissions  PlatformRolePermission[]
+  subjectRoles PlatformSubjectRole[]
 
   @@id([tenantId, roleId])
   @@map("platform_roles")
@@ -109,33 +113,222 @@ model PlatformApiToken {
   @@map("platform_api_tokens")
 }
 
+model PlatformExternalConnection {
+  id                    String    @id @db.Uuid
+  tenantId              String    @map("tenant_id")
+  provider              String
+  name                  String
+  configuration         Json      @default("{}")
+  credentialsCiphertext String    @map("credentials_ciphertext")
+  credentialKeyId       String    @map("credential_key_id")
+  credentialFingerprint String    @map("credential_fingerprint")
+  status                String
+  revision              BigInt    @default(1)
+  createdBy             String    @map("created_by")
+  updatedBy             String    @map("updated_by")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @default(now()) @map("updated_at")
+  revokedAt             DateTime? @map("revoked_at")
+
+  @@unique([tenantId, provider, name], map: "platform_external_connections_tenant_provider_name_key")
+  @@index([tenantId, provider, status], map: "platform_external_connections_tenant_provider_status_idx")
+  @@map("platform_external_connections")
+}
+
+model PlatformWorkflowFailureInbox {
+  applicationId String              @map("application_id")
+  tenantId      String              @map("tenant_id")
+  id            String              @id @db.Uuid
+  runId         String              @map("run_id")
+  workflowId    String              @map("workflow_id")
+  reasonCode    String              @map("reason_code")
+  errorCode     String              @map("error_code")
+  message       String
+  status        String
+  attempts      Int                 @default(0)
+  maxAttempts   Int                 @default(3) @map("max_attempts")
+  revision      Int                 @default(1)
+  firstSeenAt   DateTime            @default(now()) @map("first_seen_at")
+  lastSeenAt    DateTime            @default(now()) @map("last_seen_at")
+  lastAttemptAt DateTime?           @map("last_attempt_at")
+  nextAttemptAt DateTime?           @map("next_attempt_at")
+  redriveRunId  String?             @map("redrive_run_id")
+  resolvedAt    DateTime?           @map("resolved_at")
+  resolvedBy    String?             @map("resolved_by")
+  run           AgentApplicationRun @relation(fields: [applicationId, tenantId, runId], references: [applicationId, tenantId, id], onDelete: Cascade)
+
+  @@unique([applicationId, tenantId, runId, reasonCode], map: "platform_workflow_failure_inbox_run_reason_key")
+  @@index([applicationId, tenantId, status, nextAttemptAt], map: "platform_workflow_failure_inbox_owner_status_idx")
+  @@map("platform_workflow_failure_inbox")
+}
+
+model PlatformWorkflowEffectReceipt {
+  applicationId  String              @map("application_id")
+  tenantId       String              @map("tenant_id")
+  idempotencyKey String              @map("idempotency_key")
+  runId          String              @map("run_id")
+  stepId         String              @map("step_id")
+  requestHash    String              @map("request_hash")
+  status         String
+  attempts       Int                 @default(1)
+  revision       Int                 @default(1)
+  leaseToken     String?             @map("lease_token") @db.Uuid
+  leaseExpiresAt DateTime?           @map("lease_expires_at")
+  result         Json?
+  externalRef    String?             @map("external_ref")
+  lastErrorCode  String?             @map("last_error_code")
+  createdAt      DateTime            @default(now()) @map("created_at")
+  updatedAt      DateTime            @default(now()) @map("updated_at")
+  completedAt    DateTime?           @map("completed_at")
+  run            AgentApplicationRun @relation(fields: [applicationId, tenantId, runId], references: [applicationId, tenantId, id], onDelete: Cascade)
+
+  @@id([applicationId, tenantId, idempotencyKey])
+  @@index([applicationId, tenantId, runId, stepId], map: "platform_workflow_effect_receipts_run_step_idx")
+  @@map("platform_workflow_effect_receipts")
+}
+
+model PlatformOrganization {
+  id              String                           @id
+  slug            String                           @unique
+  displayName     String                           @map("display_name")
+  createdAt       DateTime                         @default(now()) @map("created_at")
+  updatedAt       DateTime                         @default(now()) @map("updated_at")
+  memberships     PlatformOrganizationMembership[]
+  verifiedDomains PlatformOrganizationDomain[]
+  invitations     PlatformOrganizationInvitation[]
+
+  @@map("platform_organizations")
+}
+
+model PlatformUser {
+  id                  String                           @id @db.Uuid
+  displayName         String?                          @map("display_name")
+  createdAt           DateTime                         @default(now()) @map("created_at")
+  updatedAt           DateTime                         @default(now()) @map("updated_at")
+  identities          PlatformUserIdentity[]
+  passwordCredential  PlatformPasswordCredential?
+  memberships         PlatformOrganizationMembership[]
+  acceptedInvitations PlatformOrganizationInvitation[] @relation("AcceptedOrganizationInvitations")
+
+  @@map("platform_users")
+}
+
+model PlatformPasswordCredential {
+  userId       String       @id @map("user_id") @db.Uuid
+  passwordHash String       @map("password_hash")
+  createdAt    DateTime     @default(now()) @map("created_at")
+  updatedAt    DateTime     @default(now()) @map("updated_at")
+  user         PlatformUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("platform_password_credentials")
+}
+
+model PlatformUserIdentity {
+  provider        String
+  providerSubject String       @map("provider_subject")
+  userId          String       @map("user_id") @db.Uuid
+  email           String?
+  emailVerified   Boolean      @default(false) @map("email_verified")
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @default(now()) @map("updated_at")
+  user            PlatformUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([provider, providerSubject])
+  @@unique([userId, provider], map: "platform_user_identities_user_provider_key")
+  @@index([userId], map: "platform_user_identities_user_idx")
+  @@map("platform_user_identities")
+}
+
+model PlatformOrganizationMembership {
+  organizationId String                   @map("organization_id")
+  userId         String                   @map("user_id") @db.Uuid
+  status         String
+  createdAt      DateTime                 @default(now()) @map("created_at")
+  updatedAt      DateTime                 @default(now()) @map("updated_at")
+  organization   PlatformOrganization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           PlatformUser             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessions       PlatformBrowserSession[]
+
+  @@id([organizationId, userId])
+  @@index([userId, status], map: "platform_organization_memberships_user_status_idx")
+  @@map("platform_organization_memberships")
+}
+
+model PlatformOrganizationDomain {
+  domain         String               @id
+  organizationId String               @map("organization_id")
+  verifiedAt     DateTime             @map("verified_at")
+  createdAt      DateTime             @default(now()) @map("created_at")
+  organization   PlatformOrganization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId], map: "platform_organization_domains_organization_idx")
+  @@map("platform_organization_domains")
+}
+
+/// A partial unique index in the migration permits only one unconsumed invitation per organization and email.
+model PlatformOrganizationInvitation {
+  id               String               @id @db.Uuid
+  organizationId   String               @map("organization_id")
+  email            String
+  expiresAt        DateTime             @map("expires_at")
+  invitedBy        String               @map("invited_by")
+  acceptedAt       DateTime?            @map("accepted_at")
+  acceptedByUserId String?              @map("accepted_by_user_id") @db.Uuid
+  revokedAt        DateTime?            @map("revoked_at")
+  revokedBy        String?              @map("revoked_by")
+  createdAt        DateTime             @default(now()) @map("created_at")
+  updatedAt        DateTime             @default(now()) @map("updated_at")
+  organization     PlatformOrganization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  acceptedBy       PlatformUser?        @relation("AcceptedOrganizationInvitations", fields: [acceptedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, createdAt], map: "platform_organization_invitations_organization_created_idx")
+  @@index([email, expiresAt], map: "platform_organization_invitations_email_expiry_idx")
+  @@map("platform_organization_invitations")
+}
+
+model PlatformBrowserSession {
+  id             String                         @id @db.Uuid
+  organizationId String                         @map("organization_id")
+  userId         String                         @map("user_id") @db.Uuid
+  tokenHash      Bytes                          @unique @map("token_hash")
+  createdAt      DateTime                       @default(now()) @map("created_at")
+  expiresAt      DateTime                       @map("expires_at")
+  lastSeenAt     DateTime?                      @map("last_seen_at")
+  revokedAt      DateTime?                      @map("revoked_at")
+  membership     PlatformOrganizationMembership @relation(fields: [organizationId, userId], references: [organizationId, userId], onDelete: Cascade)
+
+  @@index([organizationId, revokedAt], map: "platform_browser_sessions_organization_revoked_idx")
+  @@index([userId, revokedAt], map: "platform_browser_sessions_user_revoked_idx")
+  @@map("platform_browser_sessions")
+}
+
 model PlatformSlackAppInstallation {
-  id                      String   @id @db.Uuid
-  tenantId                String   @map("tenant_id")
-  webhookId               String   @unique @map("webhook_id") @db.Uuid
-  displayName             String   @map("display_name")
-  slackAppId              String   @map("slack_app_id")
-  slackAppName            String?  @map("slack_app_name")
-  slackTeamId             String   @map("slack_team_id")
-  slackTeamName           String?  @map("slack_team_name")
-  slackBotUserId          String   @map("slack_bot_user_id")
-  slackBotId              String?  @map("slack_bot_id")
-  isEnterpriseInstall     Boolean  @default(false) @map("is_enterprise_install")
-  devRuntimeEnabled       Boolean  @default(false) @map("dev_runtime_enabled")
-  devRuntimeCommand       String   @default("/qasey-local") @map("dev_runtime_command")
-  botTokenCiphertext      String   @map("bot_token_ciphertext")
-  signingSecretCiphertext String   @map("signing_secret_ciphertext")
-  credentialKeyId         String   @map("credential_key_id")
-  credentialFingerprint   String   @map("credential_fingerprint")
+  id                      String    @id @db.Uuid
+  tenantId                String    @map("tenant_id")
+  webhookId               String    @unique @map("webhook_id") @db.Uuid
+  displayName             String    @map("display_name")
+  slackAppId              String    @map("slack_app_id")
+  slackAppName            String?   @map("slack_app_name")
+  slackTeamId             String    @map("slack_team_id")
+  slackTeamName           String?   @map("slack_team_name")
+  slackBotUserId          String    @map("slack_bot_user_id")
+  slackBotId              String?   @map("slack_bot_id")
+  isEnterpriseInstall     Boolean   @default(false) @map("is_enterprise_install")
+  devRuntimeEnabled       Boolean   @default(false) @map("dev_runtime_enabled")
+  devRuntimeCommand       String    @default("/qasey-local") @map("dev_runtime_command")
+  botTokenCiphertext      String    @map("bot_token_ciphertext")
+  signingSecretCiphertext String    @map("signing_secret_ciphertext")
+  credentialKeyId         String    @map("credential_key_id")
+  credentialFingerprint   String    @map("credential_fingerprint")
   status                  String
   webhookVerifiedAt       DateTime? @map("webhook_verified_at")
-  lastTokenVerifiedAt     DateTime @map("last_token_verified_at")
-  lastErrorCode           String?  @map("last_error_code")
-  revision                BigInt   @default(1)
-  createdBy               String   @map("created_by")
-  updatedBy               String   @map("updated_by")
-  createdAt               DateTime @default(now()) @map("created_at")
-  updatedAt               DateTime @default(now()) @map("updated_at")
+  lastTokenVerifiedAt     DateTime  @map("last_token_verified_at")
+  lastErrorCode           String?   @map("last_error_code")
+  revision                BigInt    @default(1)
+  createdBy               String    @map("created_by")
+  updatedBy               String    @map("updated_by")
+  createdAt               DateTime  @default(now()) @map("created_at")
+  updatedAt               DateTime  @default(now()) @map("updated_at")
   deletedAt               DateTime? @map("deleted_at")
 
   @@map("platform_slack_app_installations")

@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { InMemoryRunRepository } from "../../packages/domain/src/index.ts";
+import { InvalidRunTransitionError, InMemoryRunRepository, RunRevisionConflictError } from "../../packages/domain/src/index.ts";
 import {
   CreateE2ERunRequestSchema,
   CreateE2ERunSchema,
+  E2ERunSchema,
   type ArtifactRef,
   type CodeTaskResult,
   type CodeTaskSpec,
@@ -30,6 +31,7 @@ describe("E2E coordinator", () => {
         skillsPaths: [],
         installCommand: ["sh", "-c", "echo unsafe"],
       },
+      playwrightVerification,
     }).success).toBe(false);
   });
 
@@ -38,6 +40,28 @@ describe("E2E coordinator", () => {
       sourceCaseIds: ["175088"], handoff: handoff(), platform: "web", framework: "playwright",
       repository: { owner: "attacker", repository: "arbitrary" },
     }).success).toBe(false);
+    expect(CreateE2ERunRequestSchema.safeParse({
+      sourceCaseIds: ["175088"], handoff: handoff(), platform: "web", framework: "playwright",
+      playwrightVerification,
+    }).success).toBe(false);
+  });
+
+  it("requires trusted verification when a server creates a new run", () => {
+    const { playwrightVerification: _verification, ...missingVerification } = createInput();
+    expect(CreateE2ERunSchema.safeParse(missingVerification).success).toBe(false);
+  });
+
+  it("enforces the create schema inside the coordinator at runtime", async () => {
+    const owner = { applicationId: "qasey", tenantId: "tenant-1" };
+    const coordinator = new E2ECoordinator(new InMemoryRunRepository(), artifacts(), broker(), {
+      maxRepairs: 2,
+      reviewBaseUrl: "https://qasey.test",
+      codeTasks: { forScope: vi.fn(async () => fakeRunner([])) },
+    });
+    const { playwrightVerification: _verification, ...missingVerification } = createInput();
+
+    await expect(coordinator.create(owner, missingVerification as unknown as Parameters<typeof coordinator.create>[1]))
+      .rejects.toThrow(/playwrightVerification/u);
   });
 
   it("accepts only canonical UUID ids or numeric nums as source case references", () => {
@@ -60,6 +84,66 @@ describe("E2E coordinator", () => {
       .rejects.toThrow(/CodeTask Runner is not configured/);
   });
 
+  it("defaults legacy run payloads to the first optimistic revision", async () => {
+    const owner = { applicationId: "qasey", tenantId: "tenant-1" };
+    const coordinator = new E2ECoordinator(new InMemoryRunRepository(), artifacts(), broker(), {
+      maxRepairs: 2,
+      reviewBaseUrl: "https://qasey.test",
+      codeTasks: { forScope: vi.fn(async () => fakeRunner([])) },
+    });
+    const created = await coordinator.create(owner, createInput());
+    const legacyPayload = { ...created } as Record<string, unknown>;
+    delete legacyPayload.revision;
+
+    expect(E2ERunSchema.parse(legacyPayload).revision).toBe(1);
+  });
+
+  it("rejects a stale writer instead of silently overwriting a newer run revision", async () => {
+    const owner = { applicationId: "qasey", tenantId: "tenant-1" };
+    const repository = new InMemoryRunRepository();
+    const coordinator = new E2ECoordinator(repository, artifacts(), broker(), {
+      maxRepairs: 2,
+      reviewBaseUrl: "https://qasey.test",
+      codeTasks: { forScope: vi.fn(async () => fakeRunner([])) },
+    });
+    const original = await coordinator.create(owner, createInput());
+    const updated = await repository.update(owner, original.id, original.revision, { status: "failed" });
+
+    expect(updated.revision).toBe(2);
+    const conflict = await repository.update(owner, original.id, original.revision, { branch: "stale-writer" }).catch(error => error);
+    expect(conflict).toBeInstanceOf(RunRevisionConflictError);
+    expect(conflict).toMatchObject({
+      name: "RunRevisionConflictError",
+      code: "run_revision_conflict",
+      runId: original.id,
+      expectedRevision: 1,
+      actualRevision: 2,
+    });
+    await expect(repository.get(owner, original.id)).resolves.toMatchObject({ status: "failed", revision: 2 });
+  });
+
+  it("rejects status regression from a terminal run", async () => {
+    const owner = { applicationId: "qasey", tenantId: "tenant-1" };
+    const repository = new InMemoryRunRepository();
+    const coordinator = new E2ECoordinator(repository, artifacts(), broker(), {
+      maxRepairs: 2,
+      reviewBaseUrl: "https://qasey.test",
+      codeTasks: { forScope: vi.fn(async () => fakeRunner([])) },
+    });
+    const original = await coordinator.create(owner, createInput());
+    const failed = await repository.update(owner, original.id, original.revision, { status: "failed" });
+
+    const invalidTransition = await repository.update(owner, failed.id, failed.revision, { status: "authoring" }).catch(error => error);
+    expect(invalidTransition).toBeInstanceOf(InvalidRunTransitionError);
+    expect(invalidTransition).toMatchObject({
+      name: "InvalidRunTransitionError",
+      code: "invalid_run_transition",
+      from: "failed",
+      to: "authoring",
+    });
+    await expect(repository.get(owner, original.id)).resolves.toMatchObject({ status: "failed", revision: 2 });
+  });
+
   it("requires a Sandbox author pass and an independent verifier pass before a Draft PR", async () => {
     const owner = { applicationId: "qasey", tenantId: "tenant-1" };
     const repository = new InMemoryRunRepository();
@@ -72,6 +156,7 @@ describe("E2E coordinator", () => {
       codeTasks: { forScope: vi.fn(async () => runner) } satisfies CodeTaskRunnerProvider,
     });
     const run = await coordinator.create(owner, createInput());
+    expect(run.playwrightVerification).toEqual(playwrightVerification);
     await coordinator.freezeExecutionBrief(owner, run.id, [{
       id: "case-1",
       title: "accepted browser flow",
@@ -92,12 +177,20 @@ describe("E2E coordinator", () => {
       skillPaths: [],
       specGlobs: ["e2e/**/*.spec.ts"],
       artifactGlobs: [],
+      verification: playwrightVerification,
     });
-    await repository.update(owner, run.id, { baseSha });
+    const frozen = await repository.get(owner, run.id);
+    await repository.update(owner, run.id, frozen!.revision, { baseSha });
 
     await coordinator.execute(owner, run.id);
 
     expect(submitted.map(spec => spec.executionProfileId)).toEqual(["web-e2e-author", "web-e2e-verifier"]);
+    expect(submitted[0]?.playwrightVerification).toEqual(frozen?.executionBrief?.repository.verification);
+    expect(submitted[1]?.playwrightVerification).toEqual(frozen?.executionBrief?.repository.verification);
+    expect(submitted.map(spec => spec.playwrightVerification)).toEqual([
+      playwrightVerification,
+      playwrightVerification,
+    ]);
     expect(submitted[1]?.attemptId).not.toBe(submitted[0]?.attemptId);
     expect(draftPr.publishChanges).toHaveBeenCalledTimes(1);
     expect(await repository.get(owner, run.id)).toMatchObject({
@@ -113,7 +206,7 @@ describe("E2E coordinator", () => {
 function createInput() {
   return {
     sourceSessionId: "s",
-    sourceCaseIds: ["case-1"],
+    sourceCaseIds: ["175088"],
     platform: "web" as const,
     framework: "playwright" as const,
     handoff: handoff(),
@@ -125,8 +218,20 @@ function createInput() {
       allowedPaths: ["e2e"],
       skillsPaths: [],
     },
+    playwrightVerification,
   };
 }
+
+const playwrightVerification = {
+  strategy: "changed-project-playwright" as const,
+  projects: [{
+    id: "e2e",
+    root: "e2e",
+    testRoot: "e2e",
+    config: "e2e/playwright.config.ts",
+    playwrightProject: "chromium",
+  }],
+};
 
 function artifacts(): ArtifactStore {
   let patch = "";

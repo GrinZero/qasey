@@ -13,7 +13,7 @@ describe("validateFigmaToolInput", () => {
 
   it("accepts a valid file key with a separate node id", () => {
     expect(() => validateFigmaToolInput("figma_get_node_detail", {
-      file_key: "GUQDRg0HCBrli3dwSehLd9",
+      file_key: "synthetic-figma-file-key",
       node_ids: "4366:10167",
     })).not.toThrow();
   });

@@ -58,6 +58,57 @@ describe("shared repository cache", () => {
     });
     expect(detached.exitCode).not.toBe(0);
   });
+
+  it("reuses an isolated-checkout mirror when Git rewrites its transport URL", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "qasey-rewrite-origin-"));
+    const attempts = await mkdtemp(join(tmpdir(), "qasey-rewrite-attempts-"));
+    const cacheRoot = await mkdtemp(join(tmpdir(), "qasey-rewrite-cache-"));
+    const configRoot = await mkdtemp(join(tmpdir(), "qasey-rewrite-config-"));
+    cleanup.push(fixture, attempts, cacheRoot, configRoot);
+    await writeFile(join(fixture, "README.md"), "fixture\n");
+    await git(fixture, ["init", "-b", "main"]);
+    await git(fixture, ["add", "."]);
+    await git(fixture, ["-c", "user.name=Qasey", "-c", "user.email=qasey@example.test", "commit", "-m", "base"]);
+
+    const cloneUrl = "https://github.com/example/rewrite-fixture.git";
+    const gitConfig = join(configRoot, "gitconfig");
+    const configureRewrite = await runSafeCommand({
+      executable: "git",
+      args: ["config", "--file", gitConfig, `url.${fixture}.insteadOf`, cloneUrl],
+      cwd: fixture,
+    });
+    expect(configureRewrite.exitCode).toBe(0);
+    const env = {
+      GIT_CONFIG_GLOBAL: gitConfig,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+    };
+    const source = {
+      namespace: "tenant",
+      owner: "example",
+      repository: "rewrite-fixture",
+      cloneUrl,
+    };
+    const cache = new SharedRepositoryCache(cacheRoot);
+    const first = await cache.createIsolatedCheckout(source, join(attempts, "first"), {
+      ref: "main",
+      env,
+    });
+    if (!first.resolvedSha) throw new Error("First isolated checkout did not resolve its base SHA");
+    const second = await cache.createIsolatedCheckout(source, join(attempts, "second"), {
+      ref: "main",
+      baseSha: first.resolvedSha,
+      env,
+    });
+
+    expect(first.cacheHit).toBe(false);
+    expect(second.cacheHit).toBe(true);
+    expect(second.mirrorPath).toBe(first.mirrorPath);
+    await expect(readFile(join(first.destination, "README.md"), "utf8")).resolves.toBe("fixture\n");
+    await expect(readFile(join(second.destination, "README.md"), "utf8")).resolves.toBe("fixture\n");
+    await expect(readFile(join(first.destination, ".git", "objects", "info", "alternates"), "utf8")).rejects.toThrow();
+    await expect(readFile(join(second.destination, ".git", "objects", "info", "alternates"), "utf8")).rejects.toThrow();
+  });
 });
 
 async function git(cwd: string, args: string[]): Promise<void> {

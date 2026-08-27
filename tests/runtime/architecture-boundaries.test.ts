@@ -88,7 +88,7 @@ describe("shared runtime architecture boundaries", () => {
     expect(runtimeScript).toContain('MASTRA_AUTO_DETECT_URL="${MASTRA_AUTO_DETECT_URL:-true}"');
     expect(runtimeScript).toContain("export PORT MASTRA_AUTO_DETECT_URL");
     expect(packageJson.scripts.build).toContain("mastra worker build --dir src/mastra --output-dir .mastra/worker");
-    expect(runtimeScript).toContain("exec node .mastra/worker/index.mjs");
+    expect(runtimeScript).toContain("exec node dist/worker-supervisor.mjs");
     await expect(access(join(projectRoot, "src/mastra/worker-entry.ts"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
@@ -102,5 +102,19 @@ describe("shared runtime architecture boundaries", () => {
     expect(runtimeSource).not.toMatch(/MastraAuthGoogle|CompositeAuth|SimpleAuth|serverAuth/u);
     expect(adminApiSource).not.toContain("/api/auth/");
     expect(adminApiSource).toContain("/auth/google/login");
+  });
+
+  it("uses Mastra's guarded lifecycle wrappers for local sandbox resources", async () => {
+    const sources = await Promise.all([
+      readFile(join(projectRoot, "src/sandbox/runtime.ts"), "utf8"),
+      readFile(join(projectRoot, "src/sandbox/code-task-worker.ts"), "utf8"),
+    ]);
+    const combined = sources.join("\n");
+
+    expect(combined).toContain("await sandbox._start()");
+    expect(combined).toContain("await sandbox._destroy()");
+    expect(combined).toContain("await filesystem._init()");
+    expect(combined).toContain("await session.filesystem._destroy()");
+    expect(combined).not.toMatch(/\b(?:filesystem|sandbox|taskSandbox|browserSandbox|checkSandbox)\.(?:start|destroy)\s*\(/u);
   });
 });

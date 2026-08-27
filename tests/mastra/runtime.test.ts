@@ -22,7 +22,7 @@ describe("Qasey runtime context", () => {
     await expect(toolsForRequest()).rejects.toThrow("Qasey request context has not been initialized");
   });
 
-  it("enables read-only MCP discovery for authenticated Studio previews", async () => {
+  it("keeps MCP discovery disabled by default for authenticated Studio previews", async () => {
     const requestContext = new RequestContext();
     requestContext.set("identity", { userId: "studio-user", tenantId: "tenant-1", roles: ["user"], service: false });
     requestContext.set("requestId", "studio-request");
@@ -42,13 +42,9 @@ describe("Qasey runtime context", () => {
 
     const tools = await toolsForRequest(requestContext);
 
-    expect(studioMcpPreviewEnabled).toBe(true);
-    expect(discover).toHaveBeenCalledWith("api", expect.objectContaining({
-      applicationId: "qasey",
-      tenantId: "tenant-1",
-      subjectId: "studio-user",
-    }), { readOnly: true });
-    expect(tools).toHaveProperty("metersphere_ms_list_modules", listModules);
+    expect(studioMcpPreviewEnabled).toBe(false);
+    expect(discover).not.toHaveBeenCalled();
+    expect(tools).not.toHaveProperty("metersphere_ms_list_modules");
     discover.mockRestore();
   });
 

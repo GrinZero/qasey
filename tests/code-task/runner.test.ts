@@ -37,6 +37,29 @@ describe("generic CodeTask runner", () => {
     expect(profile).toMatchObject({ useAgent: true, writable: false, permission: "reject", allowedCheckIds: [] });
     expect(spec).toMatchObject({ kind: "review", executionProfileId: "code-review-readonly", allowedPaths: [], fixedChecks: [] });
   });
+
+  it("emits liveness heartbeats while a non-terminal task is being polled", async () => {
+    const heartbeat = vi.fn();
+    let polls = 0;
+    const result = successfulResult();
+    const runner: CodeTaskRunner = {
+      submit: vi.fn(async (spec: CodeTaskSpec) => ({ taskId: spec.taskId, attemptId: spec.attemptId, status: "queued" as const })),
+      get: vi.fn(async (): Promise<CodeTaskState> => {
+        polls += 1;
+        const now = new Date().toISOString();
+        return polls > 1
+          ? { taskId: "review-1", attemptId: "attempt-1", status: "succeeded", createdAt: now, updatedAt: now, result }
+          : { taskId: "review-1", attemptId: "attempt-1", status: "running", createdAt: now, updatedAt: now };
+      }),
+      events: vi.fn(async () => ({ events: [] })),
+      cancel: vi.fn(async () => undefined),
+      artifact: vi.fn(async () => Buffer.alloc(0)),
+    };
+
+    await submitAndWaitForCodeTask(runner, reviewSpec(), { pollMs: 1, onHeartbeat: heartbeat });
+
+    expect(heartbeat).toHaveBeenCalledTimes(1);
+  });
 });
 
 function reviewSpec(): CodeTaskSpec {
@@ -45,7 +68,7 @@ function reviewSpec(): CodeTaskSpec {
     scope: { applicationId: "qasey", tenantId: "tenant", sessionId: "session" },
     contextRef: { id: "context", kind: "report", name: "context.json", uri: "file:///context.json" },
     contextHash: "a".repeat(64),
-    repositories: [{ owner: "MoeGolibrary", repository: "Boarding_Desktop", destination: "target", mode: "read", baseRef: "main", baseSha: "b".repeat(40) }],
+    repositories: [{ owner: "example-org", repository: "web-app", destination: "target", mode: "read", baseRef: "main", baseSha: "b".repeat(40) }],
     baseSha: "b".repeat(40), executionProfileId: "code-review-readonly", allowedPaths: [], fixedChecks: [], deadlineMs: 60_000,
     traceContext: { traceId: "trace-1" },
   };

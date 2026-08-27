@@ -1,18 +1,67 @@
 import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import type { CodeTaskState } from "../../packages/contracts/src/index.ts";
-import type { CodeTaskWorkerManifest } from "../../packages/code-task/src/index.ts";
+import type { ChangedProjectPlaywrightVerification, CodeTaskState } from "../../packages/contracts/src/index.ts";
+import { buildFreshDeviceBwrapArgs, type CodeTaskWorkerManifest } from "../../packages/code-task/src/index.ts";
+import { assertContainedWorkspaceWritePath } from "../../packages/code-task/src/backend.ts";
 
 const exec = promisify(execFile);
 const cleanups: string[] = [];
 afterEach(async () => Promise.all(cleanups.splice(0).map(path => rm(path, { recursive: true, force: true }))));
 
 describe("code-task-worker safety boundary", () => {
+  it("verifies the outer worker namespace before reading one-shot credentials", async () => {
+    const source = await readFile(resolve("src/sandbox/code-task-worker.ts"), "utf8");
+    const isolationCheck = source.indexOf("await assertOuterWorkerIsolation();");
+    const credentialRead = source.indexOf("const credentials = await receiveCredentials();");
+
+    expect(isolationCheck).toBeGreaterThan(0);
+    expect(credentialRead).toBeGreaterThan(isolationCheck);
+    expect(source).toContain("/dev/qasey-host-device-sentinel");
+    expect(source).toContain("/tmp/qasey-host-sentinel");
+  });
+
+  it("builds complete fresh-device bwrap namespaces and disables them for none isolation", () => {
+    const args = buildFreshDeviceBwrapArgs({
+      isolation: "bwrap",
+      workspacePath: "/workspace",
+      allowNetwork: false,
+      readOnlyPaths: ["/runtime"],
+      readWritePaths: ["/state"],
+    });
+    const hasPair = (flag: string, value: string) => args?.some((entry, index) => entry === flag && args[index + 1] === value) === true;
+
+    expect(args).toEqual(expect.arrayContaining([
+      "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-net", "--die-with-parent",
+    ]));
+    expect(hasPair("--proc", "/proc")).toBe(true);
+    expect(hasPair("--dev", "/dev")).toBe(true);
+    expect(hasPair("--tmpfs", "/dev/shm")).toBe(true);
+    expect(hasPair("--tmpfs", "/tmp")).toBe(true);
+    expect(hasPair("--ro-bind", "/runtime")).toBe(true);
+    expect(hasPair("--bind", "/workspace")).toBe(true);
+    expect(hasPair("--bind", "/state")).toBe(true);
+    expect(hasPair("--chdir", "/workspace")).toBe(true);
+    for (const hostDeviceBindFlag of ["--bind", "--bind-try", "--ro-bind", "--ro-bind-try", "--dev-bind", "--dev-bind-try"]) {
+      expect(hasPair(hostDeviceBindFlag, "/dev")).toBe(false);
+    }
+
+    expect(buildFreshDeviceBwrapArgs({
+      isolation: "bwrap",
+      workspacePath: "/workspace",
+      allowNetwork: true,
+    })).not.toContain("--unshare-net");
+    expect(buildFreshDeviceBwrapArgs({
+      isolation: "none",
+      workspacePath: "/workspace",
+      allowNetwork: false,
+    })).toBeUndefined();
+  });
+
   it("keeps two attempts in independent repositories and emits independent patches", async () => {
     const first = await runVerifierAttempt("first");
     const second = await runVerifierAttempt("second");
@@ -35,6 +84,15 @@ describe("code-task-worker safety boundary", () => {
     expect(execution.state.result?.summary).toMatch(/outside|symlink/iu);
   });
 
+  it("rejects a write whose nearest existing ancestor is an escaping symlink", async () => {
+    const root = await createRepository();
+    const outside = join(root.repositoryRoot, "outside");
+    await mkdir(outside);
+    await symlink(outside, join(root.workspaceRoot, "generated"));
+    await expect(assertContainedWorkspaceWritePath(root.workspaceRoot, "generated/result.txt"))
+      .rejects.toThrow(/ancestor symlink outside/iu);
+  });
+
   it("hydrates dependencies with lifecycle scripts disabled", async () => {
     const root = await createRepository();
     const marker = join(root.repositoryRoot, "postinstall-escaped.txt");
@@ -52,6 +110,24 @@ describe("code-task-worker safety boundary", () => {
     expect(execution.state).toMatchObject({ status: "succeeded" });
     await expect(access(marker)).rejects.toThrow();
   });
+
+  it("fails closed when a changed path is outside the frozen Playwright projects", async () => {
+    const root = await createRepository();
+    await writeFile(join(root.workspaceRoot, "tests", "example.spec.ts"), "export const marker = 'uncovered';\n");
+    const execution = await runWorker(root, "uncovered-attempt", false, [{ id: "playwright" }], {
+      strategy: "changed-project-playwright",
+      projects: [{
+        id: "web",
+        root: "web",
+        testRoot: "web/tests",
+        config: "web/playwright.config.ts",
+        playwrightProject: "chromium",
+      }],
+    });
+
+    expect(execution.state).toMatchObject({ status: "failed" });
+    expect(execution.state.result?.summary).toMatch(/not covered by a fixed Playwright project/u);
+  });
 });
 
 async function runVerifierAttempt(marker: string) {
@@ -60,7 +136,7 @@ async function runVerifierAttempt(marker: string) {
   const execution = await runWorker(root, `${marker}-attempt`, true);
   const patchRef = execution.state.result?.patchRef;
   if (!patchRef) throw new Error("worker did not produce a patch");
-  return { ...execution, patch: await readFile(resolve(root.repositoryRoot, patchRef.uri.slice("sandbox://".length)), "utf8") };
+  return { ...execution, patch: await readFile(join(execution.artifactRoot, "changes.patch"), "utf8") };
 }
 
 async function createRepository() {
@@ -83,12 +159,20 @@ async function runWorker(
   attemptId: string,
   expectSuccess: boolean,
   fixedChecks: Array<{ id: string }> = [],
-): Promise<{ state: CodeTaskState; workspaceRoot: string; events: Array<{ metadata: Record<string, unknown> }> }> {
-  const taskRoot = join(root.repositoryRoot, "code-tasks", "worker-test", attemptId);
-  const statePath = join(taskRoot, "state.json");
-  const eventsPath = join(taskRoot, "events.ndjson");
-  const manifestPath = join(taskRoot, "manifest.json");
-  await mkdir(dirname(manifestPath), { recursive: true });
+  playwrightVerification?: ChangedProjectPlaywrightVerification,
+): Promise<{ state: CodeTaskState; workspaceRoot: string; artifactRoot: string; events: Array<{ metadata: Record<string, unknown> }> }> {
+  const taskRoot = root.repositoryRoot;
+  const controlRoot = join(taskRoot, "control", attemptId);
+  const artifactRoot = join(taskRoot, "artifacts", attemptId);
+  const checkRoot = join(taskRoot, "check-output", attemptId);
+  const statePath = join(controlRoot, "state.json");
+  const eventsPath = join(controlRoot, "events.ndjson");
+  const manifestPath = join(controlRoot, "manifest.json");
+  await Promise.all([
+    mkdir(dirname(manifestPath), { recursive: true }),
+    mkdir(artifactRoot, { recursive: true }),
+    mkdir(checkRoot, { recursive: true }),
+  ]);
   const context = JSON.stringify({ purpose: "deterministic verifier smoke test" });
   const manifest: CodeTaskWorkerManifest = {
     spec: {
@@ -96,17 +180,27 @@ async function runWorker(
       scope: { applicationId: "qasey", tenantId: "tenant", sessionId: "session" },
       contextRef: { id: "context", kind: "report", name: "context.json", uri: "file:///context.json" },
       contextHash: createHash("sha256").update(context).digest("hex"),
-      repositories: [{ owner: "MoeGolibrary", repository: "moego-e2e-autotest", destination: "target", mode: "write", baseRef: "main", baseSha: root.baseSha }],
+      repositories: [{ owner: "example-org", repository: "web-e2e", destination: "target", mode: "write", baseRef: "main", baseSha: root.baseSha }],
       baseSha: root.baseSha, executionProfileId: "web-e2e-verifier", allowedPaths: ["tests"], fixedChecks, deadlineMs: 60_000,
       traceContext: { traceId: "trace-worker-test" },
+      ...(playwrightVerification ? { playwrightVerification } : {}),
     },
-    context, repositoryRoot: root.repositoryRoot, workspaceRoot: root.workspaceRoot, taskRoot, statePath, eventsPath,
+    context,
+    workspaceRoot: root.workspaceRoot,
+    taskRoot,
+    controlRoot,
+    artifactRoot,
+    artifactUriPrefix: `sandbox://code-task-artifacts/worker-test/${attemptId}`,
+    checkRoot,
+    isolation: "none",
+    checkRuntimeReadOnlyPaths: [],
+    statePath,
+    eventsPath,
+    repositoryMounts: [{ root: root.workspaceRoot, mode: "write", baseSha: root.baseSha }],
   };
   await writeFile(manifestPath, JSON.stringify(manifest));
   try {
-    await exec(resolve("node_modules/.bin/tsx"), [resolve("src/sandbox/code-task-worker.ts"), manifestPath], {
-      cwd: process.cwd(), env: { ...process.env, QASEY_IMAGE_DIGEST: "sha256:test" },
-    });
+    await executeWorker(manifestPath);
     if (!expectSuccess) throw new Error("worker unexpectedly succeeded");
   } catch (error) {
     if (expectSuccess) {
@@ -115,5 +209,33 @@ async function runWorker(
     }
   }
   const events = (await readFile(eventsPath, "utf8")).trim().split("\n").filter(Boolean).map(line => JSON.parse(line) as { metadata: Record<string, unknown> });
-  return { state: JSON.parse(await readFile(statePath, "utf8")) as CodeTaskState, workspaceRoot: root.workspaceRoot, events };
+  return { state: JSON.parse(await readFile(statePath, "utf8")) as CodeTaskState, workspaceRoot: root.workspaceRoot, artifactRoot, events };
+}
+
+async function executeWorker(manifestPath: string): Promise<void> {
+  const environment = Object.fromEntries(Object.entries(process.env)
+    .filter(([key, value]) => value !== undefined && key !== "OPENAI_API_KEY" && key !== "OPENAI_BASE_URL")) as NodeJS.ProcessEnv;
+  environment.QASEY_IMAGE_DIGEST = `sha256:${"d".repeat(64)}`;
+  const child = spawn(resolve("node_modules/.bin/tsx"), [resolve("src/sandbox/code-task-worker.ts"), manifestPath], {
+    cwd: process.cwd(),
+    env: environment,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", chunk => { stdout += chunk.toString(); });
+  child.stderr.on("data", chunk => { stderr += chunk.toString(); });
+  // The runtime sends one line but deliberately does not own a long-lived
+  // credential channel. The worker must consume and close its stdin itself so
+  // an open parent pipe cannot keep a terminal task alive.
+  child.stdin.write("{}\n");
+  const exitCode = await new Promise<number | null>((resolveExit, reject) => {
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("worker did not exit after consuming its one-shot credential line"));
+    }, 5_000);
+    child.once("error", error => { clearTimeout(timeout); reject(error); });
+    child.once("close", code => { clearTimeout(timeout); resolveExit(code); });
+  });
+  if (exitCode !== 0) throw new Error(`worker exited with ${exitCode}: ${stderr || stdout}`);
 }

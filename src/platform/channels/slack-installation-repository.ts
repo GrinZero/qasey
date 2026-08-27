@@ -26,6 +26,7 @@ export interface SlackInstallation {
   devRuntimeCommand: string;
   status: SlackInstallationStatus;
   revision: number;
+  credentialKeyId: string;
   webhookVerifiedAt?: string;
   lastTokenVerifiedAt: string;
   lastErrorCode?: string;
@@ -64,7 +65,7 @@ export interface UpdateSlackCredentialsInput {
 
 export class SlackInstallationRepositoryError extends Error {
   constructor(
-    readonly code: "not_found" | "duplicate" | "revision_conflict",
+    readonly code: "not_found" | "duplicate" | "revision_conflict" | "key_unavailable" | "invalid_credentials",
     message: string,
   ) {
     super(message);
@@ -79,6 +80,7 @@ export interface SlackInstallationRepository {
   getRuntimeByWebhookId(webhookId: string): Promise<SlackRuntimeInstallation | undefined>;
   create(input: CreateSlackInstallationInput): Promise<SlackInstallation>;
   updateCredentials(input: UpdateSlackCredentialsInput): Promise<SlackInstallation>;
+  rotateCredentials(tenantId: string, id: string, expectedRevision: number, actorId: string): Promise<SlackInstallation>;
   setDevRuntimeConfiguration(
     tenantId: string,
     id: string,
@@ -100,10 +102,18 @@ interface StoredInstallation extends SlackInstallation {
   credentialFingerprint: string;
 }
 
+export interface SlackCredentialKeyring {
+  activeKeyId: string;
+  keys: Readonly<Record<string, string>>;
+}
+
 export class InMemorySlackInstallationRepository implements SlackInstallationRepository {
   private readonly records = new Map<string, StoredInstallation>();
+  private readonly keyring: SlackCredentialKeyring;
 
-  constructor(private readonly encryptionKey: string) {}
+  constructor(keyring: string | SlackCredentialKeyring) {
+    this.keyring = normalizeSlackKeyring(keyring);
+  }
 
   async init(): Promise<void> {}
   async healthCheck(): Promise<void> {}
@@ -122,7 +132,7 @@ export class InMemorySlackInstallationRepository implements SlackInstallationRep
 
   async getRuntimeByWebhookId(webhookId: string): Promise<SlackRuntimeInstallation | undefined> {
     const record = [...this.records.values()].find(candidate => candidate.webhookId === webhookId);
-    return record ? runtimeInstallation(record, this.encryptionKey) : undefined;
+    return record ? runtimeInstallation(record, this.keyring) : undefined;
   }
 
   async create(input: CreateSlackInstallationInput): Promise<SlackInstallation> {
@@ -142,16 +152,17 @@ export class InMemorySlackInstallationRepository implements SlackInstallationRep
       devRuntimeCommand: input.devRuntimeCommand ?? DEFAULT_SLACK_DEV_RUNTIME_COMMAND,
       status: "awaiting_webhook",
       revision: 1,
+      credentialKeyId: this.keyring.activeKeyId,
       lastTokenVerifiedAt: now,
       createdAt: now,
       updatedAt: now,
-      botTokenCiphertext: encryptSlackCredential(input.botToken, this.encryptionKey, {
+      botTokenCiphertext: encryptSlackCredential(input.botToken, activeSlackKey(this.keyring), {
         tenantId: input.tenantId, installationId: id, field: "bot-token",
-      }),
-      signingSecretCiphertext: encryptSlackCredential(input.signingSecret, this.encryptionKey, {
+      }, this.keyring.activeKeyId),
+      signingSecretCiphertext: encryptSlackCredential(input.signingSecret, activeSlackKey(this.keyring), {
         tenantId: input.tenantId, installationId: id, field: "signing-secret",
-      }),
-      credentialFingerprint: fingerprint(input.botToken, this.encryptionKey),
+      }, this.keyring.activeKeyId),
+      credentialFingerprint: fingerprint(input.botToken, activeSlackKey(this.keyring)),
     };
     this.records.set(id, record);
     return publicInstallation(record);
@@ -163,19 +174,42 @@ export class InMemorySlackInstallationRepository implements SlackInstallationRep
       candidate.id !== input.id && sameSlackInstallation(candidate.identity, input.identity));
     if (duplicate) throw new SlackInstallationRepositoryError("duplicate", "This Slack App installation is already managed");
     record.identity = structuredClone(input.identity);
-    record.botTokenCiphertext = encryptSlackCredential(input.botToken, this.encryptionKey, {
+    record.botTokenCiphertext = encryptSlackCredential(input.botToken, activeSlackKey(this.keyring), {
       tenantId: input.tenantId, installationId: input.id, field: "bot-token",
-    });
-    record.signingSecretCiphertext = encryptSlackCredential(input.signingSecret, this.encryptionKey, {
+    }, this.keyring.activeKeyId);
+    record.signingSecretCiphertext = encryptSlackCredential(input.signingSecret, activeSlackKey(this.keyring), {
       tenantId: input.tenantId, installationId: input.id, field: "signing-secret",
-    });
-    record.credentialFingerprint = fingerprint(input.botToken, this.encryptionKey);
+    }, this.keyring.activeKeyId);
+    record.credentialKeyId = this.keyring.activeKeyId;
+    record.credentialFingerprint = fingerprint(input.botToken, activeSlackKey(this.keyring));
     if (input.devRuntimeEnabled !== undefined) record.devRuntimeEnabled = input.devRuntimeEnabled;
     if (input.devRuntimeCommand !== undefined) record.devRuntimeCommand = input.devRuntimeCommand;
     record.status = "awaiting_webhook";
     delete record.webhookVerifiedAt;
     record.lastTokenVerifiedAt = new Date().toISOString();
     delete record.lastErrorCode;
+    bump(record);
+    return publicInstallation(record);
+  }
+
+  async rotateCredentials(
+    tenantId: string,
+    id: string,
+    expectedRevision: number,
+    actorId: string,
+  ): Promise<SlackInstallation> {
+    const record = this.require(tenantId, id, expectedRevision);
+    const credentials = decryptStoredSlackCredentials(record, this.keyring);
+    const activeKey = activeSlackKey(this.keyring);
+    record.botTokenCiphertext = encryptSlackCredential(credentials.botToken, activeKey, {
+      tenantId, installationId: id, field: "bot-token",
+    }, this.keyring.activeKeyId);
+    record.signingSecretCiphertext = encryptSlackCredential(credentials.signingSecret, activeKey, {
+      tenantId, installationId: id, field: "signing-secret",
+    }, this.keyring.activeKeyId);
+    record.credentialKeyId = this.keyring.activeKeyId;
+    record.credentialFingerprint = fingerprint(credentials.botToken, activeKey);
+    void actorId;
     bump(record);
     return publicInstallation(record);
   }
@@ -258,6 +292,7 @@ interface InstallationRow {
   dev_runtime_command: string;
   bot_token_ciphertext: string;
   signing_secret_ciphertext: string;
+  credential_key_id: string;
   credential_fingerprint: string;
   status: SlackInstallationStatus;
   webhook_verified_at: Date | null;
@@ -271,8 +306,11 @@ interface InstallationRow {
 
 export class PrismaSlackInstallationRepository implements SlackInstallationRepository {
   private initialized?: Promise<void>;
+  private readonly keyring: SlackCredentialKeyring;
 
-  constructor(private readonly prisma: PrismaClient, private readonly encryptionKey: string) {}
+  constructor(private readonly prisma: PrismaClient, keyring: string | SlackCredentialKeyring) {
+    this.keyring = normalizeSlackKeyring(keyring);
+  }
 
   init(): Promise<void> {
     this.initialized ??= this.prisma.$connect();
@@ -303,15 +341,7 @@ export class PrismaSlackInstallationRepository implements SlackInstallationRepos
     const rows = await this.prisma.$queryRawUnsafe<InstallationRow[]>(`${SELECT_INSTALLATION} WHERE i.webhook_id=$1::uuid AND i.deleted_at IS NULL`, webhookId);
     const row = rows[0];
     if (!row) return undefined;
-    return {
-      ...rowToInstallation(row),
-      botToken: decryptSlackCredential(row.bot_token_ciphertext, this.encryptionKey, {
-        tenantId: row.tenant_id, installationId: row.id, field: "bot-token",
-      }),
-      signingSecret: decryptSlackCredential(row.signing_secret_ciphertext, this.encryptionKey, {
-        tenantId: row.tenant_id, installationId: row.id, field: "signing-secret",
-      }),
-    };
+    return runtimeRowInstallation(row, this.keyring);
   }
 
   async create(input: CreateSlackInstallationInput): Promise<SlackInstallation> {
@@ -326,14 +356,18 @@ export class PrismaSlackInstallationRepository implements SlackInstallationRepos
          (id,tenant_id,webhook_id,display_name,slack_app_id,slack_app_name,slack_team_id,slack_team_name,
           slack_bot_user_id,slack_bot_id,is_enterprise_install,dev_runtime_enabled,dev_runtime_command,bot_token_ciphertext,signing_secret_ciphertext,
           credential_key_id,credential_fingerprint,status,revision,last_token_verified_at,created_by,updated_by)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'default',$16,'awaiting_webhook',1,$17,$18,$18)`,
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'awaiting_webhook',1,$18,$19,$19)`,
         id, input.tenantId, webhookId, input.displayName, input.identity.appId, input.identity.appName ?? null,
           input.identity.teamId, input.identity.teamName ?? null, input.identity.botUserId, input.identity.botId ?? null,
           input.identity.enterpriseInstall ?? false, input.devRuntimeEnabled ?? false,
           input.devRuntimeCommand ?? DEFAULT_SLACK_DEV_RUNTIME_COMMAND,
-          encryptSlackCredential(input.botToken, this.encryptionKey, { tenantId: input.tenantId, installationId: id, field: "bot-token" }),
-          encryptSlackCredential(input.signingSecret, this.encryptionKey, { tenantId: input.tenantId, installationId: id, field: "signing-secret" }),
-          fingerprint(input.botToken, this.encryptionKey), now, input.actorId,
+          encryptSlackCredential(input.botToken, activeSlackKey(this.keyring), {
+            tenantId: input.tenantId, installationId: id, field: "bot-token",
+          }, this.keyring.activeKeyId),
+          encryptSlackCredential(input.signingSecret, activeSlackKey(this.keyring), {
+            tenantId: input.tenantId, installationId: id, field: "signing-secret",
+          }, this.keyring.activeKeyId),
+          this.keyring.activeKeyId, fingerprint(input.botToken, activeSlackKey(this.keyring)), now, input.actorId,
         );
         await insertBinding(tx, input.tenantId, id, input.agentId, input.actorId);
       });
@@ -349,23 +383,68 @@ export class PrismaSlackInstallationRepository implements SlackInstallationRepos
     const count = await this.prisma.$executeRawUnsafe(
       `UPDATE platform_slack_app_installations SET
        slack_app_id=$4,slack_app_name=$5,slack_team_id=$6,slack_team_name=$7,slack_bot_user_id=$8,slack_bot_id=$9,
-       is_enterprise_install=$10,dev_runtime_enabled=COALESCE($11,dev_runtime_enabled),dev_runtime_command=COALESCE($12,dev_runtime_command),bot_token_ciphertext=$13,signing_secret_ciphertext=$14,credential_fingerprint=$15,
+       is_enterprise_install=$10,dev_runtime_enabled=COALESCE($11,dev_runtime_enabled),dev_runtime_command=COALESCE($12,dev_runtime_command),bot_token_ciphertext=$13,signing_secret_ciphertext=$14,credential_key_id=$15,credential_fingerprint=$16,
        status='awaiting_webhook',webhook_verified_at=NULL,last_token_verified_at=now(),last_error_code=NULL,
-       revision=revision+1,updated_by=$16,updated_at=now()
+       revision=revision+1,updated_by=$17,updated_at=now()
        WHERE tenant_id=$1 AND id=$2 AND revision=$3 AND deleted_at IS NULL`,
       input.tenantId, input.id, input.expectedRevision, input.identity.appId, input.identity.appName ?? null,
         input.identity.teamId, input.identity.teamName ?? null, input.identity.botUserId, input.identity.botId ?? null,
         input.identity.enterpriseInstall ?? false, input.devRuntimeEnabled ?? null,
         input.devRuntimeCommand ?? null,
-        encryptSlackCredential(input.botToken, this.encryptionKey, { tenantId: input.tenantId, installationId: input.id, field: "bot-token" }),
-        encryptSlackCredential(input.signingSecret, this.encryptionKey, { tenantId: input.tenantId, installationId: input.id, field: "signing-secret" }),
-        fingerprint(input.botToken, this.encryptionKey), input.actorId,
+        encryptSlackCredential(input.botToken, activeSlackKey(this.keyring), {
+          tenantId: input.tenantId, installationId: input.id, field: "bot-token",
+        }, this.keyring.activeKeyId),
+        encryptSlackCredential(input.signingSecret, activeSlackKey(this.keyring), {
+          tenantId: input.tenantId, installationId: input.id, field: "signing-secret",
+        }, this.keyring.activeKeyId),
+        this.keyring.activeKeyId, fingerprint(input.botToken, activeSlackKey(this.keyring)), input.actorId,
     ).catch(error => {
       if (isUniqueViolation(error)) throw new SlackInstallationRepositoryError("duplicate", "This Slack App installation is already managed");
       throw error;
     });
     if (count !== 1) await this.throwMissingOrConflict(input.tenantId, input.id);
     return (await this.get(input.tenantId, input.id))!;
+  }
+
+  async rotateCredentials(
+    tenantId: string,
+    id: string,
+    expectedRevision: number,
+    actorId: string,
+  ): Promise<SlackInstallation> {
+    await this.ready();
+    const rows = await this.prisma.$queryRawUnsafe<InstallationRow[]>(
+      `${SELECT_INSTALLATION} WHERE i.tenant_id=$1 AND i.id=$2::uuid AND i.deleted_at IS NULL`,
+      tenantId,
+      id,
+    );
+    const current = rows[0];
+    if (!current) throw new SlackInstallationRepositoryError("not_found", "Slack App connection was not found");
+    if (Number(current.revision) !== expectedRevision) {
+      throw new SlackInstallationRepositoryError("revision_conflict", "Slack App connection changed; reload and try again");
+    }
+    const credentials = decryptRowSlackCredentials(current, this.keyring);
+    const activeKey = activeSlackKey(this.keyring);
+    const count = await this.prisma.$executeRawUnsafe(
+      `UPDATE platform_slack_app_installations SET
+       bot_token_ciphertext=$4,signing_secret_ciphertext=$5,credential_key_id=$6,credential_fingerprint=$7,
+       revision=revision+1,updated_by=$8,updated_at=now()
+       WHERE tenant_id=$1 AND id=$2::uuid AND revision=$3 AND deleted_at IS NULL`,
+      tenantId,
+      id,
+      expectedRevision,
+      encryptSlackCredential(credentials.botToken, activeKey, {
+        tenantId, installationId: id, field: "bot-token",
+      }, this.keyring.activeKeyId),
+      encryptSlackCredential(credentials.signingSecret, activeKey, {
+        tenantId, installationId: id, field: "signing-secret",
+      }, this.keyring.activeKeyId),
+      this.keyring.activeKeyId,
+      fingerprint(credentials.botToken, activeKey),
+      actorId,
+    );
+    if (count !== 1) await this.throwMissingOrConflict(tenantId, id);
+    return (await this.get(tenantId, id))!;
   }
 
   async rebind(tenantId: string, id: string, agentId: string, expectedRevision: number, actorId: string): Promise<SlackInstallation> {
@@ -470,16 +549,107 @@ function publicInstallation(record: StoredInstallation): SlackInstallation {
   return structuredClone(safe);
 }
 
-function runtimeInstallation(record: StoredInstallation, encryptionKey: string): SlackRuntimeInstallation {
+function runtimeInstallation(record: StoredInstallation, keyring: SlackCredentialKeyring): SlackRuntimeInstallation {
+  const credentials = decryptStoredSlackCredentials(record, keyring);
   return {
     ...publicInstallation(record),
-    botToken: decryptSlackCredential(record.botTokenCiphertext, encryptionKey, {
-      tenantId: record.tenantId, installationId: record.id, field: "bot-token",
-    }),
-    signingSecret: decryptSlackCredential(record.signingSecretCiphertext, encryptionKey, {
-      tenantId: record.tenantId, installationId: record.id, field: "signing-secret",
-    }),
+    ...credentials,
   };
+}
+
+function runtimeRowInstallation(row: InstallationRow, keyring: SlackCredentialKeyring): SlackRuntimeInstallation {
+  return { ...rowToInstallation(row), ...decryptRowSlackCredentials(row, keyring) };
+}
+
+function decryptStoredSlackCredentials(
+  record: StoredInstallation,
+  keyring: SlackCredentialKeyring,
+): { botToken: string; signingSecret: string } {
+  return decryptSlackCredentials(
+    record.botTokenCiphertext,
+    record.signingSecretCiphertext,
+    record.credentialKeyId,
+    record.tenantId,
+    record.id,
+    keyring,
+  );
+}
+
+function decryptRowSlackCredentials(
+  row: InstallationRow,
+  keyring: SlackCredentialKeyring,
+): { botToken: string; signingSecret: string } {
+  return decryptSlackCredentials(
+    row.bot_token_ciphertext,
+    row.signing_secret_ciphertext,
+    row.credential_key_id,
+    row.tenant_id,
+    row.id,
+    keyring,
+  );
+}
+
+function decryptSlackCredentials(
+  botTokenCiphertext: string,
+  signingSecretCiphertext: string,
+  credentialKeyId: string,
+  tenantId: string,
+  installationId: string,
+  keyring: SlackCredentialKeyring,
+): { botToken: string; signingSecret: string } {
+  const key = Object.hasOwn(keyring.keys, credentialKeyId) ? keyring.keys[credentialKeyId] : undefined;
+  if (!key) {
+    throw new SlackInstallationRepositoryError(
+      "key_unavailable",
+      "Slack App credential key is unavailable",
+    );
+  }
+  try {
+    return {
+      botToken: decryptSlackCredential(botTokenCiphertext, key, {
+        tenantId, installationId, field: "bot-token",
+      }, credentialKeyId),
+      signingSecret: decryptSlackCredential(signingSecretCiphertext, key, {
+        tenantId, installationId, field: "signing-secret",
+      }, credentialKeyId),
+    };
+  } catch {
+    throw new SlackInstallationRepositoryError(
+      "invalid_credentials",
+      "Slack App credentials could not be decrypted",
+    );
+  }
+}
+
+function normalizeSlackKeyring(keyring: string | SlackCredentialKeyring): SlackCredentialKeyring {
+  if (typeof keyring === "string") {
+    if (!keyring.trim()) throw new Error("Slack credential encryption key must not be empty");
+    return { activeKeyId: "default", keys: Object.freeze({ default: keyring }) };
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u.test(keyring.activeKeyId)
+    || !Object.hasOwn(keyring.keys, keyring.activeKeyId)) {
+    throw new Error("Slack credential keyring active key is unavailable");
+  }
+  const entries = Object.entries(keyring.keys);
+  if (entries.length === 0 || entries.length > 16) throw new Error("Slack credential keyring size is invalid");
+  for (const [keyId, key] of entries) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u.test(keyId)
+      || Buffer.byteLength(key, "utf8") < 32) {
+      throw new Error("Slack credential keyring contains an invalid key");
+    }
+  }
+  if (new Set(entries.map(([, key]) => key)).size !== entries.length) {
+    throw new Error("Slack credential keyring contains duplicate key material");
+  }
+  return keyring;
+}
+
+function activeSlackKey(keyring: SlackCredentialKeyring): string {
+  const key = Object.hasOwn(keyring.keys, keyring.activeKeyId)
+    ? keyring.keys[keyring.activeKeyId]
+    : undefined;
+  if (!key) throw new Error("Slack credential keyring active key is unavailable");
+  return key;
 }
 
 function rowToInstallation(row: InstallationRow): SlackInstallation {
@@ -502,6 +672,7 @@ function rowToInstallation(row: InstallationRow): SlackInstallation {
     devRuntimeCommand: row.dev_runtime_command,
     status: row.status,
     revision: Number(row.revision),
+    credentialKeyId: row.credential_key_id,
     ...(row.webhook_verified_at ? { webhookVerifiedAt: row.webhook_verified_at.toISOString() } : {}),
     lastTokenVerifiedAt: row.last_token_verified_at.toISOString(),
     ...(row.last_error_code ? { lastErrorCode: row.last_error_code } : {}),

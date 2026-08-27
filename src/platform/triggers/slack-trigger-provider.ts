@@ -24,7 +24,7 @@ const baseManifest: TriggerProviderManifest = {
       placeholder: "Slack Basic Information 中的 Signing Secret",
     },
   ],
-  capabilities: { configurationUpdate: true, enableDisable: true, rebind: true, delete: true },
+  capabilities: { configurationUpdate: true, credentialRotation: true, enableDisable: true, rebind: true, delete: true },
 };
 
 export interface SlackTriggerProviderOptions {
@@ -141,6 +141,14 @@ export class SlackTriggerProvider implements PlatformTriggerProvider {
     return this.connection(connection);
   }
 
+  async rotateCredentials(input: {
+    tenantId: string; actorId: string; id: string; revision: number;
+  }): Promise<TriggerConnection> {
+    const connection = await translate(() => this.integrations.rotateCredentials(input));
+    this.onChanged?.(connection.id);
+    return this.connection(connection);
+  }
+
   async setEnabled(input: {
     tenantId: string; actorId: string; id: string; revision: number; enabled: boolean;
   }): Promise<TriggerConnection> {
@@ -190,6 +198,7 @@ export class SlackTriggerProvider implements PlatformTriggerProvider {
       status: connection.status,
       statusDetail,
       revision: connection.revision,
+      credentialKeyId: connection.credentialKeyId,
       target,
       identity: {
         label: "Slack identity",

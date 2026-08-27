@@ -8,15 +8,18 @@ Application bundles catalog both code-registered and file-discovered Agent IDs s
 
 ```mermaid
 flowchart TD
-  Client["Admin UI / API / Slack / Jira"] --> Auth["OAuth or signed ingress"]
+  Client["Admin UI / API / Slack / Jira"] --> Body["streaming request-body ceiling"]
+  Body --> Auth["OAuth identity / signed-ingress route classification"]
   Auth --> Permission["deny-by-default permission middleware"]
-  Permission --> Native["Mastra native handlers"]
+  Permission --> Traffic["tenant / subject quotas · expensive concurrency"]
+  Traffic --> Browser["browser same-origin mutation boundary"]
+  Browser --> Native["Mastra native handlers"]
   Native --> Qasey["Qasey Application"]
   Native --> Future["Additional Applications"]
   Qasey --> Shared["Context · Store · Observability · MCP · Workspace"]
   Future --> Shared
   Qasey --> Domain["Owner-scoped Run / Event / Artifact repositories"]
-  Native --> PubSub["Redis Streams PubSub"]
+  Native -. "distributed mode" .-> PubSub["Redis Streams PubSub"]
   PubSub --> Worker["Official Mastra orchestration Worker"]
   Worker -->|"official step execution HTTP"| Native
 ```
@@ -35,10 +38,21 @@ OAuth and service identities are converted to a server-owned principal. The midd
 
 Runs, events, artifacts, channel delivery IDs, permissions, and OAuth credentials all include owner information in their storage key or primary key.
 
+Distributed traffic governance uses atomic Redis Lua admission across the
+tenant and subject layers plus TTL-bounded expensive-request leases. Redis keys
+contain SHA-256 identity digests, not tenant or subject text. Standalone keeps
+the same contract in process. Browser mutations additionally require the exact
+configured public origin after authentication; public OAuth mutations retain
+their route-local same-origin checks.
+
 ## Native capabilities
 
 - Agent/Workflow execution uses Mastra server endpoints.
-- Production uses Mastra's official fully split orchestration Worker: the API sets `MASTRA_WORKERS=false`, the private worker sets `MASTRA_WORKERS=orchestration`, and `MASTRA_STEP_EXECUTION_URL` delegates step execution back to the API.
+- Standalone production runs orchestration in the API process and needs neither
+  Redis nor a Worker. Distributed production uses Mastra's official fully split
+  orchestration Worker: the API sets `MASTRA_WORKERS=false`, the worker sets
+  `MASTRA_WORKERS=orchestration`, and `MASTRA_STEP_EXECUTION_URL` delegates step
+  execution back to the API.
 - API and Worker artifacts are produced only by `mastra build` and `mastra worker build`. There is no Qasey worker entry point, queue protocol, poll loop, lease, or direct workflow executor.
 - Slack uses Mastra Channels with signed webhook or Socket Mode, native streaming, approvals, attachments, dedupe, and per-thread queueing.
 - Long-running state uses Workflow snapshots and Redis Streams event delivery. The removed generic queue worker is not a durability layer.
@@ -48,13 +62,24 @@ Runs, events, artifacts, channel delivery IDs, permissions, and OAuth credential
 
 ## Process lifecycle
 
-The composition root owns stores, repositories, MCP clients, sandbox cache, permission store, and audit store. `closeRuntime()` closes them in reverse ownership order. Production has an API Deployment and an official orchestration Worker Deployment built from the same source entry point. Only the API exposes HTTP; the Worker pulls Redis events and calls the API over the cluster network. There is no separate Slack receiver or generic Qasey worker.
+The composition root owns stores, repositories, MCP clients, sandbox cache,
+permission store, and audit store. `closeRuntime()` closes them in reverse
+ownership order. The standalone profile has one API deployment. The distributed
+profile adds an official orchestration Worker built from the same source entry
+point; only the API exposes public HTTP, while the Worker pulls Redis events and
+calls the API over a private deployment network. There is no separate Slack
+receiver or generic Qasey worker.
+
+PostgreSQL is the only mandatory state service. Supabase is supported as a
+standard managed PostgreSQL endpoint and has no privileged SDK path. Redis,
+Slack, Jira, GitHub, MCP servers, remote Sandbox capacity, and Datadog are
+enabled only when their deployment-owned configuration is present.
 
 ## Intentional product-layer extensions
 
 Two extensions are explicit architecture boundaries, not alternate Mastra runtimes:
 
-- Google OAuth/OIDC, encrypted browser sessions, service Bearer tokens, tenant permissions, and audit decisions are platform-owned. The runtime does not configure Mastra Enterprise auth; the same deny-by-default middleware authenticates and authorizes Admin UI, API, Worker, and channel requests before native handlers execute.
+- Google OAuth/OIDC, single-tenant password credentials, opaque browser sessions, service Bearer tokens, tenant permissions, and audit decisions are platform-owned. The runtime does not configure Mastra Enterprise auth; the same deny-by-default middleware authenticates and authorizes Admin UI, API, Worker, and channel requests before native handlers execute.
 - `/admin` is the multi-Application product console needed for Qasey and future Agents. Mastra Studio remains the developer/debugging surface; Admin UI uses the registered Application catalog and business-safe routes.
 
 ## Observability

@@ -1,0 +1,226 @@
+# Example production boundary for the dedicated sandbox workload. Adapt names,
+# namespaces, image, and origins before applying it. NetworkPolicy enforcement
+# requires a CNI implementation that supports both ingress and egress policy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: qasey-sandbox-default-deny
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: qasey
+      app.kubernetes.io/component: sandbox
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: qasey-sandbox-required-traffic
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: qasey
+      app.kubernetes.io/component: sandbox
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Only explicitly labelled control-plane/API pods may reach the sandbox
+    # Service. Restrict who can create or relabel workloads in this namespace.
+    - from:
+        - podSelector:
+            matchLabels:
+              qasey.io/sandbox-client: "true"
+      ports:
+        - protocol: TCP
+          port: 4120
+  egress:
+    # All non-loopback sandbox traffic must traverse this dedicated proxy. The
+    # Sandbox receives the proxy Service's reserved ClusterIP, so it does not
+    # need DNS egress. The proxy resolves and validates destination hostnames.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: qasey-sandbox-egress-proxy
+      ports:
+        - protocol: TCP
+          port: 3128
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qasey-sandbox-egress-proxy
+spec:
+  # Adapt this reserved address to the target cluster's Service CIDR and keep
+  # QASEY_SANDBOX_EGRESS_PROXY_URL in sync. The proxy workload is deliberately
+  # separate from this untrusted Sandbox template.
+  clusterIP: 10.96.0.50
+  selector:
+    app.kubernetes.io/name: qasey-sandbox-egress-proxy
+  ports:
+    - name: http-proxy
+      protocol: TCP
+      port: 3128
+      targetPort: 3128
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qasey-sandbox
+spec:
+  selector:
+    app.kubernetes.io/name: qasey
+    app.kubernetes.io/component: sandbox
+  ports:
+    - name: http
+      protocol: TCP
+      port: 4120
+      targetPort: http
+---
+# This Deployment is a hardened pod-template example, not a turnkey release
+# manifest. Replace the image with a verified immutable digest and supply the
+# control key from a real Secret managed outside this file.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qasey-sandbox
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: qasey
+      app.kubernetes.io/component: sandbox
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: qasey
+        app.kubernetes.io/component: sandbox
+    spec:
+      terminationGracePeriodSeconds: 30
+      automountServiceAccountToken: false
+      # This RuntimeClass and label are deliberate fail-closed placeholders.
+      # Provision them only on a dedicated node pool whose runtime supports pod
+      # user namespaces and whose kubelet has the referenced Localhost profiles.
+      runtimeClassName: qasey-sandbox-userns
+      nodeSelector:
+        qasey.io/sandbox-userns: "true"
+      tolerations:
+        - key: qasey.io/sandbox
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      hostUsers: false
+      # bubblewrap creates unprivileged user/PID/mount namespaces. A stock OCI
+      # RuntimeDefault profile and masked proc paths block that operation before
+      # the application can start. Keep this exception confined to the dedicated
+      # sandbox node pool and enforce the node-installed profiles below.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: sandbox
+          image: ghcr.io/example/qasey-sandbox@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            # Required so bubblewrap can mount a fresh /proc inside the nested
+            # namespace. This is not privileged mode and grants no capability.
+            procMount: Unmasked
+            seccompProfile:
+              type: Localhost
+              localhostProfile: profiles/qasey-bwrap.json
+            appArmorProfile:
+              type: Localhost
+              localhostProfile: qasey-bwrap
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: http
+              containerPort: 4120
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: QASEY_DATA_ROOT
+              value: /var/lib/qasey
+            - name: QASEY_SANDBOX_ISOLATION
+              value: bwrap
+            # One untrusted session per pod is mandatory until the runtime is
+            # backed by per-task cgroups. Scale replicas, not in-pod tenants.
+            - name: QASEY_SANDBOX_MAX_SESSIONS
+              value: "1"
+            - name: QASEY_SANDBOX_EGRESS_PROXY_URL
+              # Reserve this address on the proxy Service in the target cluster.
+              # Do not use a hostname unless a non-forwarding, policy-enforcing
+              # DNS resolver is added to this boundary.
+              value: http://10.96.0.50:3128
+            - name: QASEY_SANDBOX_BROWSER_ALLOWED_ORIGINS
+              value: https://app.example.com
+            # Deployment automation must replace both this value and the image
+            # reference above from the same resolved immutable manifest digest.
+            - name: QASEY_IMAGE_DIGEST
+              value: sha256:0000000000000000000000000000000000000000000000000000000000000000
+            - name: QASEY_SANDBOX_CONTROL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: qasey-sandbox-control
+                  key: control-key
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+              ephemeral-storage: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+              ephemeral-storage: 8Gi
+          volumeMounts:
+            - name: sandbox-data
+              mountPath: /var/lib/qasey
+            - name: temporary-files
+              mountPath: /tmp
+            - name: shared-memory
+              mountPath: /dev/shm
+      # Standard Kubernetes resources do not expose a per-container PID limit.
+      # Configure kubelet podPidsLimit and enforce it through cluster policy.
+      volumes:
+        - name: sandbox-data
+          emptyDir:
+            sizeLimit: 6Gi
+        - name: temporary-files
+          emptyDir:
+            sizeLimit: 1Gi
+        - name: shared-memory
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi

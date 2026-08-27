@@ -3,25 +3,372 @@ on:
   pull_request:
   push:
     branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   check:
-    runs-on: ${{ vars.EMERGENCY_RUNNER || 'ubuntu-24.04-4core' }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
         with: { version: 11.21.0 }
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
         with:
           node-version: 24
           cache: pnpm
       - run: sh ci/install.sh
-        env:
-          NPM_PUBLISHER_USR: ${{ vars.NPM_PUBLISHER_USR }}
-          NPM_PUBLISHER_PSW: ${{ secrets.NPM_PUBLISHER_PSW }}
-      - run: pnpm exec playwright install --with-deps chromium
+      - name: Verify sanitized public root
+        if: ${{ hashFiles('.public-origin') != '' }}
+        run: pnpm check:public-history
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Validate Prometheus alert rules and scenarios
+        run: |
+          docker run --rm \
+            --entrypoint /bin/promtool \
+            --workdir /rules \
+            -v "$PWD/deploy/observability:/rules:ro" \
+            prom/prometheus:v3.5.5@sha256:332c2f43e7e389d74d3893b55bb02fbbd684208e681eeb604641d5d769c0fe2a \
+            check rules prometheus-rules.yml
+          docker run --rm \
+            --entrypoint /bin/promtool \
+            --workdir /rules \
+            -v "$PWD/deploy/observability:/rules:ro" \
+            prom/prometheus:v3.5.5@sha256:332c2f43e7e389d74d3893b55bb02fbbd684208e681eeb604641d5d769c0fe2a \
+            test rules prometheus-rules.test.yml
+      - name: Validate Kubernetes 1.36 manifests against pinned schemas
+        run: |
+          docker run --rm \
+            --volume "$PWD/deploy/kubernetes:/manifests:ro" \
+            ghcr.io/yannh/kubeconform:v0.8.0-alpine@sha256:6b90a5f23d846140ce0194fe050b1995e546eba938f3a6bf10c039dd5e24588f \
+            -strict -summary -kubernetes-version 1.36.0 \
+            -schema-location 'https://raw.githubusercontent.com/yannh/kubernetes-json-schema/5a69f8365c9d3ed7de997f5365e22481cf775fa2/{{.NormalizedKubernetesVersion}}-standalone-strict/{{.ResourceKind}}.json' \
+            /manifests
       - run: pnpm check
         env:
           GITHUB_APP_ID: ''
           GITHUB_APP_INSTALLATION_ID: ''
           GITHUB_APP_PRIVATE_KEY: ''
+      - name: Run Admin UI browser gate
+        run: pnpm test:browser
+      - name: Upload Admin UI browser failure evidence
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: admin-ui-browser-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output/playwright/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  migration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+        env:
+          POSTGRES_DB: qasey
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d qasey"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/qasey
+      QASEY_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/qasey
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+        with: { version: 11.21.0 }
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm db:migrate:deploy
+      - run: pnpm exec prisma migrate status
+      - name: Verify PostgreSQL tenant isolation
+        run: pnpm exec vitest run tests/integration/postgres-tenant-isolation.test.ts
+
+  service-image-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+        env:
+          POSTGRES_DB: qasey
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d qasey"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      registry:
+        image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+        ports:
+          - 5005:5000
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build service runtime image
+        run: docker build --target service-runtime --tag qasey-service:ci .
+      - name: Smoke digest-addressed OCI layout reader
+        shell: bash
+        env:
+          ORAS_IMAGE: ghcr.io/oras-project/oras:v1.3.0@sha256:6ce045ce069a89934d6666b8b49f9c4c0145201bd6de6dbe2aee267814c55468
+        run: |
+          set -euo pipefail
+          layout="$(mktemp -d)"
+          copied_layout="$(mktemp -d)"
+          archive="$(mktemp)"
+          metadata_file="$(mktemp)"
+          printf 'FROM scratch\nLABEL org.opencontainers.image.title="qasey-release-layout-smoke"\n' \
+            | docker buildx build \
+                --metadata-file "$metadata_file" \
+                --output "type=oci,dest=${archive}" \
+                -
+          digest="$(jq -er '."containerimage.digest"' "$metadata_file")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          sh ci/extract-oci-layout.sh "$archive" "$layout"
+          docker run --rm \
+            --volume "${layout}:/release:ro" \
+            "$ORAS_IMAGE" \
+            manifest fetch --oci-layout --output /dev/null "/release@${digest}"
+          docker run --rm \
+            --volume "${layout}:/source:ro" \
+            --volume "${copied_layout}:/destination" \
+            "$ORAS_IMAGE" \
+            cp --from-oci-layout --to-oci-layout --no-tty \
+            "/source@${digest}" "/destination:verified"
+          docker run --rm \
+            --volume "${copied_layout}:/release:ro" \
+            "$ORAS_IMAGE" \
+            manifest fetch --oci-layout --output /dev/null "/release:verified"
+          node ci/publish-oci-layout-by-digest.mjs \
+            "$layout" host.docker.internal:5005/qasey-layout-smoke "$digest" \
+            --plain-http
+          curl --fail --silent \
+            --header 'Accept: application/vnd.oci.image.manifest.v1+json' \
+            "http://127.0.0.1:5005/v2/qasey-layout-smoke/manifests/${digest}" \
+            >/dev/null
+          tags_response="$(curl --silent --write-out '\n%{http_code}' \
+            http://127.0.0.1:5005/v2/qasey-layout-smoke/tags/list)"
+          tags_status="$(printf '%s\n' "$tags_response" | tail -n 1)"
+          tags_body="$(printf '%s\n' "$tags_response" | sed '$d')"
+          test "$tags_status" = 404
+          printf '%s' "$tags_body" | jq -e '.errors[0].code == "NAME_UNKNOWN"' >/dev/null
+      - name: Verify service runtime contains no sandbox toolchain
+        run: |
+          docker run --rm --entrypoint sh qasey-service:ci -c '
+            set -eu
+            for binary in bwrap git gh ssh python3 make gcc g++ Xvfb playwright; do
+              if command -v "$binary" >/dev/null 2>&1; then
+                echo "service image unexpectedly contains $binary" >&2
+                exit 1
+              fi
+            done
+            test ! -e /ms-playwright
+            test ! -e /app/dist/sandbox-runtime.mjs
+            for modules in /app/node_modules /app/.mastra/output/node_modules /app/.mastra/worker/node_modules; do
+              test ! -e "$modules/@playwright"
+              test ! -e "$modules/playwright"
+              test ! -e "$modules/playwright-core"
+              if [ -d "$modules/.pnpm" ] && find "$modules/.pnpm" -maxdepth 1 \
+                \( -name "@playwright+*" -o -name "playwright@*" -o -name "playwright-core@*" \) \
+                -print -quit | grep -q .; then
+                echo "service image unexpectedly contains a Playwright package" >&2
+                exit 1
+              fi
+            done
+            test -e /app/dist/worker-supervisor.mjs
+            test -e /app/.mastra/output/index.mjs
+            test -e /app/.mastra/worker/index.mjs
+          '
+      - name: Start standalone service image and verify probes
+        run: |
+          container_id="$(docker run --detach --network host \
+            --env NODE_ENV=production \
+            --env QASEY_DEPLOYMENT_MODE=standalone \
+            --env QASEY_DEPLOYMENT_ID=ci-smoke \
+            --env QASEY_INSTANCE_ID=ci-smoke-api-0 \
+            --env QASEY_SINGLE_TENANT_ID=ci-smoke-tenant \
+            --env DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/qasey \
+            --env QASEY_PUBLIC_BASE_URL=https://qasey.example.com \
+            --env GOOGLE_CLIENT_ID=synthetic-client-id \
+            --env GOOGLE_CLIENT_SECRET=synthetic-client-secret \
+            --env GOOGLE_COOKIE_PASSWORD=synthetic-cookie-password-for-ci-only \
+            --env GOOGLE_ALLOWED_DOMAINS=example.com \
+            --env QASEY_CREDENTIAL_ENCRYPTION_KEY=synthetic-credential-key-for-ci-only \
+            --env DD_VERSION=ci-smoke \
+            --env OPENAI_API_KEY=synthetic-model-key \
+            --env QASEY_ENABLE_STUDIO_EDITOR=false \
+            --env QASEY_ENABLE_STUDIO_MCP_PREVIEW=false \
+            --env QASEY_ENABLE_CODE_MODE=false \
+            qasey-service:ci)"
+          cleanup() { docker logs "$container_id" || true; docker rm --force "$container_id" || true; }
+          trap cleanup EXIT
+          for attempt in $(seq 1 90); do
+            if curl --fail --silent http://127.0.0.1:8080/readyz >/dev/null; then break; fi
+            if [ "$attempt" -eq 90 ]; then exit 1; fi
+            sleep 2
+          done
+          curl --fail --silent --show-error http://127.0.0.1:8080/healthz
+          curl --fail --silent --show-error http://127.0.0.1:8080/readyz
+
+  sandbox-image-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Build sandbox runtime image
+        run: docker build --target sandbox-runtime --tag qasey-sandbox:ci .
+      - name: Verify sandbox runtime tools and role boundary
+        run: |
+          docker run --rm --entrypoint sh qasey-sandbox:ci -c '
+            set -eu
+            for binary in bwrap git gh ssh python3 make gcc g++ Xvfb playwright pnpm tini; do
+              command -v "$binary" >/dev/null
+            done
+            test "$(pnpm --version)" = 11.21.0
+            test -e /ms-playwright
+            test -e /app/dist/sandbox-runtime.mjs
+            test ! -e /app/dist/worker-supervisor.mjs
+            test ! -e /app/.mastra/output/index.mjs
+            test ! -e /app/.mastra/worker/index.mjs
+            test ! -e /app/prisma
+            test ! -e /app/config
+            test ! -e /app/node_modules/@prisma
+            test ! -e /app/node_modules/prisma
+            test ! -e /app/node_modules/pg
+            test ! -e /app/node_modules/ioredis
+            test ! -e /app/node_modules/@slack
+            test ! -e /app/node_modules/@aws-sdk
+            test ! -e /app/node_modules/@octokit
+            test ! -e /app/node_modules/dd-trace
+          '
+          if docker run --rm qasey-sandbox:ci api; then
+            echo "sandbox image accepted the API role" >&2
+            exit 1
+          fi
+      - name: Start sandbox image and verify probes
+        run: |
+          image_digest="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          container_id="$(docker run --detach --network host \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --security-opt seccomp=unconfined \
+            --security-opt systempaths=unconfined \
+            --security-opt apparmor=unconfined \
+            --env NODE_ENV=production \
+            --env OPENAI_API_KEY=synthetic-model-key-for-ci-only \
+            --env QASEY_SANDBOX_CONTROL_KEY=synthetic-sandbox-control-key-for-ci-only-000000000000 \
+            --env QASEY_SANDBOX_ISOLATION=bwrap \
+            --env QASEY_SANDBOX_EGRESS_PROXY_URL=http://egress-proxy.example:3128 \
+            --env QASEY_SANDBOX_BROWSER_ALLOWED_ORIGINS=https://app.example.com \
+            --env QASEY_SANDBOX_DESKTOP_ENABLED=false \
+            --env "QASEY_IMAGE_DIGEST=${image_digest}" \
+            --env QASEY_DATA_ROOT=/tmp/qasey-data \
+            qasey-sandbox:ci)"
+          cleanup() { docker logs "$container_id" || true; docker rm --force "$container_id" || true; }
+          trap cleanup EXIT
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:4120/readyz >/dev/null; then break; fi
+            if [ "$attempt" -eq 60 ]; then exit 1; fi
+            sleep 2
+          done
+          curl --fail --silent --show-error http://127.0.0.1:4120/healthz
+          curl --fail --silent --show-error http://127.0.0.1:4120/readyz
+          docker exec --user 0 "$container_id" sh -c '
+            set -eu
+            printf host-device > /dev/qasey-host-device-sentinel
+          '
+          browser_workspace_id="$(node -e '
+            const { createHash } = require("node:crypto");
+            const scope = { applicationId: "ci-smoke", tenantId: "tenant-a", sessionId: "session-a" };
+            process.stdout.write(createHash("sha256")
+              .update(scope.applicationId).update("\0")
+              .update(scope.tenantId).update("\0")
+              .update(scope.sessionId).digest("hex"));
+          ')"
+          [[ "$browser_workspace_id" =~ ^[0-9a-f]{64}$ ]]
+          docker exec --env BROWSER_WORKSPACE_ID="$browser_workspace_id" "$container_id" sh -c '
+            set -eu
+            printf host-secret > /tmp/qasey-host-sentinel
+            sibling=/tmp/qasey-data/workspaces/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/repo
+            mkdir -p "$sibling"
+            printf sibling-secret > "$sibling/sibling-secret"
+            browser="/tmp/qasey-data/browser/${BROWSER_WORKSPACE_ID}"
+            mkdir -p -m 700 "$browser"
+            ln -s /tmp/qasey-host-sentinel "$browser/latest.jpg"
+          '
+          docker cp tests/fixtures/sandbox-isolation-smoke.spec.js \
+            "$container_id:/tmp/sandbox-isolation-smoke.spec.js"
+          base_sha="$(docker exec "$container_id" sh -c '
+            set -eu
+            source="$(mktemp -d)"
+            cp /tmp/sandbox-isolation-smoke.spec.js "$source/isolation.spec.js"
+            printf '%s\n' '{"private":true,"packageManager":"pnpm@11.21.0"}' > "$source/package.json"
+            cd "$source"
+            pnpm install --lockfile-only --ignore-scripts
+            git init --quiet --initial-branch=main
+            git config user.name "Qasey CI"
+            git config user.email "ci@example.invalid"
+            git add isolation.spec.js package.json pnpm-lock.yaml
+            git commit --quiet -m "isolation smoke"
+            git clone --quiet --bare . /tmp/qasey-smoke-origin.git
+            git rev-parse HEAD
+          ')"
+          [[ "$base_sha" =~ ^[0-9a-f]{40,64}$ ]]
+          docker exec --user 0 "$container_id" git config --system \
+            url."file:///tmp/qasey-smoke-origin.git".insteadOf \
+            https://github.com/example/smoke.git
+          node ci/smoke-sandbox-runtime.mjs \
+            http://127.0.0.1:4120 \
+            synthetic-sandbox-control-key-for-ci-only-000000000000 \
+            "$base_sha" \
+            "$image_digest"
+          docker exec --env BROWSER_WORKSPACE_ID="$browser_workspace_id" "$container_id" sh -c '
+            set -eu
+            latest="/tmp/qasey-data/browser/${BROWSER_WORKSPACE_ID}/latest.jpg"
+            test "$(cat /tmp/qasey-host-sentinel)" = host-secret
+            test -f "$latest"
+            test ! -L "$latest"
+            test "$(wc -c < "$latest")" -gt 100
+          '
+          docker exec --user 0 "$container_id" sh -c '
+            test "$(cat /dev/qasey-host-device-sentinel)" = host-device
+          '
+          docker exec "$container_id" sh -c '
+            processes="$(ps -eo stat=,ppid=,pid=,comm=,args=)"
+            zombies="$(printf "%s\n" "$processes" | awk '\''$1 ~ /^Z/ { print }'\'')"
+            if [ -n "$zombies" ]; then
+              printf "%s\n" "$zombies" >&2
+              exit 1
+            fi
+            leaks="$(printf "%s\n" "$processes" | awk '\''$4 == "bwrap" || $4 ~ /^(chrome|chromium)/ || ($4 ~ /^node/ && $0 ~ /\/app\/dist\/code-task-worker\.mjs/) { print }'\'')"
+            if [ -n "$leaks" ]; then
+              printf "live sandbox descendants remain after stop:\n%s\n" "$leaks" >&2
+              exit 1
+            fi
+          '

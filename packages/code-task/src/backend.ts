@@ -1,8 +1,8 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { Agent } from "@mastra/core/agent";
 import { LocalFilesystem, WORKSPACE_TOOLS, Workspace } from "@mastra/core/workspace";
-import { access } from "node:fs/promises";
-import { relative, resolve, sep } from "node:path";
+import { access, realpath } from "node:fs/promises";
+import { dirname, relative, resolve, sep } from "node:path";
 import type { CodeTaskTraceContext } from "../../contracts/src/index.ts";
 import type { ExecutionProfile } from "./profiles.ts";
 
@@ -13,6 +13,10 @@ export interface CodingAgentRequest {
   allowedPaths: string[];
   profile: ExecutionProfile;
   traceContext: CodeTaskTraceContext;
+  credentials?: {
+    openaiApiKey?: string;
+    openaiBaseUrl?: string;
+  };
   abortSignal?: AbortSignal;
 }
 
@@ -26,7 +30,7 @@ export interface CodingAgentBackend {
 }
 
 /**
- * Native Mastra coding backend used inside one isolated CodeTask worktree.
+ * Native Mastra coding backend used inside one isolated CodeTask checkout.
  *
  * Repository lifecycle, checks, and patch collection stay outside the model.
  * The Agent receives only contained filesystem tools; write tools are guarded
@@ -58,10 +62,20 @@ export class NativeMastraCodingBackend implements CodingAgentBackend {
         [WORKSPACE_TOOLS.FILESYSTEM.MKDIR]: { enabled: request.profile.writable },
         [WORKSPACE_TOOLS.FILESYSTEM.DELETE]: { enabled: false },
         hooks: {
-          beforeToolCall: ({ workspaceToolName, input }) => {
+          beforeToolCall: async ({ workspaceToolName, input }) => {
             if (!WRITE_TOOLS.has(workspaceToolName)) return;
             const path = toolPath(input);
-            if (path && isAllowedPath(path, writablePaths)) return;
+            if (path && isAllowedPath(path, writablePaths)) {
+              try {
+                await assertContainedWorkspaceWritePath(request.workspaceRoot, path);
+                return;
+              } catch (error) {
+                return {
+                  proceed: false as const,
+                  output: error instanceof Error ? error.message : "Write rejected by the real-path boundary.",
+                };
+              }
+            }
             return {
               proceed: false as const,
               output: `Write rejected: ${path || "missing path"} is outside the frozen allowedPaths boundary.`,
@@ -71,18 +85,18 @@ export class NativeMastraCodingBackend implements CodingAgentBackend {
       },
     });
 
-    const apiKey = process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY;
+    const apiKey = request.credentials?.openaiApiKey;
     const openai = createOpenAI({
       ...(apiKey ? { apiKey } : {}),
-      ...(process.env.OPENAI_BASE_URL
-        ? { baseURL: process.env.OPENAI_BASE_URL.replace(/\/$/u, "") }
+      ...(request.credentials?.openaiBaseUrl
+        ? { baseURL: request.credentials.openaiBaseUrl.replace(/\/$/u, "") }
         : {}),
     });
     const modelId = process.env.QASEY_CODE_AGENT_MODEL?.trim() || "gpt-5.6-sol";
     const agent = new Agent({
       id: `qasey-e2e-code-author-${request.taskId}`,
       name: "Qasey E2E Code Author",
-      description: "Writes or reviews E2E implementation in one isolated repository worktree.",
+      description: "Writes or reviews E2E implementation in one isolated repository checkout.",
       model: openai.responses(modelId),
       workspace,
       instructions: [
@@ -123,6 +137,27 @@ export class NativeMastraCodingBackend implements CodingAgentBackend {
     } finally {
       await workspace.destroy().catch(() => undefined);
     }
+  }
+}
+
+/**
+ * Validate the nearest existing ancestor, not only the lexical target. This
+ * closes the classic `allowed/path -> /host/path` ancestor-symlink escape
+ * before a workspace write tool gets a chance to follow it.
+ */
+export async function assertContainedWorkspaceWritePath(workspaceRootInput: string, pathInput: string): Promise<void> {
+  const workspaceRoot = await realpath(workspaceRootInput);
+  const target = resolve(workspaceRoot, pathInput);
+  if (target !== workspaceRoot && !target.startsWith(`${workspaceRoot}${sep}`)) {
+    throw new Error(`Write rejected: ${pathInput} escaped the task workspace.`);
+  }
+  let ancestor = target;
+  while (ancestor !== workspaceRoot && !await access(ancestor).then(() => true).catch(() => false)) {
+    ancestor = dirname(ancestor);
+  }
+  const resolvedAncestor = await realpath(ancestor);
+  if (resolvedAncestor !== workspaceRoot && !resolvedAncestor.startsWith(`${workspaceRoot}${sep}`)) {
+    throw new Error(`Write rejected: ${pathInput} has an ancestor symlink outside the task workspace.`);
   }
 }
 

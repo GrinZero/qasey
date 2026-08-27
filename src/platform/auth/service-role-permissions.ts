@@ -5,6 +5,7 @@ export const SERVICE_ROLE_PERMISSIONS = {
   "orchestration-worker": ["platform.workflow-events.receive", "qasey.e2e.execute", "qasey.case-workflow.execute"],
   "platform-service": [
     "platform.catalog.read",
+    "platform.metrics.read",
     "platform.runtime.inspect",
     "qasey.agent.execute",
     "qasey.e2e.execute",
@@ -21,10 +22,9 @@ export interface ServiceRoleGrant {
   permissions: readonly string[];
 }
 
-export function serviceRoleGrants(jiraBaseUrl?: string): readonly ServiceRoleGrant[] {
-  const jiraTenantId = jiraBaseUrl ? new URL(jiraBaseUrl).hostname : "trusted-ingress";
+export function serviceRoleGrants(tenantId = "trusted-ingress"): readonly ServiceRoleGrant[] {
   return (Object.entries(SERVICE_ROLE_PERMISSIONS) as [ServiceRole, readonly string[]][]).map(([role, permissions]) => ({
-    tenantId: role === "qasey-ingress" ? jiraTenantId : "trusted-ingress",
+    tenantId,
     role,
     permissions,
   }));
@@ -33,9 +33,9 @@ export function serviceRoleGrants(jiraBaseUrl?: string): readonly ServiceRoleGra
 /** Seed trusted service roles before the server accepts traffic. */
 export async function seedServiceRolePermissions(
   permissionService: PermissionService,
-  jiraBaseUrl?: string,
+  tenantId?: string,
 ): Promise<void> {
-  await Promise.all(serviceRoleGrants(jiraBaseUrl).map(({ tenantId, role, permissions }) =>
+  await Promise.all(serviceRoleGrants(tenantId).map(({ tenantId, role, permissions }) =>
     permissionService.grantRolePermissions(tenantId, role, permissions),
   ));
 }

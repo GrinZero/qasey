@@ -1,22 +1,21 @@
 import { registerApiRoute } from "@mastra/core/server";
-import { readFile, realpath } from "node:fs/promises";
-import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { CreateE2ERunRequestSchema, QaVerdictInputSchema } from "../../../../packages/contracts/src/index.ts";
 import { normalizeJiraWebhook } from "../../../../packages/domain/src/index.ts";
-import { config, channelDeliveryInbox, jiraClient, runRepository, sandboxPoolClient } from "../../runtime.ts";
+import { artifactStore, config, channelDeliveryInbox, jiraClient, runRepository, sandboxPoolClient } from "../../runtime.ts";
+import { ArtifactNotFoundError, ArtifactOwnershipError } from "../../../../packages/e2e/src/index.ts";
 import { cancelE2ERun, createAndStartE2ERun, rerunE2E, resumeE2EWithVerdict } from "../../workflows/e2e-workflow.ts";
 import { ownerScopeFromRequestContext } from "../../../platform/context/owner-scope.ts";
 import type { OwnedApiRoute, PrimitiveAccessPolicy } from "../../../runtime/application.ts";
 import { conversationScope } from "../../../platform/context/conversation-scope.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../../../platform/context/schema.ts";
 import { OAuthPrincipalSchema } from "../../../platform/auth/oauth-principal.ts";
-import type { PlatformGoogleUser } from "../../../platform/auth/google-oidc.ts";
+import type { PlatformBrowserUser } from "../../../platform/auth/google-oidc.ts";
 import { executeQasey } from "./service.ts";
 import { runtimeReadiness } from "../../../platform/storage/readiness.ts";
+import { productionSignals } from "../../../platform/observability/production-signals.ts";
 import { devRuntimeTunnelServerEnabled } from "../../../../packages/adapters/src/config.ts";
-import { webE2ERepositoryFromSkill } from "../../../platform/code-task/e2e-repository-skill.ts";
+import { webE2EConfigurationFromSkill } from "../../../platform/code-task/e2e-repository-skill.ts";
 import {
   bearerToken,
   DEV_RUNTIME_HEARTBEAT_MS,
@@ -37,8 +36,8 @@ const QaseyTaskRequestSchema = z.object({
   prompt: z.string().trim().min(1).max(100_000),
 }).strict();
 
-function authenticatedUser(c: { get(key: "requestContext"): { get(key: string): unknown } }): PlatformGoogleUser | undefined {
-  return c.get("requestContext").get("user") as PlatformGoogleUser | undefined;
+function authenticatedUser(c: { get(key: "requestContext"): { get(key: string): unknown } }): PlatformBrowserUser | undefined {
+  return c.get("requestContext").get("user") as PlatformBrowserUser | undefined;
 }
 
 function owner(c: { get(key: "requestContext"): import("@mastra/core/request-context").RequestContext }) {
@@ -87,6 +86,31 @@ export const apiRoutes = [
         storage: config.DATABASE_URL ? "postgres" : "memory",
         dependencies: snapshot.dependencies,
       }, snapshot.ready ? 200 : 503);
+    },
+  }),
+  registerApiRoute("/internal/metrics", {
+    method: "GET",
+    handler: async () => {
+      const [readiness, sandbox] = await Promise.all([
+        runtimeReadiness.inspect(),
+        sandboxPoolClient?.capacity(),
+      ]);
+      const body = productionSignals.render({
+        instanceId: config.QASEY_INSTANCE_ID ?? "unassigned",
+        version: config.DD_VERSION ?? "unversioned",
+        role: config.MASTRA_WORKERS === "orchestration" ? "worker" : "api",
+        deploymentMode: config.QASEY_DEPLOYMENT_MODE,
+        readiness,
+        modelCostReportingConfigured: config.QASEY_MODEL_INPUT_COST_MICROUSD_PER_TOKEN !== undefined
+          && config.QASEY_MODEL_OUTPUT_COST_MICROUSD_PER_TOKEN !== undefined,
+        ...(sandbox ? { sandbox } : {}),
+      });
+      return new Response(body, {
+        headers: {
+          "content-type": "text/plain; version=0.0.4; charset=utf-8",
+          "cache-control": "no-store",
+        },
+      });
     },
   }),
   registerApiRoute("/v1/dev-runtimes/events", {
@@ -277,12 +301,16 @@ export const apiRoutes = [
         return c.json({ error: "unsupported_e2e_target", message: "CodeTask-backed E2E currently supports Web Playwright only" }, 400);
       }
       const requestContext = c.get("requestContext");
-      const trustedInput = {
-        ...parsed.data,
-        sourceSessionId: String(requestContext.get("sessionId")),
-        repository: webE2ERepositoryFromSkill(),
-      };
-      try { return c.json(await createAndStartE2ERun(c.get("mastra"), owner(c), trustedInput, requestContext, authenticatedUser(c)?.id), 202); }
+      try {
+        const webE2EConfiguration = webE2EConfigurationFromSkill();
+        const trustedInput = {
+          ...parsed.data,
+          sourceSessionId: String(requestContext.get("sessionId")),
+          repository: webE2EConfiguration.target,
+          playwrightVerification: webE2EConfiguration.verification,
+        };
+        return c.json(await createAndStartE2ERun(c.get("mastra"), owner(c), trustedInput, requestContext, authenticatedUser(c)?.id), 202);
+      }
       catch (error) { return c.json(errorBody(error, crypto.randomUUID()), 400); }
     },
   }),
@@ -309,15 +337,18 @@ export const apiRoutes = [
     handler: async c => {
       const run = await runRepository.get(owner(c), c.req.param("runId"));
       const artifact = run?.artifacts.find(item => item.id === c.req.param("artifactId"));
-      if (!artifact?.uri.startsWith("file://")) return c.json({ error: "not_found" }, 404);
+      if (!artifact) return c.json({ error: "not_found" }, 404);
       try {
-        const [root, target] = await Promise.all([realpath(resolve(config.QASEY_ARTIFACT_DIR)), realpath(fileURLToPath(artifact.uri))]);
-        if (target !== root && !target.startsWith(`${root}/`)) return c.json({ error: "forbidden" }, 403);
-        const content = await readFile(target);
+        const content = await artifactStore.open(owner(c), artifact);
         c.header("content-type", artifact.contentType ?? "application/octet-stream");
         c.header("content-disposition", `inline; filename="${artifact.name.replace(/["\\]/g, "_")}"`);
-        return c.body(content);
-      } catch { return c.json({ error: "not_found" }, 404); }
+        if (content.contentLength !== undefined) c.header("content-length", String(content.contentLength));
+        return c.body(content.body);
+      } catch (error) {
+        if (error instanceof ArtifactOwnershipError) return c.json({ error: "forbidden" }, 403);
+        if (error instanceof ArtifactNotFoundError) return c.json({ error: "not_found" }, 404);
+        throw error;
+      }
     },
   }),
   registerApiRoute("/v1/runs/:runId/rerun", {
@@ -345,7 +376,7 @@ export const apiRoutes = [
     },
   }),
   registerApiRoute("/v1/sandbox-sessions/:sessionId", {
-    method: "GET",
+    method: "POST",
     handler: async c => {
       try {
         const session = await requireSandboxPool().session(sandboxScope(c));
@@ -499,6 +530,7 @@ export const apiRoutes = [
 const routePolicies: Record<string, { id: string; access: PrimitiveAccessPolicy; public?: boolean }> = {
   "GET /healthz": { id: "healthz", access: { permission: "platform.health.read", audiences: ["admin-ui", "api", "service", "channel"] }, public: true },
   "GET /readyz": { id: "readyz", access: { permission: "platform.health.read", audiences: ["admin-ui", "api", "service", "channel"] }, public: true },
+  "GET /internal/metrics": { id: "metrics", access: { permission: "platform.metrics.read", audiences: ["admin-ui", "service"] } },
   "GET /v1/dev-runtimes/events": { id: "dev-runtime-events", access: { permission: "qasey.channel.receive", audiences: ["channel"] }, public: true },
   "POST /v1/dev-runtimes/:runtimeId/jobs/:jobId/events": { id: "dev-runtime-job-events", access: { permission: "qasey.channel.receive", audiences: ["channel"] }, public: true },
   "POST /v1/dev-runtime-approvals/:approvalId": { id: "dev-runtime-approval", access: { permission: "qasey.channel.receive", audiences: ["channel"] }, public: true },
@@ -513,7 +545,7 @@ const routePolicies: Record<string, { id: string; access: PrimitiveAccessPolicy;
   "POST /v1/runs/:runId/rerun": { id: "run-rerun", access: { permission: "qasey.runs.write", audiences: ["admin-ui", "api", "service"] } },
   "POST /v1/runs/:runId/cancel": { id: "run-cancel", access: { permission: "qasey.runs.write", audiences: ["admin-ui", "api", "service"] } },
   "POST /v1/runs/:runId/qa-verdict": { id: "run-verdict", access: { permission: "qasey.runs.approve", audiences: ["admin-ui", "api"] } },
-  "GET /v1/sandbox-sessions/:sessionId": { id: "sandbox-session-read", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },
+  "POST /v1/sandbox-sessions/:sessionId": { id: "sandbox-session-claim", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },
   "POST /v1/sandbox-sessions/:sessionId/browser/start": { id: "sandbox-browser-start", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },
   "POST /v1/sandbox-sessions/:sessionId/browser/action": { id: "sandbox-browser-action", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },
   "GET /v1/sandbox-sessions/:sessionId/browser/frame": { id: "sandbox-browser-frame", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },

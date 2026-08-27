@@ -1,25 +1,43 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
+import {
+  ActiveMembershipRequiredError,
+  OrganizationInvitationResolutionError,
+  type MembershipRecord,
+  type OrganizationStore,
+} from "./organization-store.ts";
 
 const GOOGLE_AUTHORIZATION_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs";
 const GOOGLE_ISSUERS = ["https://accounts.google.com", "accounts.google.com"];
 const DEFAULT_REDIRECT_PATH = "/admin";
+const ORGANIZATION_SELECTION_PATH = "/admin/select-organization";
 const OAUTH_COOKIE_NAME = "qasey_google_oauth";
+const ORGANIZATION_SELECTION_COOKIE_NAME = "qasey_organization_selection";
 const SESSION_COOKIE_NAME = "qasey_session";
 const OAUTH_TTL_SECONDS = 10 * 60;
+const ORGANIZATION_SELECTION_TTL_SECONDS = 5 * 60;
 const SESSION_TTL_SECONDS = 12 * 60 * 60;
 
-export interface PlatformGoogleUser {
+export interface PlatformBrowserUser {
   id: string;
-  googleId: string;
+  googleId?: string;
+  tenantId: string;
+  sessionId: string;
   email: string;
   name?: string;
   avatarUrl?: string;
   hostedDomain?: string;
-  emailVerified: true;
+  emailVerified: boolean;
+  authProvider: "google" | "password";
   expiresAt: string;
+}
+
+export interface PlatformGoogleUser extends PlatformBrowserUser {
+  googleId: string;
+  emailVerified: true;
+  authProvider: "google";
 }
 
 interface OAuthTransaction {
@@ -30,8 +48,10 @@ interface OAuthTransaction {
   expiresAt: number;
 }
 
-interface SessionPayload {
-  user: PlatformGoogleUser;
+interface OrganizationSelectionTransaction {
+  userId: string;
+  organizationIds: string[];
+  redirectTo: string;
   expiresAt: number;
 }
 
@@ -53,6 +73,9 @@ export interface GoogleOidcOptions {
   allowedDomains?: readonly string[];
   hostedDomain?: string;
   secureCookies: boolean;
+  organizationStore: OrganizationStore;
+  tenancy: { mode: "single"; organizationId: string } | { mode: "multi" };
+  bootstrapMembershipEmails?: readonly string[];
   fetch?: typeof fetch;
   verifyIdToken?: (idToken: string) => Promise<GoogleIdClaims>;
   now?: () => number;
@@ -68,14 +91,28 @@ export interface GoogleCallbackResult {
   cookies: readonly string[];
 }
 
+export interface OrganizationSelectionState {
+  redirectTo: string;
+  organizations: readonly { id: string; displayName: string }[];
+}
+
 export class GoogleOidcError extends Error {
-  constructor(readonly code: "not_configured" | "invalid_request" | "invalid_state" | "token_exchange_failed" | "invalid_identity" | "domain_denied") {
+  constructor(readonly code:
+    | "not_configured"
+    | "invalid_request"
+    | "invalid_state"
+    | "token_exchange_failed"
+    | "invalid_identity"
+    | "domain_denied"
+    | "membership_required"
+    | "membership_ambiguous"
+    | "organization_selection_required") {
     super(code);
     this.name = "GoogleOidcError";
   }
 }
 
-/** Platform-owned Google OIDC and encrypted browser session implementation. */
+/** Platform-owned Google OIDC with encrypted login state and opaque, revocable browser sessions. */
 export class GoogleOidcService {
   readonly configured: boolean;
   private readonly clientId: string | undefined;
@@ -85,6 +122,9 @@ export class GoogleOidcService {
   private readonly allowedDomains: ReadonlySet<string>;
   private readonly hostedDomain: string | undefined;
   private readonly secureCookies: boolean;
+  private readonly organizationStore: OrganizationStore;
+  private readonly tenancy: GoogleOidcOptions["tenancy"];
+  private readonly bootstrapMembershipEmails: ReadonlySet<string>;
   private readonly fetchImpl: typeof fetch;
   private readonly verifyIdTokenImpl: (idToken: string) => Promise<GoogleIdClaims>;
   private readonly now: () => number;
@@ -111,6 +151,13 @@ export class GoogleOidcService {
     this.allowedDomains = new Set((options.allowedDomains ?? []).map(normalizeDomain).filter((domain): domain is string => Boolean(domain)));
     this.hostedDomain = normalizeDomain(options.hostedDomain);
     this.secureCookies = options.secureCookies;
+    this.organizationStore = options.organizationStore;
+    this.tenancy = options.tenancy.mode === "single"
+      ? { mode: "single", organizationId: requiredValue(options.tenancy.organizationId, "single-tenant organizationId") }
+      : { mode: "multi" };
+    this.bootstrapMembershipEmails = new Set((options.bootstrapMembershipEmails ?? [])
+      .map(email => email.trim().toLowerCase())
+      .filter(Boolean));
     this.fetchImpl = options.fetch ?? fetch;
     this.now = options.now ?? Date.now;
     if (options.verifyIdToken) {
@@ -204,35 +251,125 @@ export class GoogleOidcService {
     }
     if (this.hostedDomain && hostedDomain !== this.hostedDomain) throw new GoogleOidcError("domain_denied");
 
-    const sessionExpiresAt = this.now() + SESSION_TTL_SECONDS * 1000;
-    const user: PlatformGoogleUser = {
-      id: claims.sub,
-      googleId: claims.sub,
-      email: claims.email.toLowerCase(),
-      ...(claims.name ? { name: claims.name } : {}),
-      ...(claims.picture ? { avatarUrl: claims.picture } : {}),
-      ...(hostedDomain ? { hostedDomain } : {}),
+    const resolved = await this.organizationStore.resolveOrCreateIdentity({
+      provider: "google",
+      subject: claims.sub,
+      email: claims.email,
       emailVerified: true,
-      expiresAt: new Date(sessionExpiresAt).toISOString(),
-    };
-    const session: SessionPayload = { user, expiresAt: sessionExpiresAt };
+      ...(claims.name ? { displayName: claims.name } : {}),
+    });
+    const resolution = await this.resolveLoginMembership(resolved.user.id, claims.email.toLowerCase());
+    if (resolution.kind === "selection") {
+      await this.revokeCurrentSession(request);
+      const selection: OrganizationSelectionTransaction = {
+        userId: resolved.user.id,
+        organizationIds: resolution.organizationIds,
+        redirectTo: transaction.redirectTo,
+        expiresAt: this.now() + ORGANIZATION_SELECTION_TTL_SECONDS * 1000,
+      };
+      return {
+        redirectTo: ORGANIZATION_SELECTION_PATH,
+        cookies: [
+          this.serializeCookie(
+            ORGANIZATION_SELECTION_COOKIE_NAME,
+            this.seal(selection, ORGANIZATION_SELECTION_COOKIE_NAME),
+            ORGANIZATION_SELECTION_TTL_SECONDS,
+            "/auth/organization-selection",
+          ),
+          this.clearCookie(SESSION_COOKIE_NAME, "/"),
+          this.clearCookie(OAUTH_COOKIE_NAME, "/auth/google"),
+        ],
+      };
+    }
+
+    const membership = resolution.membership;
+    await this.revokeCurrentSession(request);
+    const session = await this.issueBrowserSession(membership.organizationId, resolved.user.id);
     return {
       redirectTo: transaction.redirectTo,
       cookies: [
-        this.serializeCookie(SESSION_COOKIE_NAME, this.seal(session, SESSION_COOKIE_NAME), SESSION_TTL_SECONDS, "/"),
+        this.serializeCookie(SESSION_COOKIE_NAME, session.token, SESSION_TTL_SECONDS, "/"),
+        this.clearCookie(ORGANIZATION_SELECTION_COOKIE_NAME, "/auth/organization-selection"),
         this.clearCookie(OAUTH_COOKIE_NAME, "/auth/google"),
       ],
     };
   }
 
-  async getCurrentUser(request: Request): Promise<PlatformGoogleUser | null> {
+  /** Reads a sealed organization-selection transaction without exposing its user identity. */
+  async getOrganizationSelection(request: Request): Promise<OrganizationSelectionState | null> {
+    const transaction = this.readOrganizationSelectionTransaction(request);
+    if (!transaction || this.tenancy.mode !== "multi") return null;
+    const allowedIds = new Set(transaction.organizationIds);
+    const organizations = (await this.organizationStore.listActiveOrganizationsForUser(transaction.userId))
+      .filter(organization => allowedIds.has(organization.id))
+      .map(organization => ({ id: organization.id, displayName: organization.displayName }));
+    if (organizations.length === 0) return null;
+    return { redirectTo: transaction.redirectTo, organizations };
+  }
+
+  /** Completes selection using only the sealed user identity and its original membership candidates. */
+  async completeOrganizationSelection(request: Request, organizationIdInput: string): Promise<GoogleCallbackResult> {
+    const transaction = this.readOrganizationSelectionTransaction(request);
+    if (!transaction || this.tenancy.mode !== "multi") throw new GoogleOidcError("organization_selection_required");
+    const organizationId = organizationIdInput.trim();
+    if (!organizationId || !transaction.organizationIds.includes(organizationId)) {
+      throw new GoogleOidcError("membership_required");
+    }
+    const membership = await this.organizationStore.resolveActiveMembership(organizationId, transaction.userId);
+    if (!membership) throw new GoogleOidcError("membership_required");
+
+    await this.revokeCurrentSession(request);
+    const session = await this.issueBrowserSession(membership.organizationId, transaction.userId);
+    return {
+      redirectTo: transaction.redirectTo,
+      cookies: [
+        this.serializeCookie(SESSION_COOKIE_NAME, session.token, SESSION_TTL_SECONDS, "/"),
+        this.clearCookie(ORGANIZATION_SELECTION_COOKIE_NAME, "/auth/organization-selection"),
+      ],
+    };
+  }
+
+  async getCurrentUser(request: Request): Promise<PlatformBrowserUser | null> {
     const sessionCookie = readCookie(request, SESSION_COOKIE_NAME);
     if (!sessionCookie) return null;
-    const session = this.open<SessionPayload>(sessionCookie, SESSION_COOKIE_NAME);
-    if (!session || session.expiresAt <= this.now()) return null;
-    const user = session.user;
-    if (!user?.id || !user.googleId || !user.email || user.emailVerified !== true) return null;
-    return user;
+    const authenticated = await this.organizationStore.authenticateBrowserSession(sessionCookie);
+    if (!authenticated || !this.sessionMatchesTenancy(authenticated.session.organizationId)) {
+      return null;
+    }
+    const [googleIdentity, passwordIdentity] = await Promise.all([
+      this.organizationStore.resolveIdentityForUser(authenticated.user.id, "google"),
+      this.organizationStore.resolveIdentityForUser(authenticated.user.id, "password"),
+    ]);
+    const identity = googleIdentity?.email && googleIdentity.emailVerified
+      ? googleIdentity
+      : passwordIdentity?.email
+        ? passwordIdentity
+        : undefined;
+    if (!identity?.email) return null;
+    const authProvider = identity.provider === "google" ? "google" : "password";
+    return {
+      id: authenticated.user.id,
+      ...(authProvider === "google" ? { googleId: identity.subject } : {}),
+      tenantId: authenticated.session.organizationId,
+      sessionId: authenticated.session.id,
+      email: identity.email,
+      ...(authenticated.user.displayName ? { name: authenticated.user.displayName } : {}),
+      ...(authProvider === "google" && this.hostedDomain ? { hostedDomain: this.hostedDomain } : {}),
+      emailVerified: identity.emailVerified,
+      authProvider,
+      expiresAt: authenticated.session.expiresAt,
+    };
+  }
+
+  async revokeCurrentSession(request: Request): Promise<boolean> {
+    const sessionCookie = readCookie(request, SESSION_COOKIE_NAME);
+    if (!sessionCookie) return false;
+    const authenticated = await this.organizationStore.authenticateBrowserSession(sessionCookie);
+    if (!authenticated) return false;
+    return this.organizationStore.revokeBrowserSession(
+      { applicationId: "platform", tenantId: authenticated.session.organizationId },
+      authenticated.session.id,
+    );
   }
 
   clearSessionCookie(): string {
@@ -241,6 +378,82 @@ export class GoogleOidcService {
 
   clearLoginCookie(): string {
     return this.clearCookie(OAUTH_COOKIE_NAME, "/auth/google");
+  }
+
+  clearOrganizationSelectionCookie(): string {
+    return this.clearCookie(ORGANIZATION_SELECTION_COOKIE_NAME, "/auth/organization-selection");
+  }
+
+  private async resolveLoginMembership(userId: string, email: string): Promise<
+    { kind: "membership"; membership: MembershipRecord }
+    | { kind: "selection"; organizationIds: string[] }
+  > {
+    if (this.tenancy.mode === "single") {
+      const membership = await this.organizationStore.resolveMembership(this.tenancy.organizationId, userId);
+      if (!membership) {
+        // A configured email is an explicit, operator-owned break-glass grant.
+        // Domain eligibility alone never creates membership.
+        if (this.bootstrapMembershipEmails.has(email)) {
+          return { kind: "membership", membership: await this.organizationStore.grantBootstrapMembership({
+            organizationId: this.tenancy.organizationId,
+            userId,
+          }) };
+        }
+        return { kind: "membership", membership: await this.acceptInvitation(userId, email, this.tenancy.organizationId) };
+      }
+      if (membership.status === "active") return { kind: "membership", membership };
+      throw new GoogleOidcError("membership_required");
+    }
+    const memberships = await this.organizationStore.listActiveMembershipsForUser(userId);
+    if (memberships.length === 0) {
+      return { kind: "membership", membership: await this.acceptInvitation(userId, email) };
+    }
+    if (memberships.length > 1) {
+      return { kind: "selection", organizationIds: memberships.map(membership => membership.organizationId) };
+    }
+    return { kind: "membership", membership: memberships[0]! };
+  }
+
+  private async acceptInvitation(userId: string, verifiedEmail: string, organizationId?: string): Promise<MembershipRecord> {
+    try {
+      const accepted = await this.organizationStore.acceptUniqueInvitation({
+        userId,
+        verifiedEmail,
+        ...(organizationId === undefined ? {} : { organizationId }),
+      });
+      return accepted.membership;
+    } catch (error) {
+      if (!(error instanceof OrganizationInvitationResolutionError)) throw error;
+      if (error.code === "organization_invitation_ambiguous") throw new GoogleOidcError("membership_ambiguous");
+      throw new GoogleOidcError("membership_required");
+    }
+  }
+
+  private sessionMatchesTenancy(organizationId: string): boolean {
+    return this.tenancy.mode === "multi" || organizationId === this.tenancy.organizationId;
+  }
+
+  private readOrganizationSelectionTransaction(request: Request): OrganizationSelectionTransaction | null {
+    const cookie = readCookie(request, ORGANIZATION_SELECTION_COOKIE_NAME);
+    if (!cookie) return null;
+    const transaction = this.open<unknown>(cookie, ORGANIZATION_SELECTION_COOKIE_NAME);
+    if (!isOrganizationSelectionTransaction(transaction) || transaction.expiresAt <= this.now()) return null;
+    return transaction;
+  }
+
+  private async issueBrowserSession(organizationId: string, userId: string) {
+    try {
+      return await this.organizationStore.createBrowserSession({
+        organizationId,
+        userId,
+        expiresAt: new Date(this.now() + SESSION_TTL_SECONDS * 1000).toISOString(),
+      });
+    } catch (error) {
+      // The store performs the authoritative check inside its session-creation
+      // transaction, closing the membership-status TOCTOU window.
+      if (error instanceof ActiveMembershipRequiredError) throw new GoogleOidcError("membership_required");
+      throw error;
+    }
   }
 
   private assertConfigured(): void {
@@ -259,14 +472,16 @@ export class GoogleOidcService {
     try {
       const [ivEncoded, ciphertextEncoded, tagEncoded] = token.split(".");
       if (!ivEncoded || !ciphertextEncoded || !tagEncoded) return null;
-      const iv = Buffer.from(ivEncoded, "base64url");
-      const tag = Buffer.from(tagEncoded, "base64url");
+      const iv = decodeCanonicalBase64Url(ivEncoded);
+      const ciphertext = decodeCanonicalBase64Url(ciphertextEncoded);
+      const tag = decodeCanonicalBase64Url(tagEncoded);
+      if (!iv || !ciphertext || !tag) return null;
       if (iv.length !== 12 || tag.length !== 16) return null;
       const decipher = createDecipheriv("aes-256-gcm", this.key, iv, { authTagLength: 16 });
       decipher.setAAD(Buffer.from(purpose));
       decipher.setAuthTag(tag);
       const plaintext = Buffer.concat([
-        decipher.update(Buffer.from(ciphertextEncoded, "base64url")),
+        decipher.update(ciphertext),
         decipher.final(),
       ]).toString("utf8");
       return JSON.parse(plaintext) as T;
@@ -287,6 +502,12 @@ export class GoogleOidcService {
 function normalizeDomain(value: string | undefined): string | undefined {
   const normalized = value?.trim().toLowerCase();
   return normalized || undefined;
+}
+
+function requiredValue(value: string, field: string): string {
+  const normalized = value.trim();
+  if (!normalized) throw new Error(`${field} must not be empty`);
+  return normalized;
 }
 
 function safeRedirectPath(value: string | undefined): string {
@@ -316,4 +537,25 @@ function safeEqual(left: string, right: string): boolean {
   const leftBuffer = Buffer.from(left);
   const rightBuffer = Buffer.from(right);
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function decodeCanonicalBase64Url(value: string): Buffer | null {
+  const decoded = Buffer.from(value, "base64url");
+  return decoded.toString("base64url") === value ? decoded : null;
+}
+
+function isOrganizationSelectionTransaction(value: unknown): value is OrganizationSelectionTransaction {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.userId === "string"
+    && candidate.userId.length > 0
+    && Array.isArray(candidate.organizationIds)
+    && candidate.organizationIds.length > 1
+    && candidate.organizationIds.length <= 100
+    && candidate.organizationIds.every(organizationId => typeof organizationId === "string" && organizationId.length > 0)
+    && new Set(candidate.organizationIds).size === candidate.organizationIds.length
+    && typeof candidate.redirectTo === "string"
+    && candidate.redirectTo === safeRedirectPath(candidate.redirectTo)
+    && typeof candidate.expiresAt === "number"
+    && Number.isSafeInteger(candidate.expiresAt);
 }

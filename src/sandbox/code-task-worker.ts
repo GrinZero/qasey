@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import { access, appendFile, copyFile, lstat, mkdir, readFile, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { LocalSandbox } from "@mastra/core/workspace";
 import {
   CodeTaskResultSchema,
+  CodeTaskStateSchema,
   type ArtifactRef,
   type CheckResult,
   type CodeTaskChange,
@@ -11,13 +13,15 @@ import {
   type CodeTaskState,
 } from "../../packages/contracts/src/index.ts";
 import {
+  buildFreshDeviceBwrapArgs,
   CodeTaskWorkerManifestSchema,
+  CodeTaskWorkerCredentialsSchema,
   NativeMastraCodingBackend,
   executionProfile,
   executionProfileHash,
+  writeCodeTaskState,
 } from "../../packages/code-task/src/index.ts";
 import { runSafeCommand } from "../../packages/e2e/src/process.ts";
-import { webE2EPlaywrightPlans, webE2ERepositoryFromSkill } from "../platform/code-task/e2e-repository-skill.ts";
 
 const manifestPath = process.argv[2];
 if (!manifestPath) throw new Error("code-task-worker requires a manifest path");
@@ -26,7 +30,12 @@ await rm(manifestPath, { force: true });
 const { spec } = manifest;
 const canonicalWorkspaceRoot = await realpath(manifest.workspaceRoot);
 const profile = executionProfile(spec.executionProfileId);
+const imageDigest = codeTaskImageDigest(process.env.QASEY_IMAGE_DIGEST);
+await assertOuterWorkerIsolation();
+const credentials = await receiveCredentials();
 let cursor = 0;
+let checkSandbox: LocalSandbox | undefined;
+let readOnlyRepositorySnapshots: RepositoryIntegritySnapshot[] = [];
 const abortController = new AbortController();
 process.once("SIGTERM", () => abortController.abort(new Error("Code task cancelled")));
 process.once("SIGINT", () => abortController.abort(new Error("Code task cancelled")));
@@ -37,6 +46,8 @@ await writeState({ taskId: spec.taskId, attemptId: spec.attemptId, status: "runn
 
 try {
   verifyContextIntegrity(manifest.context, spec.contextHash);
+  readOnlyRepositorySnapshots = await validateRepositoryMounts();
+  if (manifest.inputPatchPath) await applyInputPatch(manifest.inputPatchPath);
   const initialPaths = await changedPaths(manifest.workspaceRoot);
   let agentSummary = "Deterministic execution profile; no coding agent was started.";
   if (profile.useAgent) {
@@ -48,6 +59,7 @@ try {
   const pathsForChecks = await changedPaths(manifest.workspaceRoot);
   const checks = await runChecks(pathsForChecks);
   const finalPaths = await changedPaths(manifest.workspaceRoot);
+  await assertReadOnlyRepositoriesUnchanged(readOnlyRepositorySnapshots);
   if (profile.id === "code-review-readonly" && finalPaths.length > initialPaths.length) {
     throw new Error("Read-only code review modified the repository");
   }
@@ -70,9 +82,12 @@ try {
   await finish(result);
 } catch (error) {
   const cancelled = abortController.signal.aborted;
+  if (cancelled) await emitCancellationRequestFromState();
+  const integrityError = await assertReadOnlyRepositoriesUnchanged(readOnlyRepositorySnapshots)
+    .then(() => undefined, failure => failure instanceof Error ? failure : new Error(String(failure)));
   const result = CodeTaskResultSchema.parse({
     status: cancelled ? "cancelled" : "failed",
-    summary: safeText(error instanceof Error ? error.message : String(error)),
+    summary: safeText(integrityError?.message ?? (error instanceof Error ? error.message : String(error))),
     changedPaths: await changedPaths(manifest.workspaceRoot).catch(() => []),
     changes: [],
     checks: [],
@@ -81,6 +96,8 @@ try {
   });
   await finish(result);
   if (!cancelled) process.exitCode = 1;
+} finally {
+  await checkSandbox?._destroy().catch(() => undefined);
 }
 
 async function runAgent(): Promise<string> {
@@ -91,6 +108,10 @@ async function runAgent(): Promise<string> {
     allowedPaths: spec.allowedPaths,
     profile,
     traceContext: spec.traceContext,
+    credentials: {
+      ...(credentials.openaiApiKey ? { openaiApiKey: credentials.openaiApiKey } : {}),
+      ...(credentials.openaiBaseUrl ? { openaiBaseUrl: credentials.openaiBaseUrl } : {}),
+    },
     abortSignal: abortController.signal,
   });
   await emit("agent.backend", "Native Mastra Agent run associated", { backendRunId: output.backendRunId });
@@ -127,13 +148,13 @@ async function runRepositoryInstall(): Promise<CheckResult> {
       artifacts: [],
     };
   }
-  const result = await runSafeCommand({
+  const result = await runFixedCheckCommand({
     executable: command.executable,
     args: command.args,
     cwd: manifest.workspaceRoot,
     timeoutMs: Math.min(spec.deadlineMs, 10 * 60_000),
   });
-  const logPath = join(manifest.taskRoot, "artifacts", "repo-install.log");
+  const logPath = join(manifest.artifactRoot, "repo-install.log");
   await mkdir(dirname(logPath), { recursive: true });
   await writeFile(logPath, safeText(`${result.stdout}\n${result.stderr}`, 2_000_000), { mode: 0o600 });
   return {
@@ -159,9 +180,85 @@ async function detectInstallCommand(): Promise<{ executable: string; args: strin
   return undefined;
 }
 
+interface FixedCheckCommandInput {
+  executable: string;
+  args: string[];
+  cwd: string;
+  env?: Record<string, string>;
+  timeoutMs: number;
+}
+
+async function runFixedCheckCommand(input: FixedCheckCommandInput): Promise<{
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+}> {
+  const sandbox = await fixedCheckSandbox();
+  if (!sandbox.executeCommand) throw new Error("Fixed-check sandbox does not support command execution");
+  const result = await sandbox.executeCommand(input.executable, input.args, {
+    cwd: input.cwd,
+    ...(input.env ? { env: input.env } : {}),
+    timeout: input.timeoutMs,
+    maxRetainedBytes: 2_000_000,
+    abortSignal: abortController.signal,
+  });
+  return {
+    exitCode: result.exitCode,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    durationMs: result.executionTimeMs,
+  };
+}
+
+async function fixedCheckSandbox(): Promise<LocalSandbox> {
+  if (checkSandbox) return checkSandbox;
+  await Promise.all([
+    mkdir(join(manifest.checkRoot, "home", ".config"), { recursive: true, mode: 0o700 }),
+    mkdir(join(manifest.checkRoot, "home", ".cache"), { recursive: true, mode: 0o700 }),
+    mkdir(join(manifest.checkRoot, "home", ".local", "share"), { recursive: true, mode: 0o700 }),
+  ]);
+  const primary = manifest.repositoryMounts.find(mount => resolve(mount.root) === resolve(manifest.workspaceRoot));
+  if (!primary) throw new Error("Primary repository is missing from the fixed-check mount manifest");
+  const checkReadOnlyPaths = [
+    ...manifest.checkRuntimeReadOnlyPaths,
+    ...manifest.repositoryMounts.filter(mount => mount !== primary && mount.mode === "read").map(mount => mount.root),
+  ];
+  const checkReadWritePaths = [
+    manifest.checkRoot,
+    ...manifest.repositoryMounts.filter(mount => mount !== primary && mount.mode === "write").map(mount => mount.root),
+  ];
+  const checkBwrapArgs = buildFreshDeviceBwrapArgs({
+    isolation: manifest.isolation,
+    workspacePath: manifest.workspaceRoot,
+    allowNetwork: true,
+    readOnly: primary.mode === "read",
+    readOnlyPaths: checkReadOnlyPaths,
+    readWritePaths: checkReadWritePaths,
+  });
+  const sandbox = new LocalSandbox({
+    id: `qasey-fixed-check-${spec.taskId}-${spec.attemptId}`,
+    workingDirectory: manifest.workspaceRoot,
+    timeout: spec.deadlineMs,
+    isolation: manifest.isolation,
+    env: fixedCheckEnvironment(manifest.checkRoot),
+    nativeSandbox: {
+      allowNetwork: true,
+      allowSystemBinaries: true,
+      readOnly: primary.mode === "read",
+      readOnlyPaths: checkReadOnlyPaths,
+      readWritePaths: checkReadWritePaths,
+      ...(checkBwrapArgs ? { bwrapArgs: checkBwrapArgs } : {}),
+    },
+  });
+  await sandbox._start();
+  checkSandbox = sandbox;
+  return sandbox;
+}
+
 async function runPlaywrightCheck(paths: string[]): Promise<CheckResult> {
-  const artifactRoot = join(manifest.taskRoot, "artifacts", "playwright");
-  await mkdir(artifactRoot, { recursive: true });
+  const checkOutputRoot = join(manifest.checkRoot, "playwright");
+  await mkdir(checkOutputRoot, { recursive: true });
   const plans = playwrightPlans(paths);
   const artifacts: ArtifactRef[] = [];
   const summaries: string[] = [];
@@ -170,9 +267,11 @@ async function runPlaywrightCheck(paths: string[]): Promise<CheckResult> {
   let durationMs = 0;
   for (const plan of plans) {
     abortController.signal.throwIfAborted();
-    const planRoot = join(artifactRoot, plan.id);
+    const planRoot = join(checkOutputRoot, plan.id);
+    const artifactPlanRoot = join(manifest.artifactRoot, "playwright", plan.id);
     await mkdir(planRoot, { recursive: true });
-    const result = await runSafeCommand({
+    await mkdir(artifactPlanRoot, { recursive: true });
+    const result = await runFixedCheckCommand({
       executable: "pnpm",
       args: [
         "exec", "playwright", "test", ...plan.testFiles,
@@ -182,13 +281,13 @@ async function runPlaywrightCheck(paths: string[]): Promise<CheckResult> {
       ],
       cwd: manifest.workspaceRoot,
       env: {
-        ...fixedCheckEnvironment(),
+        ...fixedCheckEnvironment(manifest.checkRoot),
         PLAYWRIGHT_HTML_OUTPUT_DIR: join(planRoot, "html-report"),
         PLAYWRIGHT_JUNIT_OUTPUT_NAME: join(planRoot, "results.xml"),
       },
       timeoutMs: Math.min(spec.deadlineMs, 15 * 60_000),
     });
-    const logPath = join(planRoot, "playwright.log");
+    const logPath = join(artifactPlanRoot, "playwright.log");
     await writeFile(logPath, safeText(`${result.stdout}\n${result.stderr}`, 2_000_000), { mode: 0o600 });
     artifacts.push({ id: `${spec.taskId}:playwright-${plan.id}-log`, kind: "log", name: `${plan.id}-playwright.log`, uri: sandboxUri(logPath), contentType: "text/plain" });
     passed &&= result.exitCode === 0;
@@ -208,18 +307,40 @@ async function runPlaywrightCheck(paths: string[]): Promise<CheckResult> {
 
 interface PlaywrightPlan {
   id: string;
-  config?: string;
-  playwrightProject?: string;
+  config: string;
+  playwrightProject: string;
   testFiles: string[];
 }
 
 function playwrightPlans(paths: string[]): PlaywrightPlan[] {
-  const target = spec.repositories[0];
-  const configuredTarget = webE2ERepositoryFromSkill();
-  if (target?.owner === configuredTarget.owner && target.repository === configuredTarget.repository) {
-    return webE2EPlaywrightPlans(paths);
+  const verification = spec.playwrightVerification;
+  if (!verification) {
+    throw new Error("Playwright fixed checks require a server-frozen verification mapping");
   }
-  return [{ id: "default", testFiles: paths.filter(path => /\.(?:spec|test)\.[cm]?[jt]sx?$/u.test(path)) }];
+  const uncovered = paths.filter(path => !verification.projects.some(project => isWithinWorkspacePath(path, project.root)));
+  if (uncovered.length > 0) {
+    throw new Error(`Changed paths are not covered by a fixed Playwright project: ${uncovered.join(", ")}`);
+  }
+  const affected = verification.projects.filter(project =>
+    paths.some(path => isWithinWorkspacePath(path, project.root)),
+  );
+  if (affected.length === 0) {
+    throw new Error(`No fixed Playwright project matches changed paths: ${paths.join(", ") || "none"}`);
+  }
+  return affected.map(project => ({
+    id: project.id,
+    config: project.config,
+    playwrightProject: project.playwrightProject,
+    testFiles: paths.filter(path =>
+      isWithinWorkspacePath(path, project.testRoot) && /\.(?:spec|test)\.[cm]?[jt]sx?$/u.test(path),
+    ),
+  }));
+}
+
+function isWithinWorkspacePath(path: string, root: string): boolean {
+  const normalizedPath = path.replaceAll("\\", "/");
+  const normalizedRoot = root.replaceAll("\\", "/");
+  return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
 }
 
 async function collectPatch(paths: string[]): Promise<ArtifactRef | undefined> {
@@ -231,7 +352,7 @@ async function collectPatch(paths: string[]): Promise<ArtifactRef | undefined> {
   if (addIntent.exitCode !== 0) throw new Error(`git add -N failed: ${safeText(addIntent.stderr)}`);
   const patch = await runSafeCommand({ executable: "git", args: ["diff", "HEAD", "--binary", "--", ...spec.allowedPaths], cwd: manifest.workspaceRoot });
   if (patch.exitCode !== 0 || !patch.stdout.trim()) throw new Error(`git diff failed or returned an empty patch: ${safeText(patch.stderr)}`);
-  const target = join(manifest.taskRoot, "artifacts", "changes.patch");
+  const target = join(manifest.artifactRoot, "changes.patch");
   await mkdir(dirname(target), { recursive: true });
   await writeFile(target, patch.stdout, { mode: 0o600 });
   return { id: `${spec.taskId}:patch`, kind: "patch", name: "changes.patch", uri: sandboxUri(target), contentType: "text/x-diff", sha256: sha256(patch.stdout) };
@@ -246,7 +367,7 @@ async function collectChanges(paths: string[]): Promise<CodeTaskChange[]> {
     const source = resolveContained(manifest.workspaceRoot, path);
     const stats = await lstat(source);
     const mode = stats.isSymbolicLink() ? "120000" as const : stats.mode & 0o111 ? "100755" as const : "100644" as const;
-    const target = join(manifest.taskRoot, "artifacts", "files", `${String(changes.length).padStart(4, "0")}.bin`);
+    const target = join(manifest.artifactRoot, "files", `${String(changes.length).padStart(4, "0")}.bin`);
     await mkdir(dirname(target), { recursive: true });
     if (stats.isSymbolicLink()) await writeFile(target, await readlink(source), { mode: 0o600 });
     else await copyFile(source, target);
@@ -328,9 +449,18 @@ async function finish(result: CodeTaskResult): Promise<void> {
   await emit("task.completed", `Code task ${result.status}`, { status: result.status });
 }
 
+async function emitCancellationRequestFromState(): Promise<void> {
+  const state = await readFile(manifest.statePath, "utf8")
+    .then(value => CodeTaskStateSchema.parse(JSON.parse(value)))
+    .catch(() => undefined);
+  if (state?.status !== "cancel_requested") return;
+  await emit("task.cancel_requested", "Code task cancellation requested", {
+    ...(state.error ? { reason: state.error } : {}),
+  });
+}
+
 async function writeState(state: CodeTaskState): Promise<void> {
-  await mkdir(dirname(manifest.statePath), { recursive: true });
-  await writeFile(manifest.statePath, JSON.stringify(state), { mode: 0o600 });
+  await writeCodeTaskState(manifest.statePath, state);
 }
 
 async function emit(type: string, message: string, metadata: Record<string, unknown> = {}): Promise<void> {
@@ -349,7 +479,7 @@ function verifyContextIntegrity(context: string, expected: string): void {
 
 function provenance() {
   return {
-    imageDigest: process.env.QASEY_IMAGE_DIGEST?.trim() || "unknown-internal-image",
+    imageDigest,
     profileHash: executionProfileHash(profile),
     agentBackend: "native-mastra" as const,
     mastraVersion: process.env.QASEY_MASTRA_VERSION?.trim() || "unverified",
@@ -357,10 +487,21 @@ function provenance() {
   };
 }
 
+function codeTaskImageDigest(value: string | undefined): string {
+  const configured = value?.trim();
+  if (!configured) return "unverified-image";
+  if (!/^sha256:[a-f0-9]{64}$/u.test(configured)) {
+    throw new Error("QASEY_IMAGE_DIGEST must be an immutable sha256 OCI image digest");
+  }
+  return configured;
+}
+
 function sandboxUri(path: string): string {
-  const rel = relative(manifest.repositoryRoot, path);
-  if (rel.startsWith("..")) throw new Error("Artifact escaped sandbox repository root");
-  return `sandbox://${rel.split(sep).join("/")}`;
+  const rel = relative(manifest.artifactRoot, path);
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || resolve(manifest.artifactRoot, rel) !== resolve(path)) {
+    throw new Error("Artifact escaped the Code Task artifact root");
+  }
+  return `${manifest.artifactUriPrefix}/${rel.split(sep).join("/")}`;
 }
 
 function resolveContained(rootInput: string, path: string): string {
@@ -368,6 +509,134 @@ function resolveContained(rootInput: string, path: string): string {
   const target = resolve(root, path);
   if (target !== root && !target.startsWith(`${root}${sep}`)) throw new Error(`Path escaped task workspace: ${path}`);
   return target;
+}
+
+interface RepositoryIntegritySnapshot {
+  root: string;
+  head: string;
+  status: string;
+  refs: string;
+  localConfig: string;
+}
+
+async function validateRepositoryMounts(): Promise<RepositoryIntegritySnapshot[]> {
+  const repositoriesRoot = await realpath(join(manifest.taskRoot, "repositories"));
+  const canonicalRoots = new Set<string>();
+  const snapshots: RepositoryIntegritySnapshot[] = [];
+  let primaryFound = false;
+  for (const mount of manifest.repositoryMounts) {
+    const root = await realpath(mount.root);
+    assertRealPathContained(repositoriesRoot, root, "Repository mount escaped the task repository root");
+    if (canonicalRoots.has(root)) throw new Error(`Duplicate repository mount: ${root}`);
+    canonicalRoots.add(root);
+    if (root === canonicalWorkspaceRoot) primaryFound = true;
+    const gitMetadata = await lstat(join(root, ".git"));
+    if (!gitMetadata.isDirectory()) throw new Error(`Repository ${root} does not own an independent .git directory`);
+    if (await exists(join(root, ".git", "objects", "info", "alternates"))) {
+      throw new Error(`Repository ${root} references a shared Git object store`);
+    }
+    const head = (await checkedGit(root, ["rev-parse", "HEAD"])).trim();
+    if (head !== mount.baseSha) throw new Error(`Repository ${root} HEAD ${head} did not match pinned SHA ${mount.baseSha}`);
+    const commonDirOutput = (await checkedGit(root, ["rev-parse", "--git-common-dir"])).trim();
+    const commonDir = await realpath(resolve(root, commonDirOutput));
+    assertRealPathContained(root, commonDir, `Repository ${root} Git metadata escaped its checkout`);
+    if (mount.mode === "read") snapshots.push(await repositoryIntegritySnapshot(root, head));
+  }
+  if (!primaryFound) throw new Error("Primary workspace is outside the repository mount manifest");
+  return snapshots;
+}
+
+async function repositoryIntegritySnapshot(root: string, head?: string): Promise<RepositoryIntegritySnapshot> {
+  return {
+    root,
+    head: head ?? (await checkedGit(root, ["rev-parse", "HEAD"])).trim(),
+    status: await checkedGit(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
+    refs: await checkedGit(root, ["show-ref", "--head"]),
+    localConfig: await checkedGit(root, ["config", "--local", "--null", "--list"]),
+  };
+}
+
+async function assertReadOnlyRepositoriesUnchanged(snapshots: RepositoryIntegritySnapshot[]): Promise<void> {
+  for (const before of snapshots) {
+    const after = await repositoryIntegritySnapshot(before.root);
+    if (after.head !== before.head || after.status !== before.status || after.refs !== before.refs || after.localConfig !== before.localConfig) {
+      throw new Error(`Read-only repository was modified: ${before.root}`);
+    }
+  }
+}
+
+async function checkedGit(root: string, args: string[]): Promise<string> {
+  const result = await runSafeCommand({ executable: "git", args, cwd: root });
+  if (result.exitCode !== 0) throw new Error(`git ${args[0]} failed for ${root}: ${safeText(result.stderr)}`);
+  return result.stdout;
+}
+
+async function applyInputPatch(path: string): Promise<void> {
+  const controlRoot = await realpath(manifest.controlRoot);
+  const canonical = await realpath(path);
+  assertRealPathContained(controlRoot, canonical, "Input patch escaped the Code Task control root");
+  const result = await runSafeCommand({
+    executable: "git",
+    args: ["apply", "--index", "--binary", "--", canonical],
+    cwd: manifest.workspaceRoot,
+  });
+  await rm(canonical, { force: true });
+  if (result.exitCode !== 0) throw new Error(`Input patch could not be applied: ${safeText(result.stderr)}`);
+}
+
+function assertRealPathContained(rootInput: string, targetInput: string, message: string): void {
+  const root = resolve(rootInput);
+  const target = resolve(targetInput);
+  if (target !== root && !target.startsWith(`${root}${sep}`)) throw new Error(message);
+}
+
+async function receiveCredentials(): Promise<ReturnType<typeof CodeTaskWorkerCredentialsSchema.parse>> {
+  const line = await new Promise<string>((resolveLine, reject) => {
+    let buffered = "";
+    let timeout: NodeJS.Timeout;
+    const onData = (chunk: Buffer | string) => {
+      buffered += chunk.toString();
+      if (Buffer.byteLength(buffered, "utf8") > 64 * 1024) return finish(new Error("Code Task credentials exceeded 64 KiB"));
+      const newline = buffered.indexOf("\n");
+      if (newline >= 0) finish(undefined, buffered.slice(0, newline));
+    };
+    const onEnd = () => finish(new Error("Code Task credential channel closed before a JSON line was received"));
+    const finish = (error?: Error, value?: string) => {
+      clearTimeout(timeout);
+      process.stdin.off("data", onData);
+      process.stdin.off("end", onEnd);
+      // The runtime intentionally sends exactly one JSON line and keeps no
+      // credential material in the initial environment. Close our end of the
+      // pipe after consuming it so the one-shot channel cannot keep the worker
+      // event loop alive after a terminal result has been written.
+      process.stdin.destroy();
+      if (error) reject(error); else resolveLine(value ?? "");
+    };
+    timeout = setTimeout(() => finish(new Error("Timed out waiting for one-shot Code Task credentials")), 10_000);
+    process.stdin.on("data", onData);
+    process.stdin.once("end", onEnd);
+    process.stdin.resume();
+  });
+  try {
+    return CodeTaskWorkerCredentialsSchema.parse(JSON.parse(line));
+  } catch {
+    throw new Error("Code Task credential channel contained an invalid payload");
+  }
+}
+
+async function assertOuterWorkerIsolation(): Promise<void> {
+  if (manifest.isolation !== "bwrap") return;
+  const [nullDevice, randomDevice, sharedMemory] = await Promise.all([
+    lstat("/dev/null"),
+    lstat("/dev/urandom"),
+    lstat("/dev/shm"),
+  ]);
+  if (!nullDevice.isCharacterDevice() || !randomDevice.isCharacterDevice() || !sharedMemory.isDirectory()) {
+    throw new Error("Code Task worker did not receive the required fresh device namespace");
+  }
+  for (const sentinel of ["/dev/qasey-host-device-sentinel", "/tmp/qasey-host-sentinel"]) {
+    if (await exists(sentinel)) throw new Error(`Code Task worker can see forbidden host sentinel ${sentinel}`);
+  }
 }
 
 function sha256(value: string | Buffer): string { return createHash("sha256").update(value).digest("hex"); }
@@ -378,9 +647,19 @@ function isRuntimeGeneratedPath(path: string): boolean {
     || path === ".yarn/cache" || path.startsWith(".yarn/cache/");
 }
 
-function fixedCheckEnvironment(): Record<string, string> {
-  const keys = ["HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "CI", "BASE_URL", "QASEY_E2E_BASE_URL", "QASEY_E2E_STORAGE_STATE_PATH"];
-  return Object.fromEntries(keys.flatMap(key => process.env[key] === undefined ? [] : [[key, process.env[key]!]]));
+function fixedCheckEnvironment(checkRoot: string): Record<string, string> {
+  const inheritedKeys = [
+    "PATH", "CI", "BASE_URL", "QASEY_E2E_BASE_URL", "QASEY_E2E_STORAGE_STATE_PATH", "PLAYWRIGHT_BROWSERS_PATH",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+  ];
+  const home = join(checkRoot, "home");
+  return {
+    ...Object.fromEntries(inheritedKeys.flatMap(key => process.env[key] === undefined ? [] : [[key, process.env[key]!]])),
+    HOME: home,
+    XDG_CONFIG_HOME: join(home, ".config"),
+    XDG_CACHE_HOME: join(home, ".cache"),
+    XDG_DATA_HOME: join(home, ".local", "share"),
+  };
 }
 
 async function exists(path: string): Promise<boolean> {
