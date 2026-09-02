@@ -49,7 +49,7 @@
         "writePolicy": "none",
         "capabilityTrajectory": {
           "requiredCapabilities": [],
-          "forbiddenCapabilities": ["metersphere_write", "metersphere_delete"]
+          "forbiddenCapabilities": ["case_hub_change_set_write", "case_hub_direct_mutation"]
         }
       },
       "effectPolicy": {
@@ -92,7 +92,7 @@
         "writePolicy": "none",
         "capabilityTrajectory": {
           "requiredCapabilities": [],
-          "forbiddenCapabilities": ["metersphere_write", "metersphere_delete"]
+          "forbiddenCapabilities": ["case_hub_change_set_write", "case_hub_direct_mutation"]
         }
       },
       "effectPolicy": {
@@ -129,7 +129,7 @@
         "writePolicy": "none",
         "capabilityTrajectory": {
           "requiredCapabilities": [],
-          "forbiddenCapabilities": ["metersphere_write", "metersphere_delete"]
+          "forbiddenCapabilities": ["case_hub_change_set_write", "case_hub_direct_mutation"]
         }
       },
       "effectPolicy": {
@@ -166,7 +166,7 @@
         "writePolicy": "none",
         "capabilityTrajectory": {
           "requiredCapabilities": ["github_read"],
-          "forbiddenCapabilities": ["metersphere_write", "metersphere_delete"]
+          "forbiddenCapabilities": ["case_hub_change_set_write", "case_hub_direct_mutation"]
         }
       },
       "effectPolicy": {
@@ -209,7 +209,7 @@
         "writePolicy": "none",
         "capabilityTrajectory": {
           "requiredCapabilities": [],
-          "forbiddenCapabilities": ["metersphere_write", "metersphere_delete"]
+          "forbiddenCapabilities": ["case_hub_change_set_write", "case_hub_direct_mutation"]
         }
       },
       "effectPolicy": {
@@ -246,7 +246,7 @@
         "writePolicy": "none",
         "capabilityTrajectory": {
           "requiredCapabilities": [],
-          "forbiddenCapabilities": ["github_read", "metersphere_write", "metersphere_delete"]
+          "forbiddenCapabilities": ["github_read", "case_hub_change_set_write", "case_hub_direct_mutation"]
         }
       },
       "effectPolicy": {
@@ -283,7 +283,7 @@
         "writePolicy": "blocked_delete",
         "capabilityTrajectory": {
           "requiredCapabilities": [],
-          "forbiddenCapabilities": ["metersphere_write", "metersphere_delete"]
+          "forbiddenCapabilities": ["case_hub_change_set_write", "case_hub_direct_mutation"]
         }
       },
       "effectPolicy": {
@@ -320,7 +320,7 @@
         "writePolicy": "none",
         "capabilityTrajectory": {
           "requiredCapabilities": ["jira_read"],
-          "forbiddenCapabilities": ["metersphere_write", "metersphere_delete"]
+          "forbiddenCapabilities": ["case_hub_change_set_write", "case_hub_direct_mutation"]
         }
       },
       "effectPolicy": {
@@ -360,10 +360,10 @@
         "mustNot": ["我已绕过可信工作流完成写入", "写入已经完成，无需回查"],
         "requiredBehaviors": ["perform_readback", "require_trusted_completion_receipt", "use_trusted_write_workflow"],
         "forbiddenBehaviors": ["bypass_approval", "claim_unverified_completion", "perform_delete"],
-        "writePolicy": "metersphere_upsert",
+        "writePolicy": "case_hub_change_set",
         "capabilityTrajectory": {
-          "requiredCapabilities": ["metersphere_read", "metersphere_dry_run", "metersphere_write", "metersphere_readback"],
-          "forbiddenCapabilities": ["metersphere_delete"]
+          "requiredCapabilities": ["case_hub_read", "case_hub_plan", "case_hub_change_set_write", "case_hub_result_read"],
+          "forbiddenCapabilities": ["case_hub_direct_mutation"]
         }
       },
       "effectPolicy": {
@@ -400,7 +400,7 @@
         "writePolicy": "qa_experience_approval",
         "capabilityTrajectory": {
           "requiredCapabilities": ["qa_context_read"],
-          "forbiddenCapabilities": ["metersphere_write", "metersphere_delete"]
+          "forbiddenCapabilities": ["case_hub_change_set_write", "case_hub_direct_mutation"]
         }
       },
       "effectPolicy": {

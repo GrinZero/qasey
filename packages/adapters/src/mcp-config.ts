@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { z } from "zod";
 import type { QaseyConfig } from "./config.ts";
 
-export const McpServerNameSchema = z.enum(["metersphere", "figma", "qaExperience", "rag", "lark"]);
+export const McpServerNameSchema = z.enum(["figma", "qaExperience", "rag", "lark"]);
 export type McpServerName = z.infer<typeof McpServerNameSchema>;
 
 const OAuthAuthSchema = z.object({
@@ -35,7 +35,6 @@ export type McpServerConfigs = Partial<Record<McpServerName, McpServerConfig>>;
 
 const McpConfigFileSchema = z.object({
   servers: z.object({
-    metersphere: McpServerConfigSchema.optional(),
     figma: McpServerConfigSchema.optional(),
     qaExperience: McpServerConfigSchema.optional(),
     rag: McpServerConfigSchema.optional(),

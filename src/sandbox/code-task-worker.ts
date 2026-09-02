@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { access, appendFile, copyFile, lstat, mkdir, readFile, readlink, realpath, rm, writeFile } from "node:fs/promises";
+import { access, appendFile, copyFile, lstat, mkdir, readFile, readdir, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { LocalSandbox } from "@mastra/core/workspace";
 import {
@@ -260,6 +260,7 @@ async function runPlaywrightCheck(paths: string[]): Promise<CheckResult> {
   const checkOutputRoot = join(manifest.checkRoot, "playwright");
   await mkdir(checkOutputRoot, { recursive: true });
   const plans = playwrightPlans(paths);
+  await validateCaseMappings(paths);
   const artifacts: ArtifactRef[] = [];
   const summaries: string[] = [];
   let passed = true;
@@ -277,19 +278,27 @@ async function runPlaywrightCheck(paths: string[]): Promise<CheckResult> {
         "exec", "playwright", "test", ...plan.testFiles,
         ...(plan.config ? [`--config=${plan.config}`] : []),
         ...(plan.playwrightProject ? [`--project=${plan.playwrightProject}`] : []),
-        "--reporter=line,junit,html", "--output", join(planRoot, "test-results"),
+        "--reporter=line,json,html", "--output", join(planRoot, "test-results"),
       ],
       cwd: manifest.workspaceRoot,
       env: {
         ...fixedCheckEnvironment(manifest.checkRoot),
         PLAYWRIGHT_HTML_OUTPUT_DIR: join(planRoot, "html-report"),
-        PLAYWRIGHT_JUNIT_OUTPUT_NAME: join(planRoot, "results.xml"),
+        PLAYWRIGHT_JSON_OUTPUT_NAME: join(planRoot, "results.json"),
       },
       timeoutMs: Math.min(spec.deadlineMs, 15 * 60_000),
     });
     const logPath = join(artifactPlanRoot, "playwright.log");
     await writeFile(logPath, safeText(`${result.stdout}\n${result.stderr}`, 2_000_000), { mode: 0o600 });
     artifacts.push({ id: `${spec.taskId}:playwright-${plan.id}-log`, kind: "log", name: `${plan.id}-playwright.log`, uri: sandboxUri(logPath), contentType: "text/plain" });
+    const jsonReport = join(planRoot, "results.json");
+    if (await exists(jsonReport)) {
+      const artifactJsonReport = join(artifactPlanRoot, "results.json");
+      await copyFile(jsonReport, artifactJsonReport);
+      artifacts.push({ id: `${spec.taskId}:playwright-${plan.id}-json`, kind: "report", name: `${plan.id}-results.json`, uri: sandboxUri(artifactJsonReport), contentType: "application/json" });
+    }
+    artifacts.push(...await collectPlaywrightArtifacts(plan.id, join(planRoot, "html-report"), join(artifactPlanRoot, "html-report"), "report"));
+    artifacts.push(...await collectPlaywrightArtifacts(plan.id, join(planRoot, "test-results"), join(artifactPlanRoot, "test-results"), "trace"));
     passed &&= result.exitCode === 0;
     if (exitCode === 0 && result.exitCode !== 0) exitCode = result.exitCode;
     durationMs += result.durationMs;
@@ -303,6 +312,55 @@ async function runPlaywrightCheck(paths: string[]): Promise<CheckResult> {
     durationMs,
     artifacts,
   };
+}
+
+async function collectPlaywrightArtifacts(planId: string, sourceRoot: string, destinationRoot: string, fallbackKind: ArtifactRef["kind"]): Promise<ArtifactRef[]> {
+  if (!await exists(sourceRoot)) return [];
+  const output: ArtifactRef[] = [];
+  async function visit(directory: string): Promise<void> {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const source = join(directory, entry.name);
+      if (entry.isDirectory()) { await visit(source); continue; }
+      if (!entry.isFile()) continue;
+      const path = relative(sourceRoot, source);
+      const destination = join(destinationRoot, path);
+      await mkdir(dirname(destination), { recursive: true });
+      await copyFile(source, destination);
+      const kind: ArtifactRef["kind"] = /\.webm$/iu.test(path) ? "video"
+        : /\.png$|\.jpe?g$/iu.test(path) ? "screenshot"
+          : /trace\.zip$/iu.test(path) ? "trace" : fallbackKind;
+      output.push({
+        id: `${spec.taskId}:playwright-${planId}-${sha256(path).slice(0, 16)}`,
+        kind,
+        name: `${planId}/${path.replaceAll("\\", "/")}`,
+        uri: sandboxUri(destination),
+        contentType: kind === "video" ? "video/webm" : kind === "screenshot" ? "image/png" : undefined,
+      });
+    }
+  }
+  await visit(sourceRoot);
+  return output;
+}
+
+async function validateCaseMappings(paths: string[]): Promise<void> {
+  const context = JSON.parse(manifest.context) as { brief?: { cases?: Array<{ id?: string; versionHash?: string; automationPath?: string }> } };
+  const cases = context.brief?.cases ?? [];
+  for (const path of paths.filter(path => /\.(?:spec|test)\.[cm]?[jt]sx?$/u.test(path))) {
+    const source = await readFile(join(manifest.workspaceRoot, path), "utf8");
+    if (/\btest\.(?:only|skip)\s*\(/u.test(source)) throw new Error(`${path}: test.only and test.skip are forbidden`);
+    if (!/\bexpect\s*\(/u.test(source)) throw new Error(`${path}: Playwright case must contain a meaningful assertion`);
+  }
+  for (const testCase of cases) {
+    if (!testCase.id || !testCase.versionHash || !testCase.automationPath) continue;
+    const source = await readFile(join(manifest.workspaceRoot, testCase.automationPath), "utf8");
+    const caseAnnotations = [...source.matchAll(/type:\s*["']qasey\.case["']\s*,\s*description:\s*["']([^"']+)["']/gu)]
+      .filter(match => match[1] === testCase.id);
+    if (caseAnnotations.length !== 1) throw new Error(`${testCase.automationPath}: expected exactly one qasey.case annotation for ${testCase.id}`);
+    const versionAnnotations = [...source.matchAll(/type:\s*["']qasey\.version["']\s*,\s*description:\s*["']([^"']+)["']/gu)]
+      .filter(match => match[1] === testCase.versionHash);
+    if (versionAnnotations.length !== 1) throw new Error(`${testCase.automationPath}: qasey.version does not match ${testCase.versionHash}`);
+    if (!source.includes(testCase.id)) throw new Error(`${testCase.automationPath}: test title must include ${testCase.id}`);
+  }
 }
 
 interface PlaywrightPlan {

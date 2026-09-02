@@ -1,8 +1,9 @@
 import { registerApiRoute } from "@mastra/core/server";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
-import { CreateE2ERunRequestSchema, QaVerdictInputSchema } from "../../../../packages/contracts/src/index.ts";
-import { normalizeJiraWebhook } from "../../../../packages/domain/src/index.ts";
-import { artifactStore, config, channelDeliveryInbox, jiraClient, runRepository, sandboxPoolClient } from "../../runtime.ts";
+import { CaseHubResultReviewInputSchema, CreateCaseHubChangeSetSchema, CreateE2ERunRequestSchema, type CaseHubChangeSet, type CaseHubResult, type OwnerScope } from "../../../../packages/contracts/src/index.ts";
+import { freezeE2EContext, normalizeJiraWebhook } from "../../../../packages/domain/src/index.ts";
+import { artifactStore, caseHubRepository, channelDeliveryInbox, config, e2eFixtureLeaseService, githubClient, jiraClient, runRepository, sandboxPoolClient } from "../../runtime.ts";
 import { ArtifactNotFoundError, ArtifactOwnershipError } from "../../../../packages/e2e/src/index.ts";
 import { cancelE2ERun, createAndStartE2ERun, rerunE2E, resumeE2EWithVerdict } from "../../workflows/e2e-workflow.ts";
 import { ownerScopeFromRequestContext } from "../../../platform/context/owner-scope.ts";
@@ -61,6 +62,24 @@ function requireSandboxPool() {
   return sandboxPoolClient;
 }
 
+function allLatestResultsApproved(results: CaseHubResult[]): boolean {
+  if (results.length === 0) return false;
+  const latest = new Map<string, CaseHubResult>();
+  for (const result of results) {
+    const current = latest.get(result.caseVersionId);
+    if (!current || result.attempt > current.attempt) latest.set(result.caseVersionId, result);
+  }
+  return [...latest.values()].every(result => result.executionStatus === "passed" && result.reviewStatus === "approved");
+}
+
+function validGitHubSignature(rawBody: string, signature: string | undefined): boolean {
+  if (!config.GITHUB_WEBHOOK_SECRET || !signature?.startsWith("sha256=")) return false;
+  const expected = `sha256=${createHmac("sha256", config.GITHUB_WEBHOOK_SECRET).update(rawBody).digest("hex")}`;
+  const actualBytes = Buffer.from(signature);
+  const expectedBytes = Buffer.from(expected);
+  return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes);
+}
+
 function tunnelAuthorized(authorization: string | undefined): boolean {
   return devRuntimeTunnelServerEnabled(config)
     && secureTokenMatches(bearerToken(authorization), config.QASEY_DEV_TUNNEL_TOKEN);
@@ -111,6 +130,27 @@ export const apiRoutes = [
           "cache-control": "no-store",
         },
       });
+    },
+  }),
+  registerApiRoute("/internal/e2e/version", {
+    method: "GET",
+    handler: async c => c.json(e2eFixtureLeaseService.version()),
+  }),
+  registerApiRoute("/internal/e2e/leases", {
+    method: "POST",
+    handler: async c => {
+      const principal = OAuthPrincipalSchema.parse(c.get("requestContext").get("platform-principal"));
+      const input = z.object({ ttlSeconds: z.number().int().min(60).max(14_400).default(3_600) }).strict().parse(await c.req.json().catch(() => ({})));
+      return c.json(await e2eFixtureLeaseService.create(principal.subjectId, input.ttlSeconds), 201);
+    },
+  }),
+  registerApiRoute("/internal/e2e/leases/:leaseId", {
+    method: "DELETE",
+    handler: async c => {
+      const principal = OAuthPrincipalSchema.parse(c.get("requestContext").get("platform-principal"));
+      const result = await e2eFixtureLeaseService.deleteForOwner(principal.subjectId, c.req.param("leaseId"));
+      if (result === "forbidden") return c.json({ error: "forbidden" }, 403);
+      return c.json({ deleted: true });
     },
   }),
   registerApiRoute("/v1/dev-runtimes/events", {
@@ -261,6 +301,51 @@ export const apiRoutes = [
       }
     },
   }),
+  registerApiRoute("/webhooks/github", {
+    method: "POST",
+    requiresAuth: false,
+    handler: async c => {
+      const rawBody = await c.req.text();
+      if (!validGitHubSignature(rawBody, c.req.header("x-hub-signature-256"))) return c.json({ error: "invalid_signature" }, 401);
+      const deliveryId = c.req.header("x-github-delivery");
+      if (!deliveryId) return c.json({ error: "missing_delivery_id" }, 400);
+      const ownerScope = owner(c);
+      if (!await channelDeliveryInbox.accept(ownerScope, `github:${deliveryId}`)) return c.json({ accepted: false, duplicate: true }, 202);
+      if (c.req.header("x-github-event") !== "pull_request") return c.json({ accepted: false, reason: "ignored" }, 202);
+      const payload = z.object({
+        action: z.string(),
+        pull_request: z.object({ html_url: z.url(), merged: z.boolean() }),
+      }).passthrough().parse(JSON.parse(rawBody));
+      if (payload.action !== "closed") return c.json({ accepted: false, reason: "ignored" }, 202);
+      const changeSet = (await caseHubRepository.listChangeSets(ownerScope, 500))
+        .find(candidate => candidate.pullRequestUrl === payload.pull_request.html_url);
+      if (!changeSet) return c.json({ accepted: false, reason: "unknown_pull_request" }, 202);
+      await settleClosedPullRequest(ownerScope, changeSet, payload.pull_request.merged);
+      return c.json({ accepted: true });
+    },
+  }),
+  registerApiRoute("/internal/case-hub/change-sets/:changeSetId/reconcile", {
+    method: "POST",
+    handler: async c => {
+      const ownerScope = owner(c);
+      const changeSet = await caseHubRepository.getChangeSet(ownerScope, c.req.param("changeSetId"));
+      if (!changeSet) return c.json({ error: "not_found" }, 404);
+      if (!changeSet.pullRequestUrl) return c.json({ reconciled: false, reason: "no_pull_request" });
+      const pullRequest = parseGitHubPullRequestUrl(changeSet.pullRequestUrl);
+      if (!pullRequest || pullRequest.owner !== changeSet.repository.owner || pullRequest.repository !== changeSet.repository.repository) {
+        return c.json({ error: "invalid_pull_request_url" }, 409);
+      }
+      if (!githubClient) return c.json({ error: "github_not_configured" }, 503);
+      try {
+        const response = await githubClient.pulls.get({ owner: pullRequest.owner, repo: pullRequest.repository, pull_number: pullRequest.number });
+        if (response.data.state !== "closed") return c.json({ reconciled: false, state: response.data.state });
+        await settleClosedPullRequest(ownerScope, changeSet, Boolean(response.data.merged));
+        return c.json({ reconciled: true, state: response.data.merged ? "merged" : "abandoned" });
+      } catch (error) {
+        return c.json({ error: "pull_request_reconcile_failed", ...errorBody(error, crypto.randomUUID()) }, 409);
+      }
+    },
+  }),
   registerApiRoute("/v1/qasey/tasks", {
     method: "POST",
     handler: async c => {
@@ -291,6 +376,113 @@ export const apiRoutes = [
   registerApiRoute("/v1/runs", {
     method: "GET",
     handler: async c => c.json({ runs: await runRepository.list(owner(c), Number(c.req.query("limit") ?? 100)) }),
+  }),
+  registerApiRoute("/v1/case-hub/cases", {
+    method: "GET",
+    handler: async c => c.json({ cases: await caseHubRepository.listCases(owner(c), c.req.query("q") ?? "") }),
+  }),
+  registerApiRoute("/v1/case-hub/cases/:caseId", {
+    method: "GET",
+    handler: async c => {
+      const caseRecord = await caseHubRepository.getCase(owner(c), c.req.param("caseId"));
+      if (!caseRecord) return c.json({ error: "not_found" }, 404);
+      return c.json({ case: caseRecord, versions: await caseHubRepository.versionsForCase(owner(c), caseRecord.id) });
+    },
+  }),
+  registerApiRoute("/v1/case-hub/change-sets", {
+    method: "GET",
+    handler: async c => c.json({ changeSets: await caseHubRepository.listChangeSets(owner(c), Number(c.req.query("limit") ?? 100)) }),
+  }),
+  registerApiRoute("/v1/case-hub/change-sets", {
+    method: "POST",
+    handler: async c => {
+      const parsed = CreateCaseHubChangeSetSchema.safeParse(await c.req.json());
+      if (!parsed.success) return c.json({ error: "validation_error", details: parsed.error.issues }, 400);
+      if (parsed.data.requirement.blockingQuestions.length > 0) {
+        return c.json({ error: "blocking_questions", questions: parsed.data.requirement.blockingQuestions }, 409);
+      }
+      const requestContext = c.get("requestContext");
+      const principal = OAuthPrincipalSchema.parse(requestContext.get("platform-principal"));
+      const requestId = String(requestContext.get("requestId") ?? crypto.randomUUID());
+      const sessionId = String(requestContext.get("sessionId") ?? requestId);
+      const webE2EConfiguration = webE2EConfigurationFromSkill();
+      const requirement = freezeE2EContext(parsed.data.requirement, {
+        sessionId,
+        threadId: String(requestContext.get(MASTRA_THREAD_ID_KEY) ?? sessionId),
+        taskRunId: String(requestContext.get("taskId") ?? requestContext.get("executionId") ?? requestId),
+        requestId,
+        resourceId: String(requestContext.get(MASTRA_RESOURCE_ID_KEY) ?? principal.subjectId),
+      });
+      try {
+        const changeSet = await caseHubRepository.createChangeSet(owner(c), {
+          requirement,
+          proposals: parsed.data.proposals,
+          repository: webE2EConfiguration.target,
+          createdBy: principal.subjectId,
+          environmentSourceSha: e2eFixtureLeaseService.version().sourceSha,
+        });
+        const run = await createAndStartE2ERun(c.get("mastra"), owner(c), {
+          sourceSessionId: sessionId,
+          changeSetId: changeSet.id,
+          handoff: parsed.data.requirement,
+          repository: webE2EConfiguration.target,
+          playwrightVerification: webE2EConfiguration.verification,
+          platform: "web",
+          framework: "playwright",
+        }, requestContext, principal.subjectId);
+        return c.json({ changeSet, run }, 202);
+      } catch (error) {
+        return c.json({ error: "change_set_create_failed", ...errorBody(error, requestId) }, 409);
+      }
+    },
+  }),
+  registerApiRoute("/v1/case-hub/change-sets/:changeSetId", {
+    method: "GET",
+    handler: async c => {
+      const changeSet = await caseHubRepository.getChangeSet(owner(c), c.req.param("changeSetId"));
+      if (!changeSet) return c.json({ error: "not_found" }, 404);
+      const [versions, results] = await Promise.all([
+        caseHubRepository.versionsForChangeSet(owner(c), changeSet.id),
+        caseHubRepository.listResults(owner(c), changeSet.id),
+      ]);
+      return c.json({ changeSet, versions, results });
+    },
+  }),
+  registerApiRoute("/v1/case-hub/results/:resultId/review", {
+    method: "POST",
+    handler: async c => {
+      const input = CaseHubResultReviewInputSchema.safeParse(await c.req.json());
+      if (!input.success) return c.json({ error: "validation_error", details: input.error.issues }, 400);
+      const principal = OAuthPrincipalSchema.parse(c.get("requestContext").get("platform-principal"));
+      try {
+        const reviewed = await caseHubRepository.reviewResult(owner(c), c.req.param("resultId"), principal.subjectId, input.data);
+        const changeSet = await caseHubRepository.getChangeSet(owner(c), reviewed.changeSetId);
+        if (!changeSet) return c.json({ error: "not_found" }, 404);
+        if (input.data.verdict === "product_bug" || input.data.verdict === "environment_issue") {
+          const status = input.data.verdict === "product_bug" ? "blocked_product" : "blocked_environment";
+          const updated = await caseHubRepository.updateChangeSet(owner(c), changeSet.id, changeSet.revision, { status, error: input.data.feedback });
+          return c.json({ result: reviewed, changeSet: updated });
+        }
+        if (input.data.verdict === "request_changes") {
+          const revising = await caseHubRepository.updateChangeSet(owner(c), changeSet.id, changeSet.revision, { status: "revising" });
+          await resumeE2EWithVerdict(c.get("mastra"), owner(c), reviewed.runId, {
+            verdict: "request_changes",
+            reviewerId: principal.subjectId,
+            caseVersionId: reviewed.caseVersionId,
+            feedback: `[${reviewed.caseId}] ${input.data.feedback}`,
+          }, c.get("requestContext"));
+          return c.json({ result: reviewed, changeSet: revising }, 202);
+        }
+        const results = await caseHubRepository.listResults(owner(c), changeSet.id);
+        if (!allLatestResultsApproved(results)) return c.json({ result: reviewed, changeSet });
+        const finalVerifying = await caseHubRepository.updateChangeSet(owner(c), changeSet.id, changeSet.revision, { status: "final_verifying" });
+        await resumeE2EWithVerdict(c.get("mastra"), owner(c), reviewed.runId, { verdict: "approve", reviewerId: principal.subjectId }, c.get("requestContext"));
+        const ready = await caseHubRepository.updateChangeSet(owner(c), finalVerifying.id, finalVerifying.revision, { status: "ready_to_merge" });
+        return c.json({ result: reviewed, changeSet: ready });
+      } catch (error) {
+        return c.json({ error: "case_review_failed", ...errorBody(error, crypto.randomUUID()) }, 409);
+      }
+    },
   }),
   registerApiRoute("/v1/runs", {
     method: "POST",
@@ -362,16 +554,6 @@ export const apiRoutes = [
     method: "POST",
     handler: async c => {
       try { return c.json(await cancelE2ERun(c.get("mastra"), owner(c), c.req.param("runId"))); }
-      catch (error) { return c.json(errorBody(error, crypto.randomUUID()), 409); }
-    },
-  }),
-  registerApiRoute("/v1/runs/:runId/qa-verdict", {
-    method: "POST",
-    handler: async c => {
-      const parsed = QaVerdictInputSchema.safeParse(await c.req.json());
-      if (!parsed.success) return c.json({ error: "validation_error", details: parsed.error.issues }, 400);
-      const reviewerId = OAuthPrincipalSchema.parse(c.get("requestContext").get("platform-principal")).subjectId;
-      try { return c.json(await resumeE2EWithVerdict(c.get("mastra"), owner(c), c.req.param("runId"), { ...parsed.data, reviewerId }, c.get("requestContext"))); }
       catch (error) { return c.json(errorBody(error, crypto.randomUUID()), 409); }
     },
   }),
@@ -527,24 +709,49 @@ export const apiRoutes = [
   }),
 ];
 
+async function settleClosedPullRequest(ownerScope: OwnerScope, changeSet: CaseHubChangeSet, merged: boolean): Promise<void> {
+  if (merged) {
+    await caseHubRepository.activateApprovedVersions(ownerScope, changeSet.id);
+    await caseHubRepository.updateChangeSet(ownerScope, changeSet.id, changeSet.revision, { status: "merged" });
+  } else {
+    await caseHubRepository.updateChangeSet(ownerScope, changeSet.id, changeSet.revision, { status: "abandoned" });
+  }
+}
+
+function parseGitHubPullRequestUrl(value: string): { owner: string; repository: string; number: number } | undefined {
+  const match = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/u.exec(value);
+  if (!match?.[1] || !match[2] || !match[3]) return undefined;
+  return { owner: match[1], repository: match[2], number: Number(match[3]) };
+}
+
 const routePolicies: Record<string, { id: string; access: PrimitiveAccessPolicy; public?: boolean }> = {
   "GET /healthz": { id: "healthz", access: { permission: "platform.health.read", audiences: ["admin-ui", "api", "service", "channel"] }, public: true },
   "GET /readyz": { id: "readyz", access: { permission: "platform.health.read", audiences: ["admin-ui", "api", "service", "channel"] }, public: true },
   "GET /internal/metrics": { id: "metrics", access: { permission: "platform.metrics.read", audiences: ["admin-ui", "service"] } },
+  "GET /internal/e2e/version": { id: "e2e-environment-version", access: { permission: "qasey.test-environments.provision", audiences: ["service"] } },
+  "POST /internal/e2e/leases": { id: "e2e-lease-create", access: { permission: "qasey.test-environments.provision", audiences: ["service"] } },
+  "DELETE /internal/e2e/leases/:leaseId": { id: "e2e-lease-delete", access: { permission: "qasey.test-environments.provision", audiences: ["service"] } },
+  "POST /internal/case-hub/change-sets/:changeSetId/reconcile": { id: "change-set-pr-reconcile", access: { permission: "qasey.cases.write", audiences: ["service"] } },
   "GET /v1/dev-runtimes/events": { id: "dev-runtime-events", access: { permission: "qasey.channel.receive", audiences: ["channel"] }, public: true },
   "POST /v1/dev-runtimes/:runtimeId/jobs/:jobId/events": { id: "dev-runtime-job-events", access: { permission: "qasey.channel.receive", audiences: ["channel"] }, public: true },
   "POST /v1/dev-runtime-approvals/:approvalId": { id: "dev-runtime-approval", access: { permission: "qasey.channel.receive", audiences: ["channel"] }, public: true },
   "POST /webhooks/jira": { id: "jira-webhook", access: { permission: "qasey.channel.receive", audiences: ["channel"] } },
+  "POST /webhooks/github": { id: "github-webhook", access: { permission: "qasey.channel.receive", audiences: ["channel"] }, public: true },
   "POST /v1/qasey/tasks": { id: "qasey-task", access: { permission: "qasey.agent.execute", audiences: ["admin-ui", "api"] } },
   "GET /v1/runs": { id: "run-list", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
   "POST /v1/runs": { id: "run-create", access: { permission: "qasey.runs.write", audiences: ["admin-ui", "api", "service"] } },
+  "GET /v1/case-hub/cases": { id: "case-list", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
+  "GET /v1/case-hub/cases/:caseId": { id: "case-read", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
+  "GET /v1/case-hub/change-sets": { id: "change-set-list", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
+  "POST /v1/case-hub/change-sets": { id: "change-set-create", access: { permission: "qasey.cases.write", audiences: ["admin-ui", "api", "service"] } },
+  "GET /v1/case-hub/change-sets/:changeSetId": { id: "change-set-read", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
+  "POST /v1/case-hub/results/:resultId/review": { id: "case-result-review", access: { permission: "qasey.results.approve", audiences: ["admin-ui", "api"] } },
   "GET /v1/runs/:runId": { id: "run-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/runs/:runId/events": { id: "run-events-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/runs/:runId/artifacts": { id: "run-artifacts-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/runs/:runId/artifacts/:artifactId": { id: "run-artifact-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
   "POST /v1/runs/:runId/rerun": { id: "run-rerun", access: { permission: "qasey.runs.write", audiences: ["admin-ui", "api", "service"] } },
   "POST /v1/runs/:runId/cancel": { id: "run-cancel", access: { permission: "qasey.runs.write", audiences: ["admin-ui", "api", "service"] } },
-  "POST /v1/runs/:runId/qa-verdict": { id: "run-verdict", access: { permission: "qasey.runs.approve", audiences: ["admin-ui", "api"] } },
   "POST /v1/sandbox-sessions/:sessionId": { id: "sandbox-session-claim", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },
   "POST /v1/sandbox-sessions/:sessionId/browser/start": { id: "sandbox-browser-start", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },
   "POST /v1/sandbox-sessions/:sessionId/browser/action": { id: "sandbox-browser-action", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },

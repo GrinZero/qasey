@@ -71,6 +71,8 @@ export type E2EPlatform = z.infer<typeof E2EPlatformSchema>;
 
 export const TestCaseSpecSchema = z.object({
   id: z.string().min(1),
+  versionHash: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+  automationPath: z.string().min(1).optional(),
   requirementId: z.string().optional(),
   title: z.string().min(1),
   target: z.enum(["web", "ios", "android"]),
@@ -119,7 +121,7 @@ export const ArtifactRefSchema = z.object({
 export type ArtifactRef = z.infer<typeof ArtifactRefSchema>;
 
 export const E2EEvidenceRefSchema = z.object({
-  kind: z.enum(["message", "attachment", "document", "metersphere_case", "repository"]),
+  kind: z.enum(["message", "attachment", "document", "case", "repository"]),
   ref: z.string().min(1),
   title: z.string().min(1).max(500).optional(),
   summary: z.string().max(8_000).optional(),
@@ -161,6 +163,152 @@ export const E2EContextSnapshotSchema = E2EContextDraftSchema.safeExtend({
   snapshotHash: z.string().regex(/^[a-f0-9]{64}$/u),
 });
 export type E2EContextSnapshot = z.infer<typeof E2EContextSnapshotSchema>;
+
+// Requirement snapshots are channel-neutral and are shared by Case Hub and
+// the E2E execution plane. Keep the E2E aliases above while callers migrate.
+export const RequirementDraftSchema = E2EContextDraftSchema;
+export type RequirementDraft = E2EContextDraft;
+export const RequirementSnapshotSchema = E2EContextSnapshotSchema;
+export type RequirementSnapshot = E2EContextSnapshot;
+
+export const CaseHubProjectCodeSchema = z.literal("QASEY");
+export const CaseHubCaseIdSchema = z.string().regex(/^QASEY-[1-9][0-9]*$/u);
+export const CaseHubCaseVersionStatusSchema = z.enum(["proposed", "approved", "active", "rejected"]);
+export const CaseHubChangeSetStatusSchema = z.enum([
+  "authoring", "verifying", "awaiting_review", "revising", "blocked_product",
+  "blocked_environment", "final_verifying", "ready_to_merge", "merged", "failed",
+  "cancelled", "abandoned",
+]);
+export type CaseHubChangeSetStatus = z.infer<typeof CaseHubChangeSetStatusSchema>;
+export const CaseHubExecutionStatusSchema = z.enum(["passed", "failed", "blocked", "skipped"]);
+export const CaseHubReviewStatusSchema = z.enum([
+  "pending", "approved", "changes_requested", "product_bug", "environment_issue",
+]);
+
+export const CaseHubCaseProposalSchema = z.object({
+  operation: z.enum(["create", "update"]),
+  caseId: CaseHubCaseIdSchema.optional(),
+  suitePath: z.string().trim().min(1).max(500),
+  title: z.string().trim().min(1).max(500),
+  description: z.string().max(8_000).default(""),
+  priority: z.enum(["P0", "P1", "P2", "P3"]),
+  preconditions: z.array(z.string().trim().min(1).max(2_000)).max(100).default([]),
+  steps: z.array(z.object({
+    action: z.string().trim().min(1).max(4_000),
+    expected: z.array(z.string().trim().min(1).max(4_000)).min(1).max(20),
+  }).strict()).min(1).max(200),
+  testData: z.record(z.string(), z.unknown()).default({}),
+  tags: z.array(z.string().trim().min(1).max(100)).max(100).default([]),
+  automationPath: z.string().trim().min(1).max(1_000),
+  evidenceRefs: z.array(E2EEvidenceRefSchema).max(200).default([]),
+}).strict().superRefine((value, context) => {
+  if (value.operation === "update" && !value.caseId) {
+    context.addIssue({ code: "custom", path: ["caseId"], message: "Update proposals require a caseId" });
+  }
+  if (value.operation === "create" && value.caseId) {
+    context.addIssue({ code: "custom", path: ["caseId"], message: "Create proposals receive a server-owned caseId" });
+  }
+});
+export type CaseHubCaseProposal = z.infer<typeof CaseHubCaseProposalSchema>;
+
+export const CreateCaseHubChangeSetSchema = z.object({
+  requirement: RequirementDraftSchema,
+  proposals: z.array(CaseHubCaseProposalSchema).min(1).max(100),
+}).strict();
+export type CreateCaseHubChangeSet = z.infer<typeof CreateCaseHubChangeSetSchema>;
+
+export const CaseHubCaseVersionSchema = z.object({
+  applicationId: z.string().min(1),
+  tenantId: z.string().min(1),
+  id: z.string().uuid(),
+  caseId: CaseHubCaseIdSchema,
+  projectCode: CaseHubProjectCodeSchema,
+  version: z.number().int().positive(),
+  suitePath: z.string().min(1),
+  title: z.string().min(1),
+  description: z.string(),
+  priority: z.enum(["P0", "P1", "P2", "P3"]),
+  target: z.literal("web"),
+  preconditions: z.array(z.string()),
+  steps: TestCaseSpecSchema.shape.steps,
+  testData: z.record(z.string(), z.unknown()),
+  tags: z.array(z.string()),
+  automationPath: z.string().min(1),
+  evidenceRefs: z.array(E2EEvidenceRefSchema),
+  requirementSnapshotHash: z.string().regex(/^[a-f0-9]{64}$/u),
+  contentHash: z.string().regex(/^[a-f0-9]{64}$/u),
+  status: CaseHubCaseVersionStatusSchema,
+  createdBy: z.string().min(1),
+  createdAt: z.iso.datetime(),
+}).strict();
+export type CaseHubCaseVersion = z.infer<typeof CaseHubCaseVersionSchema>;
+
+export const CaseHubCaseSchema = z.object({
+  applicationId: z.string().min(1),
+  tenantId: z.string().min(1),
+  id: CaseHubCaseIdSchema,
+  projectCode: CaseHubProjectCodeSchema,
+  suitePath: z.string().min(1),
+  title: z.string().min(1),
+  activeVersionId: z.string().uuid().optional(),
+  proposedVersionIds: z.array(z.string().uuid()).default([]),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+}).strict();
+export type CaseHubCase = z.infer<typeof CaseHubCaseSchema>;
+
+export const CaseHubChangeSetSchema = z.object({
+  applicationId: z.string().min(1),
+  tenantId: z.string().min(1),
+  id: z.string().uuid(),
+  projectCode: CaseHubProjectCodeSchema,
+  requirement: RequirementSnapshotSchema,
+  caseVersionIds: z.array(z.string().uuid()).min(1),
+  planHash: z.string().regex(/^[a-f0-9]{64}$/u),
+  status: CaseHubChangeSetStatusSchema,
+  revision: z.number().int().positive(),
+  repository: RepositoryProfileSchema,
+  baseSha: z.string().regex(/^[a-f0-9]{40,64}$/u).optional(),
+  environmentSourceSha: z.string().regex(/^[a-f0-9]{40,64}$/u).optional(),
+  runId: z.string().uuid().optional(),
+  branch: z.string().optional(),
+  pullRequestUrl: z.url().optional(),
+  error: z.string().optional(),
+  createdBy: z.string().min(1),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+}).strict();
+export type CaseHubChangeSet = z.infer<typeof CaseHubChangeSetSchema>;
+
+export const CaseHubResultSchema = z.object({
+  applicationId: z.string().min(1),
+  tenantId: z.string().min(1),
+  id: z.string().uuid(),
+  changeSetId: z.string().uuid(),
+  runId: z.string().uuid(),
+  caseVersionId: z.string().uuid(),
+  caseId: CaseHubCaseIdSchema,
+  attempt: z.number().int().positive(),
+  executionStatus: CaseHubExecutionStatusSchema,
+  reviewStatus: CaseHubReviewStatusSchema,
+  reviewerId: z.string().optional(),
+  feedback: z.string().max(5_000).optional(),
+  durationMs: z.number().int().nonnegative().optional(),
+  testCodeHash: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+  artifacts: z.array(ArtifactRefSchema).default([]),
+  createdAt: z.iso.datetime(),
+  reviewedAt: z.iso.datetime().optional(),
+}).strict();
+export type CaseHubResult = z.infer<typeof CaseHubResultSchema>;
+
+export const CaseHubResultReviewInputSchema = z.object({
+  verdict: z.enum(["approve", "request_changes", "product_bug", "environment_issue"]),
+  feedback: z.string().trim().max(5_000).optional(),
+}).strict().superRefine((value, context) => {
+  if (value.verdict !== "approve" && !value.feedback) {
+    context.addIssue({ code: "custom", path: ["feedback"], message: "Feedback is required for non-approval verdicts" });
+  }
+});
 
 export const CodeTaskKindSchema = z.enum(["author", "repair", "review", "migration-author"]);
 export const CodeTaskStatusSchema = z.enum([
@@ -364,6 +512,7 @@ export const E2EAmendmentSchema = z.object({
   createdAt: z.iso.datetime(),
   reviewerId: z.string().min(1),
   feedback: z.string().min(1).max(5_000),
+  caseVersionId: z.string().uuid().optional(),
   hash: z.string().regex(/^[a-f0-9]{64}$/u),
 }).strict();
 export type E2EAmendment = z.infer<typeof E2EAmendmentSchema>;
@@ -374,7 +523,7 @@ export const E2ERunSchema = z.object({
   id: z.string().min(1),
   requestId: z.string().min(1),
   sourceSessionId: z.string().min(1),
-  sourceCaseIds: z.array(z.string()),
+  changeSetId: z.string().uuid(),
   contextSnapshot: E2EContextSnapshotSchema,
   caseSnapshot: z.array(TestCaseSpecSchema).default([]),
   executionBrief: E2EExecutionBriefSchema.optional(),
@@ -404,16 +553,10 @@ export type E2ERun = z.infer<typeof E2ERunSchema>;
 
 const SubmittedRepositoryProfileSchema = RepositoryProfileSchema.omit({ installCommand: true }).strict();
 
-const MeterSphereCaseReferenceSchema = z.string().trim().refine(
-  value => /^\d+$/u.test(value)
-    || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value),
-  { message: "MeterSphere case reference must be a canonical UUID id or numeric num" },
-).describe("MeterSphere canonical UUID id（推荐）或纯数字 num；禁止名称、module_id 和 URL。");
-
 export const CreateE2ERunSchema = z.object({
   requestId: z.string().optional(),
   sourceSessionId: z.string().min(1),
-  sourceCaseIds: z.array(MeterSphereCaseReferenceSchema).min(1),
+  changeSetId: z.string().uuid(),
   handoff: E2EContextDraftSchema,
   // Execution commands are server-owned and can never be submitted by a browser/API client.
   repository: SubmittedRepositoryProfileSchema,
@@ -433,6 +576,7 @@ export type CreateE2ERunRequest = z.infer<typeof CreateE2ERunRequestSchema>;
 export const QaVerdictSchema = z.object({
   verdict: z.enum(["approve", "request_changes"]),
   reviewerId: z.string().min(1),
+  caseVersionId: z.string().uuid().optional(),
   feedback: z.string().max(5000).optional(),
 });
 export type QaVerdict = z.infer<typeof QaVerdictSchema>;

@@ -11,7 +11,6 @@ import { applicationDatabase, closeQaseyInfrastructure, config, createMastraRunt
 import { createQaseyApplication } from "./applications/qasey/application.ts";
 import * as e2eModule from "./workflows/e2e-workflow.ts";
 import * as scorerModule from "./scorers/eval-scorers.ts";
-import * as caseWorkflowModule from "./workflows/metersphere-case-workflow.ts";
 import * as routeModule from "./applications/qasey/routes.ts";
 import { createSharedMastraConfig } from "../runtime/create-runtime.ts";
 import { createAuthorizationMiddleware, isMastraStudioRequest, isPublicRuntimePath, resolveRequestUser } from "../platform/auth/authorization-middleware.ts";
@@ -278,7 +277,6 @@ if (runReconcilerLoop) runtimeReadiness.register("run-reconciler", () => runReco
 const qaseyApplication = createQaseyApplication({
   e2eModule,
   scorerModule,
-  caseWorkflowModule,
   routeModule,
 });
 const qaseyCatalog = flattenApplicationRegistry([qaseyApplication]).catalog;
@@ -439,7 +437,10 @@ const sharedRuntime = createSharedMastraConfig({
               "qasey.e2e.execute",
               "qasey.runs.read",
               "qasey.runs.write",
-              "qasey.runs.approve",
+              "qasey.cases.read",
+              "qasey.cases.write",
+              "qasey.results.read",
+              "qasey.results.approve",
               "qasey.sandbox.use",
             );
           }

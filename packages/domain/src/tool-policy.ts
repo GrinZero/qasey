@@ -34,11 +34,11 @@ export function authorizeDiscoveredToolAccess(
 }
 
 export const TOOL_POLICIES: Record<string, ToolPolicy> = {
-  metersphere_read: {
+  case_hub_read: {
     effect: "read", allowedChannels: ["slack", "jira", "api"],
     requiresApproval: false,
   },
-  metersphere_write: {
+  case_hub_change_set_write: {
     effect: "write", allowedChannels: ["slack", "jira", "api"],
     requiresApproval: false,
   },

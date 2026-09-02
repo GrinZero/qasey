@@ -570,7 +570,7 @@ textarea::placeholder, input::placeholder { color: #a4aaba; }
 .auth-mode-tabs button.active { color: #4641b9; background: white; box-shadow: 0 2px 9px rgb(30 36 53 / 8%); }
 .auth-method-status { min-height: 48px; display: flex; align-items: center; gap: 9px; margin-top: 24px; padding: 0 12px; border: 1px solid #e2e4eb; border-radius: 9px; color: #7a8191; background: #fbfcfe; font-size: 10px; }
 .credential-form { display: grid; gap: 14px; margin-top: 24px; }
-.credential-form label { min-width: 0; display: grid; gap: 7px; color: #555d6e; font-size: 10px; font-weight: 680; }
+.credential-form label, .credential-field { min-width: 0; display: grid; gap: 7px; color: #555d6e; font-size: 10px; font-weight: 680; }
 .credential-form input { height: 43px; padding: 0 12px; border-radius: 9px; font-size: 12px; font-weight: 450; }
 .credential-form input:disabled { color: #8e94a2; background: #f2f3f7; }
 .password-field { position: relative; display: block; }

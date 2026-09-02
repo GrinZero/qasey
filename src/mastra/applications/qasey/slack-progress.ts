@@ -17,7 +17,6 @@ const SENSITIVE_VALUE = /\b(?:Bearer\s+[A-Za-z0-9._~+\/-]+=*|xox[a-z]-[A-Za-z0-9
 const INLINE_SECRET = /\b(?:token|access[_-]?token|api[_-]?key|authorization|cookie|password|private[_-]?key|secret|session)\s*[:=]\s*["']?[^\s,;"']+/gi;
 const INTERNAL_TEXT = /(?:System prompt|系统提示|已识别的\s*intent|<INSTRUCTIONS>|工具调用约束)/iu;
 const SKILL_LABELS: Record<string, string> = {
-  "metersphere-case-management": "MeterSphere 用例规范",
   "qa-experience": "QA 历史经验规范",
   "qa-quick-query": "QA 快速查询规范",
   "qa-review": "QA 评审规范",
@@ -163,7 +162,10 @@ function renderToolCall(toolName: string, args: unknown, taskTopic?: string): st
     return statusLine(`正在检索${topic}相关资料…`);
   }
 
-  if (toolName.startsWith("metersphere_")) return renderMeterSphereCall(toolName, input, taskTopic);
+  if (toolName.startsWith("case_hub_")) {
+    if (toolName.includes("create_change_set")) return "正在冻结候选用例并启动 E2E 验证…";
+    return "正在读取 Case Hub 用例与审核状态…";
+  }
 
   if (toolName.startsWith("e2e_")) {
     if (toolName.includes("create")) return "正在准备新的 E2E 验证…";
@@ -241,7 +243,10 @@ function renderToolResult(
   }
 
   if (toolName.startsWith("rag_") || toolName === "answer") return "已检索相关资料，正在核对证据…";
-  if (toolName.startsWith("metersphere_")) return renderMeterSphereResult(toolName, input, result);
+  if (toolName.startsWith("case_hub_")) {
+    if (toolName.includes("create_change_set")) return "Change Set 已创建，正在隔离环境中生成和验证 Playwright…";
+    return "已读取 Case Hub 用例与审核状态…";
+  }
 
   if (toolName.startsWith("e2e_")) {
     if (toolName.includes("create") || toolName.includes("rerun")) return "E2E 运行已启动，正在等待验证结果…";
@@ -251,47 +256,6 @@ function renderToolResult(
   if (toolName === "execute_typescript") return undefined;
   const summary = publicStatusText(stringIn(result, "summary", "message", "title"));
   return summary ? statusLine(summary) : undefined;
-}
-
-function renderMeterSphereCall(toolName: string, input: Record<string, unknown>, taskTopic?: string): string {
-  const topic = inferTopic(stringField(input, "keyword", "query", "name", "moduleName", "module_name")) || taskTopic || "相关需求";
-  if (toolName === "metersphere_commit_case_plan") {
-    const count = caseCount(input);
-    return statusLine(`正在提交${count === undefined ? "测试用例" : `${count} 条测试用例`}并执行独立回查…`);
-  }
-  if (toolName.includes("list_modules") || toolName.includes("upsert_module")) return statusLine(`正在查找${topic}的用例目录…`);
-  if (toolName.includes("list_test_cases")) return statusLine(`正在查找${topic}的历史用例…`);
-  if (toolName.includes("get_test_case_detail")) return "正在查看相关测试用例详情…";
-  const count = caseCount(input);
-  if (toolName.includes("bulk_upsert")) {
-    return statusLine(booleanField(input, "dry_run", "dryRun")
-      ? `正在核对${count === undefined ? "用例" : `${count} 条用例`}的变更计划…`
-      : `正在写入${count === undefined ? "测试用例" : `${count} 条测试用例`}…`);
-  }
-  if (toolName.includes("create_test_case")) return "正在创建新的测试用例…";
-  if (toolName.includes("edit") || toolName.includes("batch_edit")) return statusLine(`正在更新${count === undefined ? "相关测试用例" : `${count} 条测试用例`}…`);
-  return "正在核对 MeterSphere 测试用例…";
-}
-
-function renderMeterSphereResult(toolName: string, input: Record<string, unknown>, result: unknown): string {
-  const count = resultCount(result) ?? caseCount(input);
-  if (toolName === "metersphere_commit_case_plan") {
-    return statusLine(`已完成${count === undefined ? "测试用例" : ` ${count} 条测试用例`}写入与独立回查…`);
-  }
-  if (toolName.includes("list_modules")) return statusLine(count === undefined ? "已找到相关用例目录…" : `已找到 ${count} 个相关用例目录…`);
-  if (toolName.includes("list_test_cases")) return statusLine(count === undefined
-    ? "已找到相关历史用例，正在检查覆盖情况…"
-    : `已找到 ${count} 条相关用例，正在检查覆盖情况…`);
-  if (toolName.includes("get_test_case_detail")) return "已读取测试用例详情，正在核对覆盖…";
-  if (toolName.includes("bulk_upsert")) {
-    return statusLine(booleanField(input, "dry_run", "dryRun")
-      ? `已生成${count === undefined ? "用例" : `${count} 条用例`}变更计划，正在核对…`
-      : `已提交${count === undefined ? "用例" : `${count} 条用例`}变更，正在回查结果…`);
-  }
-  if (toolName.includes("create") || toolName.includes("edit") || toolName.includes("upsert")) {
-    return "用例变更已提交，正在回查结果…";
-  }
-  return "已读取 MeterSphere 用例信息…";
 }
 
 function renderToolFailure(toolName: string, input: Record<string, unknown>): string {
@@ -312,7 +276,7 @@ function renderToolFailure(toolName: string, input: Record<string, unknown>): st
   if (toolName.startsWith("figma_")) return "暂时无法读取设计稿，正在调整处理方式…";
   if (toolName.startsWith("lark_")) return "暂时无法读取飞书文档，正在调整处理方式…";
   if (toolName.startsWith("slack_")) return "暂时无法读取 Slack 讨论，正在调整处理方式…";
-  if (toolName.startsWith("metersphere_")) return "暂时无法读取 MeterSphere，正在调整处理方式…";
+  if (toolName.startsWith("case_hub_")) return "暂时无法访问 Case Hub，正在核对 Change Set 状态…";
   return "当前资料读取失败，正在重新判断下一步…";
 }
 
@@ -378,7 +342,7 @@ function contentText(content: unknown): string | undefined {
 function inferTopic(value: string | undefined): string | undefined {
   if (!value) return undefined;
   const text = sanitizeText(value).replace(/https?:\/\/\S+/giu, " ");
-  const known = [...text.matchAll(/\b(?:MeterSphere|GitHub|Jira|Slack|Figma|Pre-auth|Split Payment|E2E|Playwright|Maestro)\b/giu)].at(-1)?.[0];
+  const known = [...text.matchAll(/\b(?:Case Hub|GitHub|Jira|Slack|Figma|Pre-auth|Split Payment|E2E|Playwright)\b/giu)].at(-1)?.[0];
   if (known) return known;
   const issue = text.match(/\b[A-Z][A-Z0-9]+-\d+\b/u)?.[0];
   if (issue) return issue;
@@ -447,18 +411,6 @@ function resultCount(value: unknown): number | undefined {
     ?? (Array.isArray(value) ? value.length : undefined);
 }
 
-function caseCount(input: Record<string, unknown>): number | undefined {
-  const direct = numberField(input, "item_count", "itemCount", "count", "total");
-  if (direct !== undefined) return direct;
-  const items = input.items;
-  if (Array.isArray(items)) return items.length;
-  if (typeof items === "string") {
-    const parsed = parseJson(items);
-    return Array.isArray(parsed) ? parsed.length : undefined;
-  }
-  return undefined;
-}
-
 function numberIn(value: unknown, ...keys: string[]): number | undefined {
   if (Array.isArray(value)) {
     for (const item of value) {
@@ -510,11 +462,6 @@ function stringField(value: Record<string, unknown>, ...keys: string[]): string 
 function numberField(value: Record<string, unknown>, ...keys: string[]): number | undefined {
   for (const key of keys) if (typeof value[key] === "number" && Number.isFinite(value[key])) return value[key] as number;
   return undefined;
-}
-
-function booleanField(value: Record<string, unknown>, ...keys: string[]): boolean {
-  for (const key of keys) if (typeof value[key] === "boolean") return value[key] as boolean;
-  return false;
 }
 
 function prLabel(pullNumber?: number): string {

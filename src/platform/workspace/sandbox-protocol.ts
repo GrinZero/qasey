@@ -50,6 +50,12 @@ export const SandboxExecuteRequestSchema = z.object({
 export const SandboxCodeTaskStartSchema = z.object({
   spec: CodeTaskSpecSchema,
   context: z.string().max(256 * 1024),
+  secrets: z.object({
+    environment: z.object({
+      QASEY_E2E_BASE_URL: z.url().optional(),
+      QASEY_E2E_SESSION_TOKEN: z.string().min(32).max(512).optional(),
+    }).strict().refine(value => Boolean(value.QASEY_E2E_BASE_URL) === Boolean(value.QASEY_E2E_SESSION_TOKEN), "E2E base URL and session token must be provided together").optional(),
+  }).strict().optional(),
 }).strict();
 export const SandboxCodeTaskCancelSchema = z.object({
   reason: z.string().min(1).max(2_000),

@@ -66,7 +66,7 @@ export interface QaseyRun {
   status: RunStatus;
   framework: "playwright" | "maestro";
   platform: "web" | "app";
-  sourceCaseIds: string[];
+  changeSetId: string;
   createdAt: string;
   updatedAt: string;
   branch?: string;
@@ -74,6 +74,24 @@ export interface QaseyRun {
   error?: string;
   repository: { owner: string; repository: string; baseRef: string };
   artifacts: Artifact[];
+}
+
+export interface CaseHubCase {
+  id: string; suitePath: string; title: string; activeVersionId?: string; proposedVersionIds: string[]; updatedAt: string;
+}
+
+export interface CaseHubChangeSet {
+  id: string; status: string; revision: number; caseVersionIds: string[]; runId?: string; branch?: string; pullRequestUrl?: string;
+  requirement: { goal: string; requirementSummary: string }; updatedAt: string;
+}
+
+export interface CaseHubCaseVersion {
+  id: string; caseId: string; version: number; suitePath: string; title: string; description: string; priority: "P0" | "P1" | "P2" | "P3";
+  preconditions: string[]; steps: Array<{ action: string; expected: string[] }>; tags: string[]; automationPath: string; contentHash: string; status: string;
+}
+
+export interface CaseHubResult {
+  id: string; changeSetId: string; runId: string; caseId: string; caseVersionId: string; attempt: number; executionStatus: string; reviewStatus: string; feedback?: string; artifacts: Artifact[];
 }
 
 export interface AuditRecord {

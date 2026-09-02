@@ -1,9 +1,5 @@
 {
   "servers": {
-    "metersphere": {
-      "url": "https://metersphere-mcp.example.com/mcp",
-      "auth": { "type": "bearer", "tokenEnv": "QASEY_MCP_BEARER_TOKEN" }
-    },
     "figma": {
       "url": "https://mcp.figma.com/mcp",
       "auth": { "type": "oauth" }

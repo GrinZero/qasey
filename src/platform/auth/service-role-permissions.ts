@@ -2,7 +2,7 @@ import type { PermissionService } from "./permission-store.ts";
 
 export const SERVICE_ROLE_PERMISSIONS = {
   "qasey-ingress": ["qasey.channel.receive"],
-  "orchestration-worker": ["platform.workflow-events.receive", "qasey.e2e.execute", "qasey.case-workflow.execute"],
+  "orchestration-worker": ["platform.workflow-events.receive", "qasey.e2e.execute", "qasey.cases.read", "qasey.cases.write", "qasey.results.read"],
   "platform-service": [
     "platform.catalog.read",
     "platform.metrics.read",
@@ -11,6 +11,10 @@ export const SERVICE_ROLE_PERMISSIONS = {
     "qasey.e2e.execute",
     "qasey.runs.read",
     "qasey.runs.write",
+    "qasey.cases.read",
+    "qasey.cases.write",
+    "qasey.results.read",
+    "qasey.test-environments.provision",
   ],
 } as const;
 

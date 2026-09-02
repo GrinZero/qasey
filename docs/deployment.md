@@ -8,6 +8,52 @@ compatible PostgreSQL service remains supported.
 
 Requirements: Node.js 24, Corepack, and Docker.
 
+To run the complete local stack only with Docker:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.runtime.yml up --build -d
+```
+
+`pnpm compose:runtime` is the equivalent repository shortcut.
+
+This builds and starts the trusted service image, a single development Sandbox,
+PostgreSQL, Redis, and a finite migration job. The application is available at
+`http://localhost:4111/admin`. Set `OPENAI_API_KEY` in the ignored `.env` file
+or the invoking shell before startup. The Sandbox is ready immediately, while
+the unused distributed orchestration Worker artifact is omitted from this local
+standalone build profile. Production image builds retain that artifact.
+Code Task authoring remains fail-closed until an authorized
+`config/e2e-repository.json` is created from the redacted example. Compose's
+fixed local keys, HTTP-only internal Sandbox endpoint, and `isolation=none` are
+development conveniences inside the outer container boundary; they are not a
+production deployment profile.
+
+The image build derives the deployed source commit from the checkout and writes
+it to `.qasey/build-metadata.json`; the service image contains that artifact but
+does not contain `.git`. Do not add a manually maintained source-SHA variable.
+The Case Hub records this build fact and independently compares it with the
+frozen repository base SHA before provisioning an E2E fixture.
+
+For source development inside the same Linux and Node.js baseline, open the
+repository with the checked-in `.devcontainer/devcontainer.json`. It combines
+`docker-compose.yml` and `docker-compose.dev.yml`, mounts the source at `/app`,
+and keeps the Sandbox in a separate container. After attaching, run:
+
+```bash
+pnpm dev:container
+```
+
+The external-Sandbox development mode intentionally skips the host Chromium
+installation and local Sandbox child process. `pnpm compose:dev` can be used
+before attaching an editor to the `development` service, and
+`pnpm compose:dev:down` stops that stack. Development-only source mounts,
+dependencies, and file watchers are not copied into either release image. The
+development and runtime compositions use independent project names and volumes;
+override the published application, PostgreSQL, and Redis ports before running
+both at the same time.
+
+For source development directly on the host:
+
 ```bash
 sh scripts/bootstrap.sh
 pnpm dev

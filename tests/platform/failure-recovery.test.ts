@@ -95,6 +95,6 @@ function fixtureRun(scope: OwnerScope, id: string): E2ERun {
     platform: "web", framework: "playwright", repository: {
       owner: "example", repository: "web", cloneUrl: "https://github.com/example/web.git", baseRef: "main", allowedPaths: ["tests"], skillsPaths: [],
     },
-    sourceCaseIds: ["case"], contextSnapshot, caseSnapshot: [], amendments: [], codeTaskIds: [], artifacts: [], createdAt, updatedAt: createdAt,
+    changeSetId: "97bb25db-18df-428e-af86-be305ad8b2ff", contextSnapshot, caseSnapshot: [], amendments: [], codeTaskIds: [], artifacts: [], createdAt, updatedAt: createdAt,
   };
 }

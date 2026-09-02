@@ -47,8 +47,8 @@ describe("subject MCP lifecycle", () => {
 
 describe("workflow durability contracts", () => {
   it("builds owner-scoped stable external-write keys", () => {
-    expect(externalWriteIdempotencyKey({ applicationId: "qasey", tenantId: "tenant/a", workflowId: "case-write", runId: "run-1", effect: "metersphere" }))
-      .toBe("qasey:tenant%2Fa:case-write:run-1:metersphere");
+    expect(externalWriteIdempotencyKey({ applicationId: "qasey", tenantId: "tenant/a", workflowId: "case-write", runId: "run-1", effect: "case-hub" }))
+      .toBe("qasey:tenant%2Fa:case-write:run-1:case-hub");
   });
 
   it("allows bounded JSON snapshots and rejects process-bound state", () => {

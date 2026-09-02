@@ -144,11 +144,11 @@ const capabilityMatchers: Record<string, (toolName: string) => boolean> = {
   github_read: name => name === "github_local_read",
   jira_read: name => name.startsWith("jira_"),
   lark_doc_read: name => name.startsWith("lark_"),
-  metersphere_read: name => /metersphere_ms_(list|get)_/.test(name),
-  metersphere_dry_run: name => name === "metersphere_ms_bulk_upsert_test_cases",
-  metersphere_write: name => /metersphere_ms_(?:bulk_upsert|create|edit|batch_edit|upsert_module)/.test(name),
-  metersphere_readback: name => /metersphere_ms_(list|get)_/.test(name),
-  metersphere_delete: name => /metersphere.*delete/i.test(name),
+  case_hub_read: name => name === "case_hub_search_cases" || name === "case_hub_get_change_set",
+  case_hub_plan: name => name === "case_hub_create_change_set",
+  case_hub_change_set_write: name => name === "case_hub_create_change_set",
+  case_hub_result_read: name => name === "case_hub_get_change_set",
+  case_hub_direct_mutation: name => name === "case_hub_direct_mutation",
 };
 
 function capabilitySatisfied(capability: string, toolNames: Set<string>): boolean {
@@ -167,7 +167,7 @@ function collectToolNames(value: unknown, output = new Set<string>()): Set<strin
   if (isLocalRepositoryRead(object)) output.add("github_local_read");
   for (const key of ["toolName", "name", "toolId"] as const) {
     const candidate = object[key];
-    if (typeof candidate === "string" && /^(?:mastra_workspace_execute_command|metersphere_|qaExperience_|figma_|slack_|jira_|lark_|rag_|e2e)/.test(candidate)) {
+    if (typeof candidate === "string" && /^(?:mastra_workspace_execute_command|case_hub_|qaExperience_|figma_|slack_|jira_|lark_|rag_|e2e)/.test(candidate)) {
       output.add(candidate);
     }
   }

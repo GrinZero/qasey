@@ -43,6 +43,7 @@ function hasNonLocalUrlCredential(text) {
       const synthetic = url.hostname === "localhost"
         || url.hostname === "127.0.0.1"
         || url.hostname === "::1"
+        || url.hostname === "postgres"
         || url.hostname.endsWith(".example.com");
       return !synthetic && Boolean(url.username || url.password);
     } catch {

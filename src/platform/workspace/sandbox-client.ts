@@ -11,6 +11,7 @@ import {
   type CodeTaskSpec,
   type CodeTaskState,
 } from "../../../packages/contracts/src/index.ts";
+import type { CodeTaskSecrets } from "../../../packages/code-task/src/index.ts";
 import type {
   SandboxBrowserActionSchema, SandboxDesktopActionSchema, SandboxDesktopApplicationSchema,
   SandboxDesktopStartSchema, SandboxDesktopToolSchema, SandboxLease, SandboxLeaseScope,
@@ -54,6 +55,10 @@ export class SandboxPoolClient {
         signal: AbortSignal.timeout(Math.min(this.requestTimeoutMs, 2_000)),
       });
       if (!response.ok) throw new Error(`Sandbox replica ${ordinal} is not ready`);
+      const readiness = await response.json() as { capabilities?: unknown };
+      if (!Array.isArray(readiness.capabilities) || !readiness.capabilities.includes("native-mastra")) {
+        throw new Error(`Sandbox replica ${ordinal} does not advertise native-mastra`);
+      }
     }));
     const failed = results.flatMap((result, ordinal) => result.status === "rejected" ? [ordinal] : []);
     if (failed.length > 0) throw new Error(`Sandbox replicas are not ready: ${failed.join(",")}`);
@@ -205,10 +210,10 @@ export class SandboxRuntimeSession {
     });
   }
 
-  async codeTaskStart(spec: CodeTaskSpec, context: string): Promise<CodeTaskState> {
+  async codeTaskStart(spec: CodeTaskSpec, context: string, secrets?: CodeTaskSecrets): Promise<CodeTaskState> {
     const result = await this.request(`/v1/sessions/${encodeURIComponent(this.lease.sessionId)}/code-tasks`, {
       method: "POST",
-      body: JSON.stringify({ spec, context }),
+      body: JSON.stringify({ spec, context, ...(secrets ? { secrets } : {}) }),
     });
     return CodeTaskStateSchema.parse(result);
   }

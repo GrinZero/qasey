@@ -45,7 +45,7 @@ const runs = [
     status: "awaiting_qa",
     framework: "playwright",
     platform: "web",
-    sourceCaseIds: ["case-1"],
+    changeSetId: "97bb25db-18df-428e-af86-be305ad8b2ff",
     createdAt: "2026-08-26T02:00:00.000Z",
     updatedAt: "2026-08-26T02:05:00.000Z",
     branch: "qasey/browser-gate",
@@ -65,7 +65,7 @@ const runs = [
     status: "succeeded",
     framework: "maestro",
     platform: "app",
-    sourceCaseIds: ["case-2"],
+    changeSetId: "d825e3e4-9dc3-4ad6-829c-2f31ead90bbb",
     createdAt: "2026-08-25T02:00:00.000Z",
     updatedAt: "2026-08-25T02:10:00.000Z",
     repository: { owner: "example", repository: "mobile-sample", baseRef: "main" },
@@ -100,6 +100,14 @@ async function installAuthenticatedApiMocks(page: Page, diagnostics: BrowserDiag
     }
     if (request.method() === "GET" && url.pathname === "/v1/runs") {
       await json(route, { runs });
+      return;
+    }
+    if (request.method() === "GET" && url.pathname === "/v1/case-hub/cases") {
+      await json(route, { cases: [] });
+      return;
+    }
+    if (request.method() === "GET" && url.pathname === "/v1/case-hub/change-sets") {
+      await json(route, { changeSets: [] });
       return;
     }
     if (url.pathname.startsWith("/admin/api/") || url.pathname.startsWith("/v1/")) {
@@ -270,7 +278,7 @@ test("authenticated user can open the platform and navigate the Qasey applicatio
   await expect(page.getByText("example/sample-app", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: /^待我审阅/u }).click();
-  await expect(page.getByRole("heading", { name: "待我审阅" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "测试用例与变更审阅" })).toBeVisible();
   await page.getByRole("button", { name: /^待处理/u }).click();
   await expect(page.getByRole("heading", { name: "需要你的判断" })).toBeVisible();
   await page.getByRole("button", { name: /^活动/u }).click();
@@ -284,7 +292,8 @@ test("primary routes survive direct navigation and unknown paths render the 404 
     ["/admin/activity", "所有 Agent 的工作轨迹"],
     ["/admin/apps/qasey", "把需求变成可验证的结论"],
     ["/admin/apps/qasey/runs", "追踪每一次验证"],
-    ["/admin/apps/qasey/reviews", "待我审阅"],
+    ["/admin/apps/qasey/cases", "测试用例与变更审阅"],
+    ["/admin/apps/qasey/reviews", "测试用例与变更审阅"],
   ] as const;
 
   for (const [path, heading] of primaryRoutes) {

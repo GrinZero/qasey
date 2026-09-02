@@ -121,9 +121,9 @@ export const ConfigSchema = z.object({
   GITHUB_APP_INSTALLATION_ID: optionalPositiveInteger,
   GITHUB_APP_PRIVATE_KEY: optionalGitHubPrivateKey,
   GITHUB_ORG: optionalString,
+  GITHUB_WEBHOOK_SECRET: optionalString,
   QASEY_PUBLIC_BASE_URL: z.url().default("http://localhost:4111"),
   QASEY_MCP_CONFIG_FILE: z.string().default("config/mcp.json"),
-  QASEY_REQUIRE_METERSPHERE_MCP: optionalBoolean,
   QASEY_MCP_OAUTH_DIR: z.string().default(".qasey/oauth"),
   QASEY_ENABLE_STUDIO_MCP_PREVIEW: optionalBoolean,
   QASEY_ENABLE_DATADOG: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
@@ -136,8 +136,6 @@ export const ConfigSchema = z.object({
   DD_ENV: optionalString,
   DD_VERSION: optionalString,
   QASEY_OBSERVABILITY_DB_PATH: z.string().min(1).default(".qasey/observability.duckdb"),
-  METERSPHERE_BASE_URL: optionalUrl,
-  METERSPHERE_PROJECT_ID: z.preprocess(value => value === "" ? undefined : value, z.string().uuid().optional()),
   QASEY_ENABLE_CODE_MODE: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
   QASEY_CODE_MODE_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(600_000).default(180_000),
   QASEY_CODE_MODE_MEMORY_LIMIT_MB: z.coerce.number().int().min(32).max(512).default(128),
@@ -318,8 +316,7 @@ export const ConfigSchema = z.object({
     const globalConnectionKeys = [
       "SLACK_BOT_TOKEN", "SLACK_USER_TOKEN", "SLACK_SIGNING_SECRET", "SLACK_SOCKET_MODE_APP_TOKEN",
       "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN", "JIRA_WEBHOOK_TOKEN",
-      "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY", "GITHUB_ORG",
-      "METERSPHERE_BASE_URL", "METERSPHERE_PROJECT_ID",
+      "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY", "GITHUB_ORG", "GITHUB_WEBHOOK_SECRET",
     ] as const;
     for (const key of globalConnectionKeys) {
       if (value[key] !== undefined) context.addIssue({

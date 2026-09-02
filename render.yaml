@@ -45,7 +45,5 @@ services:
         value: "false"
       - key: QASEY_ENABLE_LOCAL_CODE_MODE
         value: "false"
-      - key: QASEY_REQUIRE_METERSPHERE_MCP
-        value: "false"
       - key: QASEY_ENABLE_DATADOG
         value: "false"

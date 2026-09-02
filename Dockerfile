@@ -1,9 +1,26 @@
 FROM node:24-bookworm-slim@sha256:a9f5f7c91a432850b2a8a7797adf5eadb6c733ceed61167806cee7ea7fbc29df AS dependencies
+ARG DEBIAN_MIRROR=http://deb.debian.org/debian
+ARG DEBIAN_SECURITY_MIRROR=http://deb.debian.org/debian-security
 ENV CI=true
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends python3 make g++ \
+RUN sed -i \
+    -e "s|URIs: http://deb.debian.org/debian$|URIs: ${DEBIAN_MIRROR}|" \
+    -e "s|URIs: http://deb.debian.org/debian-security$|URIs: ${DEBIAN_SECURITY_MIRROR}|" \
+    /etc/apt/sources.list.d/debian.sources \
+  && attempt=0; \
+  until apt-get -o Acquire::http::Timeout=30 update; do \
+    attempt=$((attempt + 1)); \
+    if [ "$attempt" -ge 10 ]; then exit 1; fi; \
+    sleep 2; \
+  done \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    g++ \
+    git \
+    make \
+    openssh-client \
+    python3 \
   && rm -rf /var/lib/apt/lists/*
 RUN corepack enable
 WORKDIR /app
@@ -18,11 +35,40 @@ COPY packages/adapters/package.json packages/adapters/package.json
 COPY packages/e2e/package.json packages/e2e/package.json
 RUN pnpm install --frozen-lockfile
 
+FROM dependencies AS development
+ENV NODE_ENV=development
+ENV CI=
+ENV PNPM_CONFIG_STORE_DIR=/pnpm/store
+ENV pnpm_config_verify_deps_before_run=false
+RUN corepack enable pnpm \
+  && corepack install --global pnpm@11.21.0 \
+  && test "$(pnpm --version)" = "11.21.0" \
+  && install -d -o node -g node /home/node/.cache /home/node/.cache/node /home/node/.cache/mastra \
+  && cp -a /root/.cache/node/corepack /home/node/.cache/node/corepack
+RUN install -d -o node -g node -m 0750 /app/.qasey \
+  && chown -R node:node /app /pnpm /home/node/.cache/node/corepack
+USER node
+CMD ["sleep", "infinity"]
+
 FROM dependencies AS build
+ARG QASEY_BUILD_PROFILE=release
 COPY . .
 # MCP endpoint metadata is business-owned and versioned with the application.
 # Credentials remain runtime-injected environment variables.
-RUN pnpm build
+RUN pnpm exec tsx scripts/write-build-metadata.ts \
+  && if [ "$QASEY_BUILD_PROFILE" = "compose" ]; then \
+      pnpm db:generate \
+      && pnpm admin-ui:build \
+      && pnpm exec tsup \
+      && pnpm exec mastra build --dir src/mastra --studio \
+      && install -d .mastra/worker \
+      && node scripts/copy-mastra-skills.mjs; \
+    elif [ "$QASEY_BUILD_PROFILE" = "release" ]; then \
+      pnpm build; \
+    else \
+      echo "Unknown QASEY_BUILD_PROFILE: $QASEY_BUILD_PROFILE" >&2; \
+      exit 64; \
+    fi
 
 # Install a service-only dependency closure. Browser/CUA packages are omitted;
 # Prisma is retained because migrate is an explicit service image role.
@@ -61,7 +107,12 @@ RUN pnpm install --prod --frozen-lockfile
 FROM mcr.microsoft.com/playwright:v1.62.1-noble@sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e AS sandbox-runtime
 ENV NODE_ENV=production
 ENV PATH="/app/node_modules/.bin:${PATH}"
-RUN apt-get update \
+RUN attempt=0; \
+  until apt-get -o Acquire::http::Timeout=30 update; do \
+    attempt=$((attempt + 1)); \
+    if [ "$attempt" -ge 10 ]; then exit 1; fi; \
+    sleep 2; \
+  done \
   && apt-get install -y --no-install-recommends \
     at-spi2-core \
     bubblewrap \
@@ -133,9 +184,20 @@ CMD ["sandbox"]
 # The trusted control plane is the default build target. It uses a minimal Node
 # base and ships only API, Worker supervisor, migration, and Admin UI artifacts.
 FROM node:24-bookworm-slim@sha256:a9f5f7c91a432850b2a8a7797adf5eadb6c733ceed61167806cee7ea7fbc29df AS service-runtime
+ARG DEBIAN_MIRROR=http://deb.debian.org/debian
+ARG DEBIAN_SECURITY_MIRROR=http://deb.debian.org/debian-security
 ENV NODE_ENV=production
 ENV PATH="/app/node_modules/.bin:${PATH}"
-RUN apt-get update \
+RUN sed -i \
+    -e "s|URIs: http://deb.debian.org/debian$|URIs: ${DEBIAN_MIRROR}|" \
+    -e "s|URIs: http://deb.debian.org/debian-security$|URIs: ${DEBIAN_SECURITY_MIRROR}|" \
+    /etc/apt/sources.list.d/debian.sources \
+  && attempt=0; \
+  until apt-get -o Acquire::http::Timeout=30 update; do \
+    attempt=$((attempt + 1)); \
+    if [ "$attempt" -ge 10 ]; then exit 1; fi; \
+    sleep 2; \
+  done \
   && apt-get install -y --no-install-recommends ca-certificates openssl \
   && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
@@ -143,6 +205,7 @@ COPY --from=service-dependencies /service/node_modules ./node_modules
 COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=build /app/.mastra/output ./.mastra/output
 COPY --from=build /app/.mastra/worker ./.mastra/worker
+COPY --chown=node:node --from=build /app/.qasey/build-metadata.json ./.qasey/build-metadata.json
 COPY --from=build /app/dist/worker-supervisor.mjs /app/dist/worker-supervisor.mjs.map ./dist/
 COPY --from=build /app/apps/admin-ui/dist ./apps/admin-ui/dist
 COPY --from=service-dependencies /service/package.json ./package.json
@@ -158,6 +221,7 @@ RUN for binary in bwrap git gh ssh python3 make gcc g++ Xvfb playwright; do \
         exit 1; \
       fi; \
     done \
+  && test ! -e /app/.git \
   && test ! -e /ms-playwright \
   && test ! -e /app/dist/sandbox-runtime.mjs \
   && for modules in /app/node_modules /app/.mastra/output/node_modules /app/.mastra/worker/node_modules; do \
@@ -173,6 +237,7 @@ RUN for binary in bwrap git gh ssh python3 make gcc g++ Xvfb playwright; do \
        fi; \
      done \
   && chown node:node /app \
+  && install -d -o node -g node -m 0750 /app/.qasey \
   && install -d -o node -g node -m 0750 /app/.mastra/output/workspace
 USER node
 EXPOSE 8080

@@ -9,9 +9,6 @@ describe("Qasey application access policy", () => {
     const application = createQaseyApplication({
       e2eModule: { e2eLifecycleWorkflow: { id: "qasey-e2e-lifecycle" } },
       scorerModule: { qaseyEvalScorers: { "qasey-quality": { id: "qasey-quality" } } },
-      caseWorkflowModule: {
-        meterSphereCaseOperationWorkflow: { id: "qasey-metersphere-case-operation" },
-      },
       routeModule: { qaseyOwnedApiRoutes: [] },
     } as unknown as QaseyApplicationModules);
 

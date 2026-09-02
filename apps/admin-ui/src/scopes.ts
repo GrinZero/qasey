@@ -47,9 +47,24 @@ const SCOPE_PRESENTATIONS: Readonly<Record<string, ScopePresentation>> = {
     description: "创建、重新执行或取消自动化运行。",
     accessLevel: "写入",
   },
-  "qasey.runs.approve": {
-    label: "QA 审核",
-    description: "为自动化运行提交 QA 审核结论。",
+  "qasey.cases.read": {
+    label: "测试用例",
+    description: "查看 Case Hub 中的用例、版本与 Change Set。",
+    accessLevel: "只读",
+  },
+  "qasey.cases.write": {
+    label: "管理测试用例",
+    description: "创建 Case Hub Change Set 和不可变用例版本。",
+    accessLevel: "写入",
+  },
+  "qasey.results.read": {
+    label: "测试结果",
+    description: "查看逐 Case 的执行结果与证据。",
+    accessLevel: "只读",
+  },
+  "qasey.results.approve": {
+    label: "逐 Case 审核",
+    description: "批准、打回或阻塞单条 Case Result。",
     accessLevel: "写入",
   },
   "qasey.sandbox.use": {

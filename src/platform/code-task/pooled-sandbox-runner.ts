@@ -5,6 +5,7 @@ import type { ArtifactRef, CodeTaskSpec } from "../../../packages/contracts/src/
 import type {
   CodeTaskRunner,
   CodeTaskRunnerProvider,
+  CodeTaskSecrets,
   TaskHandle,
 } from "../../../packages/code-task/src/index.ts";
 import type { SandboxLeaseScope } from "../workspace/sandbox-protocol.ts";
@@ -35,7 +36,7 @@ class BoundPooledSandboxCodeTaskRunner implements CodeTaskRunner {
     private readonly resolveArtifact: CodeTaskArtifactResolver,
   ) {}
 
-  async submit(spec: CodeTaskSpec): Promise<TaskHandle> {
+  async submit(spec: CodeTaskSpec, secrets?: CodeTaskSecrets): Promise<TaskHandle> {
     if (spec.scope.applicationId !== this.scope.applicationId
       || spec.scope.tenantId !== this.scope.tenantId
       || spec.scope.sessionId !== this.scope.sessionId) {
@@ -50,7 +51,7 @@ class BoundPooledSandboxCodeTaskRunner implements CodeTaskRunner {
       await this.session.filesystem({ operation: "writeFile", path, content: content.toString("base64"), encoding: "base64", recursive: true, overwrite: false });
       submitted = { ...spec, inputPatchRef: { ...spec.inputPatchRef, uri: `sandbox://${path}` } };
     }
-    const state = await this.session.codeTaskStart(submitted, context);
+    const state = await this.session.codeTaskStart(submitted, context, secrets);
     return { taskId: state.taskId, attemptId: state.attemptId, status: state.status };
   }
 

@@ -4,7 +4,7 @@ import { z } from "zod";
 import { describe, expect, it, vi } from "vitest";
 import type { QaseyRequestContext } from "../../packages/contracts/src/index.ts";
 import { AgentProgressSession } from "../../packages/domain/src/index.ts";
-import { buildQaseyAgentTooling, createAgentProgressTool, getRuntimeContext, guardCaseMutationsForWorkflow, mcpCatalog, omitMeterSphereCaseMutations, partitionQaseyCodeModeTools, studioMcpPreviewEnabled, toolsForRequest } from "../../src/mastra/runtime.ts";
+import { buildQaseyAgentTooling, createAgentProgressTool, getRuntimeContext, mcpCatalog, partitionQaseyCodeModeTools, studioMcpPreviewEnabled, toolsForRequest } from "../../src/mastra/runtime.ts";
 
 describe("Qasey runtime context", () => {
   it("keeps missing context strict for production callers", () => {
@@ -30,21 +30,21 @@ describe("Qasey runtime context", () => {
     requestContext.set("applicationId", "qasey");
     requestContext.set("ingressSource", "mastra-studio");
     const listModules = createTool({
-      id: "metersphere_ms_list_modules",
-      description: "List MeterSphere modules",
+      id: "figma_figma_list_pages",
+      description: "List Figma pages",
       inputSchema: z.object({}),
       outputSchema: z.object({ modules: z.array(z.string()) }),
       execute: async () => ({ modules: [] }),
     });
     const discover = vi.spyOn(mcpCatalog, "toolsForDiscovery").mockResolvedValue({
-      metersphere_ms_list_modules: listModules,
+      figma_figma_list_pages: listModules,
     });
 
     const tools = await toolsForRequest(requestContext);
 
     expect(studioMcpPreviewEnabled).toBe(false);
     expect(discover).not.toHaveBeenCalled();
-    expect(tools).not.toHaveProperty("metersphere_ms_list_modules");
+    expect(tools).not.toHaveProperty("figma_figma_list_pages");
     discover.mockRestore();
   });
 
@@ -87,7 +87,7 @@ describe("Qasey runtime context", () => {
       execute: async ({ path }) => ({ path }),
     });
     const writeTool = createTool({
-      id: "metersphere_ms_bulk_upsert_test_cases",
+      id: "case_hub_create_change_set",
       description: "Write test cases",
       inputSchema: z.object({ items: z.array(z.string()) }),
       execute: async ({ items }) => ({ count: items.length }),
@@ -101,24 +101,24 @@ describe("Qasey runtime context", () => {
 
     const partitioned = partitionQaseyCodeModeTools({
       github_get_file: readTool,
-      metersphere_ms_bulk_upsert_test_cases: writeTool,
+      caseHubCreateChangeSet: writeTool,
       qasey_report_progress: progressTool,
     });
     expect(Object.keys(partitioned.codeModeTools)).toEqual(["github_get_file"]);
     expect(Object.keys(partitioned.directTools)).toEqual([
-      "metersphere_ms_bulk_upsert_test_cases",
+      "caseHubCreateChangeSet",
       "qasey_report_progress",
     ]);
 
     const tooling = await buildQaseyAgentTooling({
       github_get_file: readTool,
-      metersphere_ms_bulk_upsert_test_cases: writeTool,
+      caseHubCreateChangeSet: writeTool,
       qasey_report_progress: progressTool,
     });
     expect(tooling.codeModeToolNames).toEqual([]);
     expect(Object.keys(tooling.tools)).toEqual([
       "github_get_file",
-      "metersphere_ms_bulk_upsert_test_cases",
+      "caseHubCreateChangeSet",
       "qasey_report_progress",
     ]);
     expect(tooling.codeModeInstructions).toBeUndefined();
@@ -150,21 +150,14 @@ describe("Qasey runtime context", () => {
     };
     requestContext.set("qasey-context", context);
     requestContext.set("agent-progress-session", new AgentProgressSession(() => undefined));
-    const rawMutation = createTool({
-      id: "metersphere_ms_bulk_upsert_test_cases",
-      description: "Raw bulk mutation",
-      inputSchema: z.object({ items: z.string(), dry_run: z.boolean() }),
-      execute: async () => ({ ok: true }),
-    });
     const listCases = createTool({
-      id: "metersphere_ms_list_test_cases",
-      description: "List cases",
+      id: "figma_figma_list_pages",
+      description: "List pages",
       inputSchema: z.object({}),
       execute: async () => ({ cases: [] }),
     });
     const discovery = vi.spyOn(mcpCatalog, "toolsForDiscovery").mockResolvedValue({
-      metersphere_ms_bulk_upsert_test_cases: rawMutation,
-      metersphere_ms_list_test_cases: listCases,
+      figma_figma_list_pages: listCases,
     });
 
     const tools = await toolsForRequest(requestContext);
@@ -172,9 +165,8 @@ describe("Qasey runtime context", () => {
 
     expect(tooling.tools).toHaveProperty("getCurrentTime");
     expect(tooling.tools).toHaveProperty("qasey_report_progress");
-    expect(tooling.tools).toHaveProperty("e2eCreateRun");
-    expect(tooling.tools).toHaveProperty("metersphere_ms_list_test_cases");
-    expect(tooling.tools).not.toHaveProperty("metersphere_ms_bulk_upsert_test_cases");
+    expect(tooling.tools).toHaveProperty("caseHubCreateChangeSet");
+    expect(tooling.tools).toHaveProperty("figma_figma_list_pages");
     expect(tooling.codeModeToolNames).toEqual([]);
     discovery.mockRestore();
   });
@@ -280,47 +272,6 @@ return files;`,
       message: "upstream unavailable",
     });
     expect(observedSpans).toContainEqual({ name: "code-mode:execute_typescript", status: "success" });
-  });
-
-  it("keeps the internal case-mutation guard fail-closed for real writes", async () => {
-    const bulkExecute = vi.fn(async () => ({ ok: true }));
-    const createExecute = vi.fn(async () => ({ ok: true }));
-    const guarded = guardCaseMutationsForWorkflow({
-      metersphere_ms_bulk_upsert_test_cases: createTool({
-        id: "metersphere_ms_bulk_upsert_test_cases",
-        description: "test bulk upsert",
-        inputSchema: z.object({ items: z.string(), dry_run: z.boolean() }),
-        execute: bulkExecute,
-      }),
-      metersphere_ms_create_test_case: createTool({
-        id: "metersphere_ms_create_test_case",
-        description: "test single create",
-        inputSchema: z.object({ name: z.string() }),
-        execute: createExecute,
-      }),
-    });
-    const bulk = (guarded.metersphere_ms_bulk_upsert_test_cases as { execute: (input: unknown, context: unknown) => Promise<unknown> }).execute;
-    const create = (guarded.metersphere_ms_create_test_case as { execute: (input: unknown, context: unknown) => Promise<unknown> }).execute;
-
-    await expect(bulk({ items: "[]", dry_run: true }, {})).resolves.toEqual({ ok: true });
-    await expect(bulk({ items: "[]", dry_run: false }, {})).rejects.toThrow(/owned by the MeterSphere case operation workflow/i);
-    await expect(create({ name: "case" }, {})).rejects.toThrow(/owned by the MeterSphere case operation workflow/i);
-    expect(bulkExecute).toHaveBeenCalledTimes(1);
-    expect(createExecute).not.toHaveBeenCalled();
-  });
-
-  it("removes raw case mutations from the production Agent catalogue", () => {
-    const tools = omitMeterSphereCaseMutations({
-      metersphere_ms_bulk_upsert_test_cases: { description: "raw mutation" } as never,
-      metersphere_ms_create_test_case: { description: "raw mutation" } as never,
-      metersphere_ms_list_test_cases: { description: "read" } as never,
-      metersphere_ms_upsert_module: { description: "separate module capability" } as never,
-    });
-
-    expect(tools).not.toHaveProperty("metersphere_ms_bulk_upsert_test_cases");
-    expect(tools).not.toHaveProperty("metersphere_ms_create_test_case");
-    expect(tools).toHaveProperty("metersphere_ms_list_test_cases");
-    expect(tools).toHaveProperty("metersphere_ms_upsert_module");
   });
 
   it("exposes qasey_report_progress as an agent-callable structured tool", async () => {

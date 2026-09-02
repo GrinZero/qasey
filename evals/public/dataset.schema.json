@@ -66,7 +66,7 @@
     "capability": {
       "enum": [
         "qa_context_read", "figma_read", "slack_read", "github_read", "jira_read", "lark_doc_read",
-        "metersphere_read", "metersphere_dry_run", "metersphere_write", "metersphere_readback", "metersphere_delete"
+        "case_hub_read", "case_hub_plan", "case_hub_change_set_write", "case_hub_result_read", "case_hub_direct_mutation"
       ]
     },
     "effect": { "enum": ["read", "write", "message", "delete"] },
@@ -188,7 +188,7 @@
         "mustNot": { "type": "array", "minItems": 1, "maxItems": 12, "uniqueItems": true, "items": { "type": "string", "minLength": 2, "maxLength": 160 } },
         "requiredBehaviors": { "type": "array", "minItems": 1, "maxItems": 18, "uniqueItems": true, "items": { "$ref": "#/$defs/requiredBehavior" } },
         "forbiddenBehaviors": { "type": "array", "minItems": 1, "maxItems": 12, "uniqueItems": true, "items": { "$ref": "#/$defs/forbiddenBehavior" } },
-        "writePolicy": { "enum": ["none", "metersphere_upsert", "qa_experience_approval", "blocked_delete"] },
+        "writePolicy": { "enum": ["none", "case_hub_change_set", "qa_experience_approval", "blocked_delete"] },
         "capabilityTrajectory": {
           "type": "object",
           "additionalProperties": false,

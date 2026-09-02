@@ -8,13 +8,15 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 let workflow = "";
 let manifest: { scripts?: Record<string, string> } = {};
 let playwrightConfig = "";
+let dogfoodPlaywrightConfig = "";
 let browserSuite = "";
 
 beforeAll(async () => {
-  [workflow, manifest, playwrightConfig, browserSuite] = await Promise.all([
+  [workflow, manifest, playwrightConfig, dogfoodPlaywrightConfig, browserSuite] = await Promise.all([
     readFile(resolve(projectRoot, ".github/workflows/ci.yml"), "utf8"),
     readFile(resolve(projectRoot, "package.json"), "utf8").then(source => JSON.parse(source) as typeof manifest),
     readFile(resolve(projectRoot, "playwright.config.ts"), "utf8"),
+    readFile(resolve(projectRoot, "tests/browser/playwright.config.ts"), "utf8"),
     readFile(resolve(projectRoot, "tests/browser/admin-ui.spec.ts"), "utf8"),
   ]);
 });
@@ -56,6 +58,14 @@ describe("Admin UI browser gate", () => {
     expect(workflow.slice(uploadIndex)).toContain("path: output/playwright/");
     expect(playwrightConfig).toContain('trace: "retain-on-failure"');
     expect(playwrightConfig).toContain('screenshot: "only-on-failure"');
+  });
+
+  it("keeps real dogfood evidence in a separate always-recording config", () => {
+    expect(dogfoodPlaywrightConfig).toContain('video: "on"');
+    expect(dogfoodPlaywrightConfig).toContain('trace: "on"');
+    expect(dogfoodPlaywrightConfig).toContain('["json"');
+    expect(dogfoodPlaywrightConfig).toContain('["html"');
+    expect(dogfoodPlaywrightConfig).toContain("QASEY_E2E_STORAGE_STATE_PATH");
   });
 
   it("keeps workflow actions immutable and permissions read-only", () => {

@@ -48,7 +48,7 @@
     "capability": {
       "enum": [
         "qa_context_read", "figma_read", "slack_read", "github_read", "jira_read", "lark_doc_read",
-        "metersphere_read", "metersphere_dry_run", "metersphere_write", "metersphere_readback", "metersphere_delete"
+        "case_hub_read", "case_hub_plan", "case_hub_change_set_write", "case_hub_result_read", "case_hub_direct_mutation"
       ]
     },
     "toolEvent": {

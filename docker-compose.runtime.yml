@@ -1,0 +1,106 @@
+name: qasey-runtime
+
+x-service-image: &service-image
+  image: qasey-service:local
+  build:
+    context: .
+    target: service-runtime
+    args:
+      QASEY_BUILD_PROFILE: compose
+
+services:
+  migrate:
+    <<: *service-image
+    command: ["sh", "ci/start.sh", "migrate"]
+    environment:
+      DATABASE_URL: postgresql://postgres:${QASEY_POSTGRES_PASSWORD:-postgres}@postgres:5432/qasey
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  sandbox-0:
+    image: qasey-sandbox:local
+    build:
+      context: .
+      target: sandbox-runtime
+      args:
+        QASEY_BUILD_PROFILE: compose
+    environment:
+      NODE_ENV: development
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      QASEY_CODE_AGENT_MODEL: ${QASEY_CODE_AGENT_MODEL:-gpt-5.6-sol}
+      QASEY_DATA_ROOT: /app/.qasey/data
+      QASEY_SANDBOX_CONTROL_KEY: ${QASEY_SANDBOX_CONTROL_KEY:-local-compose-sandbox-control-key-000000000001}
+      QASEY_SANDBOX_ISOLATION: none
+      QASEY_SANDBOX_MAX_SESSIONS: 1
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:4120/readyz"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - qasey-sandbox:/app/.qasey/data
+
+  qasey:
+    <<: *service-image
+    command: ["sh", "ci/start.sh", "api"]
+    env_file:
+      - .env.example
+    environment:
+      NODE_ENV: development
+      PORT: 4111
+      QASEY_DEPLOYMENT_MODE: standalone
+      QASEY_DEPLOYMENT_ID: local-compose
+      QASEY_INSTANCE_ID: local-compose-api-0
+      QASEY_SINGLE_TENANT_ID: local
+      QASEY_PUBLIC_BASE_URL: http://localhost:${QASEY_APP_PORT:-4111}
+      DATABASE_URL: postgresql://postgres:${QASEY_POSTGRES_PASSWORD:-postgres}@postgres:5432/qasey
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      QASEY_USE_REDIS_DURABILITY: ${QASEY_USE_REDIS_DURABILITY:-false}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      QASEY_MEMORY_MODEL: ${QASEY_MEMORY_MODEL:-gpt-5.6-luna}
+      QASEY_MAIN_MODEL: ${QASEY_MAIN_MODEL:-gpt-5.6-sol}
+      QASEY_CODE_AGENT_MODEL: ${QASEY_CODE_AGENT_MODEL:-gpt-5.6-sol}
+      QASEY_CREDENTIAL_ENCRYPTION_KEY: ${QASEY_CREDENTIAL_ENCRYPTION_KEY:-local-compose-credential-key-000000000000000001}
+      QASEY_CREDENTIAL_ACTIVE_KEY_ID: ${QASEY_CREDENTIAL_ACTIVE_KEY_ID:-default}
+      QASEY_SANDBOX_ENDPOINT_TEMPLATE: http://sandbox-{ordinal}:4120
+      QASEY_SANDBOX_REPLICAS: 1
+      QASEY_SANDBOX_MAX_SESSIONS: 1
+      QASEY_SANDBOX_CONTROL_KEY: ${QASEY_SANDBOX_CONTROL_KEY:-local-compose-sandbox-control-key-000000000001}
+      QASEY_SANDBOX_LEASE_KEY: ${QASEY_SANDBOX_LEASE_KEY:-local-compose-sandbox-lease-key-0000000000002}
+      QASEY_E2E_REPOSITORY_CONFIG_FILE: /app/config/e2e-repository.json
+      QASEY_ENABLE_CODE_MODE: ${QASEY_ENABLE_CODE_MODE:-false}
+      QASEY_ENABLE_LOCAL_CODE_MODE: "false"
+      QASEY_ENABLE_DATADOG: ${QASEY_ENABLE_DATADOG:-false}
+    ports:
+      - "${QASEY_APP_PORT:-4111}:4111"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      sandbox-0:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:4111/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    volumes:
+      - qasey-app:/app/.qasey
+      - ./config:/app/config:ro
+
+volumes:
+  qasey-app:
+  qasey-sandbox:

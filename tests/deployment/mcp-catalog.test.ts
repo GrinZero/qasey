@@ -15,7 +15,7 @@ describe("deployment MCP catalogue", () => {
     ]);
     const catalogue = JSON.parse(catalogueText) as { servers?: Record<string, unknown> };
 
-    expect(catalogue.servers).toHaveProperty("metersphere");
+    expect(catalogue.servers).toHaveProperty("figma");
     expect(dockerignore).not.toContain("!.qasey/mcp.json");
     expect(environment).toContain("QASEY_MCP_CONFIG_FILE=config/mcp.json");
     expect(dockerfile).toContain("COPY --from=build /app/config ./config");

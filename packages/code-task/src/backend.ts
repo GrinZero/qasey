@@ -105,6 +105,8 @@ export class NativeMastraCodingBackend implements CodingAgentBackend {
         "Inspect existing tests, page objects, helpers, and conventions before implementing.",
         "Use only Workspace filesystem tools. Repository checks run deterministically after you finish.",
         "Never read, print, or persist credentials. Never weaken assertions to hide a product or environment failure.",
+        "For Playwright, map exactly one test to each Case Hub case. Put the QASEY case id in the title and add qasey.case and qasey.version annotations using the frozen id and versionHash. Never use test.only or unapproved skip.",
+        "Use QASEY_E2E_BASE_URL for the test deployment and configure Playwright storageState from QASEY_E2E_STORAGE_STATE_PATH when present. Never read or print the storage-state file.",
         request.profile.writable
           ? `You may write only under: ${writablePaths.join(", ") || "no paths"}.`
           : "This execution profile is read-only; do not modify files.",

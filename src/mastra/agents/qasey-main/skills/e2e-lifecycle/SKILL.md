@@ -1,6 +1,6 @@
 ---
 name: e2e-lifecycle
-description: 统一处理 E2E lifecycle：从已验收 QA 用例生成新 run、重跑已有 run、依据失败证据修复测试实现，或只读查询 run 状态与 artifacts。
+description: 统一处理 Case Hub 与 E2E lifecycle：从需求提交候选 Case Change Set、生成 Playwright、逐 Case 审阅、重跑或查询状态与证据。
 ---
 
 # E2E Lifecycle
@@ -9,7 +9,7 @@ System prompt 已识别的 intent 决定执行 `e2e_generate`、`e2e_rerun`、`e
 
 ## 共享约束
 
-- Web 使用 Playwright，App 使用 Maestro；所有状态、结果和 artifacts 只以真实 lifecycle 事件为准。
+- 首期只支持 Web Chromium Playwright；所有状态、结果和 artifacts 只以真实 lifecycle 事件为准。
 - 不直接修改仓库、扩大允许路径、绕过 clean verifier、自动合并 PR，或用 Author workspace 的结果替代独立验证。
 - 缺少关键 run、来源用例、仓库或执行条件时不猜测。
 
@@ -18,18 +18,18 @@ System prompt 已识别的 intent 决定执行 `e2e_generate`、`e2e_rerun`、`e
 - E2E Case 落地 Web 目标仓库固定读取部署方通过 `QASEY_E2E_REPOSITORY_CONFIG_FILE` 提供的、未提交到 Git 的配置，不得从用户文本选择、替换或扩大目标仓库和允许路径。
 - Web 项目根目录、允许路径、Playwright config 和 project 名称都从该配置读取。Verifier 根据 patch 涉及的 project 选择 config；有具体变更 spec 时只验证这些 spec，否则验证受影响 project。
 - 调用创建工具前，把当前消息、thread memory、附件及前序工具证据整理成结构化 handoff：目标、需求摘要、范围、已确认决策、约束、假设、关键流、边界、负向场景、数据需求、仓库发现、阻塞问题和证据引用。
-- MeterSphere 是结构化用例基线，不是唯一上下文来源；不得丢弃前序对话中已经确认但未写入 MeterSphere 的信息。
+- Case Hub 是结构化用例的唯一真相源；Git 只保存 Playwright，不保存 Case YAML。
 - 有未解决的阻塞问题时先向用户澄清，不得启动 E2E。
-- 确认来源用例、平台和运行前置条件；仓库、base ref 和允许路径由 Skill 与 lifecycle 冻结。
-- `sourceCaseIds` 优先原样使用 `ms_list_test_cases` 返回的 canonical UUID `id`，不要误传展示用的数字 `num`。若用户只提供数字编号，可用该数字作为 `name` 查询并核对结果中的 `num` 与 `id`；lifecycle 也会对遗留纯数字输入做一次精确解析。
-- 通过发现到的 E2E 创建工具启动 run；确定性 lifecycle 负责 workspace、author、有限 repair、clean verifier、artifacts、Draft PR 和 QA verdict。
+- 先用 `case_hub_search_cases` 查重，再把 create/update proposal 与 Requirement Snapshot 一次性交给 `case_hub_create_change_set`。
+- 每条 Case 必须有稳定 `QASEY-N` ID、完整步骤/预期、优先级、suite、tags 和 automationPath；更新必须引用现有 Case ID。
+- 确定性 lifecycle 负责 sandbox、Native Mastra author、有限 repair、fresh verifier、artifacts、Draft PR 和逐 Case Review。
 - 创建成功只表示 run 已进入 lifecycle，不表示代码、验证或 PR 已完成。
 
 返回真实 run ID、平台/框架、当前状态、查看入口和下一等待阶段。
 
 ## e2e_rerun：重跑
 
-- 定位真实旧 run，确认仓库、framework、来源用例和可重跑条件。
+- 定位真实旧 run，确认 Change Set、仓库、framework 和可重跑条件。
 - 创建新的 run，不复用旧 run ID、覆盖旧 artifacts 或顺带修改测试实现。
 
 同时标明来源 run、新 run、当前状态、执行环境和 artifacts 或阻塞入口。

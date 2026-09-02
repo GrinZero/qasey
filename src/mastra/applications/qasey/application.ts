@@ -3,21 +3,20 @@ import type { AgentApplicationBundle } from "../../../runtime/application.ts";
 export interface QaseyApplicationModules {
   e2eModule: Pick<typeof import("../../workflows/e2e-workflow.ts"), "e2eLifecycleWorkflow">;
   scorerModule: Pick<typeof import("../../scorers/eval-scorers.ts"), "qaseyEvalScorers">;
-  caseWorkflowModule: Pick<typeof import("../../workflows/metersphere-case-workflow.ts"), "meterSphereCaseOperationWorkflow">;
   routeModule: Pick<typeof import("./routes.ts"), "qaseyOwnedApiRoutes">;
 }
 
 /**
  * Public Qasey catalog. Intent selection lives inside qasey-main through
- * Agent-level Skills. The MeterSphere workflow is registered because durable snapshots require
- * the runtime lifecycle, and its service-only policy blocks public callers.
+ * Agent-level Skills. Case Hub mutations are exposed only through owned API and
+ * Agent tools that create immutable change plans.
  *
  * The composition root supplies code-registered primitives. File-discovered
  * Agents remain catalog metadata here and are instantiated once by the Mastra
  * generated entry. Importing this definition must not construct infrastructure.
  */
 export function createQaseyApplication(modules: QaseyApplicationModules): AgentApplicationBundle {
-  const { e2eModule, scorerModule, caseWorkflowModule, routeModule } = modules;
+  const { e2eModule, scorerModule, routeModule } = modules;
   const qaseyEvalScorers = scorerModule.qaseyEvalScorers;
   return {
     id: "qasey",
@@ -33,7 +32,6 @@ export function createQaseyApplication(modules: QaseyApplicationModules): AgentA
     filesystemAgents: ["qasey-main"],
     workflows: {
       "qasey-e2e-lifecycle": e2eModule.e2eLifecycleWorkflow,
-      "qasey-metersphere-case-operation": caseWorkflowModule.meterSphereCaseOperationWorkflow,
     },
     scorers: qaseyEvalScorers,
     access: {
@@ -44,7 +42,6 @@ export function createQaseyApplication(modules: QaseyApplicationModules): AgentA
       },
       workflows: {
         "qasey-e2e-lifecycle": { permission: "qasey.e2e.execute", audiences: ["admin-ui", "api", "service"] },
-        "qasey-metersphere-case-operation": { permission: "qasey.case-workflow.execute", audiences: ["admin-ui", "api", "service"] },
       },
       scorers: Object.fromEntries(Object.keys(qaseyEvalScorers).map(id => [
         id,

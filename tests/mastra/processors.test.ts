@@ -170,53 +170,38 @@ describe("qasey-main processors", () => {
     }));
   });
 
-  it("keeps MeterSphere case-management tools out of semantic search", () => {
+  it("keeps mutating Case Hub tools out of semantic search", () => {
     const direct = { description: "direct" } as never;
     const optional = { description: "optional" } as never;
     const partitioned = partitionQaseyDirectTools({
-      metersphere_ms_list_modules: direct,
-      metersphere_ms_list_test_cases: direct,
-      metersphere_ms_get_test_case_detail: direct,
-      metersphere_ms_bulk_upsert_test_cases: direct,
-      metersphere_commit_case_plan: direct,
+      caseHubCreateChangeSet: direct,
+      caseHubSearchCases: optional,
       slack_search_messages: optional,
     });
 
     expect(Object.keys(partitioned.directTools).sort()).toEqual([
-      "metersphere_commit_case_plan",
-      "metersphere_ms_get_test_case_detail",
-      "metersphere_ms_list_modules",
-      "metersphere_ms_list_test_cases",
+      "caseHubCreateChangeSet",
     ]);
     expect(Object.keys(partitioned.searchableTools)).toEqual([
-      "metersphere_ms_bulk_upsert_test_cases",
+      "caseHubSearchCases",
       "slack_search_messages",
     ]);
   });
 
-  it("injects the trusted commit Tool and never exposes the raw bulk mutation", async () => {
+  it("injects the trusted Case Hub change-set Tool", async () => {
     const requestContext = new RequestContext<any>();
     requestContext.set("qasey-context", {
       requestId: "request-1", channel: "api", sessionId: "session-1", chatInput: "create cases",
       actor: { id: "actor-1" }, source: {}, attachments: [],
     });
-    const rawBulk = createTool({
-      id: "metersphere_ms_bulk_upsert_test_cases",
-      description: "raw bulk mutation",
-      inputSchema: z.object({ items: z.string(), dry_run: z.boolean() }),
-      execute: async () => ({ ok: true }),
-    });
-    const discovery = vi.spyOn(mcpCatalog, "toolsForDiscovery").mockResolvedValue({
-      metersphere_ms_bulk_upsert_test_cases: rawBulk,
-    });
+    const discovery = vi.spyOn(mcpCatalog, "toolsForDiscovery").mockResolvedValue({});
 
     const processors = await resolveQaseyMainInputProcessors({ requestContext });
     const directResult = await processors[2]!.processInputStep!({ tools: {} } as never) as {
       tools: Record<string, unknown>;
     };
 
-    expect(directResult.tools).toHaveProperty("metersphere_commit_case_plan");
-    expect(directResult.tools).not.toHaveProperty("metersphere_ms_bulk_upsert_test_cases");
+    expect(directResult.tools).toHaveProperty("caseHubCreateChangeSet");
     discovery.mockRestore();
   });
 });

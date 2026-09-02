@@ -14,6 +14,46 @@ Blueprint；发布仓库 URL 确定后，再由维护者添加绑定该 URL 的�
 
 ## 本地运行
 
+只需要 Docker 时，可以直接启动包含 Qasey、数据库、Redis、迁移任务和单副本
+Sandbox 的完整本地栈：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.runtime.yml up --build -d
+```
+
+已安装 pnpm 时也可以使用快捷命令 `pnpm compose:runtime`。
+
+打开 `http://localhost:4111/admin`。Compose 会自动构建隔离的
+`service-runtime` / `sandbox-runtime` 镜像、等待依赖健康并执行 Prisma migration；
+本地构建会跳过 standalone 不使用的 orchestration Worker artifact，以降低首次构建
+的时间与磁盘峰值；
+`docker compose -f docker-compose.yml -f docker-compose.runtime.yml logs -f qasey`
+可查看应用日志，`pnpm compose:runtime:down` 停止服务且保留数据卷。模型调用需要先
+在被 Git 忽略的 `.env` 中填写 `OPENAI_API_KEY`，或在命令前注入该变量。Code Task
+的 Sandbox 已启动，但目标仓库仍必须由部署者显式配置：将
+`config/e2e-repository.example.json` 复制为被忽略的
+`config/e2e-repository.json` 并填写获授权的仓库。
+
+Compose 使用固定的本地开发密钥与容器内 HTTP Sandbox 网络，只用于本机开发；生产
+环境应使用下文的角色隔离镜像和外部密钥管理，不得复用这些默认值。
+
+需要在与部署相同的 Linux、Node.js 和网络拓扑中开发时，使用 Dev Container。VS Code
+执行 **Dev Containers: Reopen in Container** 后会组合 `docker-compose.yml` 与
+`docker-compose.dev.yml`，将源码挂载到 `/app`，并启动 PostgreSQL、Redis 和独立的
+Sandbox。进入容器后运行：
+
+```bash
+pnpm dev:container
+```
+
+也可以先用 `pnpm compose:dev` 创建同一套容器，再让支持 Compose Remote 的编辑器附着
+到 `development` 服务。此模式保留 API/Sandbox 隔离，但开发容器额外包含源码、开发
+依赖和文件监听器；发布前仍应使用 runtime Compose 或 CI 验证最终镜像。development
+与 runtime 使用独立的 Compose project 和数据卷；若要同时运行，需要通过
+`QASEY_APP_PORT`、`QASEY_POSTGRES_PORT` 和 `QASEY_REDIS_PORT` 为其中一套调整宿主机端口。
+
+需要直接在宿主机修改源码并热更新时，使用原生开发流程：
+
 ```bash
 corepack enable
 sh scripts/bootstrap.sh
@@ -58,9 +98,8 @@ PostgreSQL/Redis 并执行 Prisma migration。首次运行后应按需要填写�
 - `SLACK_BOT_TOKEN`、`SLACK_SIGNING_SECRET`；本地 Socket Mode 可用 `SLACK_SOCKET_MODE_APP_TOKEN`（仅用于兼容原有单 App 配置）
 - `JIRA_BASE_URL`、`JIRA_EMAIL`、`JIRA_API_TOKEN`、`JIRA_WEBHOOK_TOKEN`
 - `GITHUB_APP_ID`、`GITHUB_APP_INSTALLATION_ID`、`GITHUB_APP_PRIVATE_KEY`：GitHub App installation authentication
-- `QASEY_MCP_CONFIG_FILE`、`QASEY_MCP_OAUTH_DIR`；MCP 默认不配置，只有
-  `QASEY_REQUIRE_METERSPHERE_MCP=true` 时静态单租户 MeterSphere 才参与 readiness 门禁；
-  multi 模式仅允许静态 subject-bound OAuth，Bearer MCP 必须保存为租户加密外部连接
+- `QASEY_MCP_CONFIG_FILE`、`QASEY_MCP_OAUTH_DIR`；MCP 默认不配置；multi
+  模式仅允许静态 subject-bound OAuth，Bearer MCP 必须保存为租户加密外部连接
 - `MASTRA_ENCRYPTION_KEY`、`MASTRA_ENCRYPTION_ACTIVE_KEY_ID` 与
   `MASTRA_ENCRYPTION_PREVIOUS_KEYS`：OAuth MCP token 的独立版本化 keyring；生产启用
   OAuth MCP 时需要，并支持 read-old/write-new 与启动时 CAS 重加密

@@ -34,7 +34,7 @@ describe("API token store", () => {
     })).resolves.toBe(true);
     await expect(permissions.authorize({
       principal: principal!, applicationId: "qasey", resourceType: "route", resourceId: "runs",
-      action: "approve", permission: "qasey.runs.approve",
+      action: "approve", permission: "qasey.results.approve",
     })).resolves.toBe(false);
     expect((await store.list("tenant-1"))[0]?.lastUsedAt).toBeTruthy();
   });

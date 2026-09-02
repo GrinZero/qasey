@@ -47,7 +47,7 @@ describe("Qasey Slack progress", () => {
       step: 1,
       inputMessages: [
         { role: "user", content: [{ type: "text", text: "帮我写 Sell Product / Package 支持 Split Payment 的 case" }] },
-        { role: "system", content: [{ type: "text", text: "# MeterSphere 测试用例管理 System prompt" }] },
+        { role: "system", content: [{ type: "text", text: "# Case Hub 测试用例管理 System prompt" }] },
       ],
     })).toBe("正在理解 Split Payment 的测试需求…");
 
@@ -68,8 +68,8 @@ describe("Qasey Slack progress", () => {
       step: 1,
       toolCallId: "skill-1",
       toolName: "skill",
-      args: { name: "metersphere-case-management" },
-    })).toBe("正在加载MeterSphere 用例规范…");
+      args: { name: "e2e-lifecycle" },
+    })).toBe("正在加载E2E 执行规范…");
 
     expect(projector.project({
       type: "tool-result",
@@ -77,7 +77,7 @@ describe("Qasey Slack progress", () => {
       step: 1,
       toolCallId: "skill-1",
       toolName: "skill",
-      result: "# MeterSphere 测试用例管理 System prompt",
+      result: "# Case Hub 测试用例管理 System prompt",
       isError: false,
     })).toBeUndefined();
 
@@ -87,8 +87,8 @@ describe("Qasey Slack progress", () => {
       step: 1,
       toolCallId: "search-1",
       toolName: "search_tools",
-      args: { query: "MeterSphere 测试用例管理" },
-    })).toBe("正在查找MeterSphere相关能力…");
+      args: { query: "Case Hub 测试用例管理" },
+    })).toBe("正在查找Case Hub相关能力…");
 
     expect(projector.project({
       type: "tool-result",
@@ -98,7 +98,7 @@ describe("Qasey Slack progress", () => {
       toolName: "search_tools",
       result: { list_items: [{}, {}, {}, {}], has_more: false },
       isError: false,
-    })).toBe("已准备好 4 个MeterSphere相关工具…");
+    })).toBe("已准备好 4 个Case Hub相关工具…");
   });
 
   it("describes local GitHub workspace, Jira, Slack, Figma, and Lark events semantically", () => {
@@ -184,46 +184,46 @@ describe("Qasey Slack progress", () => {
     expect(larkStatus).not.toContain("secret-document-token");
   });
 
-  it("explains MeterSphere reads and writes by user-visible intent and counts", () => {
+  it("explains Case Hub reads and writes by user-visible intent", () => {
     const projector = new SlackAgentStatusProjector();
 
     expect(projector.project({
       type: "tool-call",
       runId: "run-1",
       step: 1,
-      toolCallId: "ms-list-1",
-      toolName: "metersphere_ms_list_test_cases",
-      args: { module_id: "split-payment", keyword: "Split Payment", page: 1 },
-    })).toBe("正在查找Split Payment的历史用例…");
+      toolCallId: "case-list-1",
+      toolName: "case_hub_search_cases",
+      args: { query: "Split Payment" },
+    })).toBe("正在读取 Case Hub 用例与审核状态…");
 
     expect(projector.project({
       type: "tool-result",
       runId: "run-1",
       step: 1,
-      toolCallId: "ms-list-1",
-      toolName: "metersphere_ms_list_test_cases",
+      toolCallId: "case-list-1",
+      toolName: "case_hub_search_cases",
       result: { total: 2, items: [{}, {}], has_more: false },
       isError: false,
-    })).toBe("已找到 2 条相关用例，正在检查覆盖情况…");
+    })).toBe("已读取 Case Hub 用例与审核状态…");
 
     expect(projector.project({
       type: "tool-call",
       runId: "run-1",
       step: 1,
-      toolCallId: "ms-write-1",
-      toolName: "metersphere_commit_case_plan",
+      toolCallId: "case-write-1",
+      toolName: "case_hub_create_change_set",
       args: { items: [{ name: "case 1" }, { name: "case 2" }] },
-    })).toBe("正在提交2 条测试用例并执行独立回查…");
+    })).toBe("正在冻结候选用例并启动 E2E 验证…");
 
     expect(projector.project({
       type: "tool-result",
       runId: "run-1",
       step: 1,
-      toolCallId: "ms-write-1",
-      toolName: "metersphere_commit_case_plan",
+      toolCallId: "case-write-1",
+      toolName: "case_hub_create_change_set",
       result: { status: "committed_and_verified", itemCount: 2, createdCount: 2, updatedCount: 0, verifiedCount: 2 },
       isError: false,
-    })).toBe("已完成 2 条测试用例写入与独立回查…");
+    })).toBe("Change Set 已创建，正在隔离环境中生成和验证 Playwright…");
   });
 
   it("uses progress and step conclusions directly while hiding internal acknowledgements", () => {
@@ -270,7 +270,7 @@ describe("Qasey Slack progress", () => {
       runId: "run-1",
       step: 3,
       finishReason: "tool-calls",
-      text: "# MeterSphere System prompt 已识别的 intent 决定",
+      text: "# Case Hub System prompt 已识别的 intent 决定",
       toolCalls: [],
     })).toBeUndefined();
   });
@@ -343,7 +343,7 @@ describe("Qasey Slack progress", () => {
         runId: "run-1",
         step: 12,
         toolCallId: "call-1",
-        toolName: "metersphere_ms_bulk_upsert_test_cases_with_a_very_long_runtime_name",
+        toolName: "case_hub_create_change_set_with_a_very_long_runtime_name",
         args: { repository: "payment-service", pullNumber: 1823, operation: "upsert-many-cases" },
       }),
       projector.project({

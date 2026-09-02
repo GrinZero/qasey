@@ -59,15 +59,14 @@ describe("shared runtime architecture boundaries", () => {
     }
   });
 
-  it("routes public Qasey tasks directly to the Durable Agent and keeps writes behind a domain Tool", async () => {
-    const [toolSource, routeSource, adminApiSource] = await Promise.all([
-      readFile(join(projectRoot, "src/mastra/applications/qasey/metersphere-case-tools.ts"), "utf8"),
+  it("routes public Qasey tasks directly to the Durable Agent and keeps writes behind Case Hub", async () => {
+    const [runtimeSource, routeSource, adminApiSource] = await Promise.all([
+      readFile(join(projectRoot, "src/mastra/runtime.ts"), "utf8"),
       readFile(join(projectRoot, "src/mastra/applications/qasey/routes.ts"), "utf8"),
       readFile(join(projectRoot, "apps/admin-ui/src/api.ts"), "utf8"),
     ]);
     await expect(access(join(projectRoot, "src/mastra/workflows/qasey-task-workflow.ts"))).rejects.toMatchObject({ code: "ENOENT" });
-    expect(toolSource).toContain('id: METERSPHERE_COMMIT_CASE_PLAN_TOOL_NAME');
-    expect(toolSource).toContain("runMeterSphereCaseOperationWorkflow");
+    expect(runtimeSource).toContain('id: "case_hub_create_change_set"');
     expect(routeSource).not.toContain('getAgent("qasey-main").generate');
     expect(routeSource).toContain("executeQasey");
     expect(routeSource).not.toContain("runQaseyTaskWorkflow");

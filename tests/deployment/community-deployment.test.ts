@@ -30,8 +30,15 @@ describe("community deployment", () => {
   });
 
   it("provides reproducible local infrastructure and redacted configuration", async () => {
-    const [compose, example, bootstrap, configuration] = await Promise.all([
+    const [compose, runtimeCompose, developmentCompose, devcontainer, mastraEnv, dockerfile, manifest, devScript, example, bootstrap, configuration] = await Promise.all([
       readFile(resolve(projectRoot, "docker-compose.yml"), "utf8"),
+      readFile(resolve(projectRoot, "docker-compose.runtime.yml"), "utf8"),
+      readFile(resolve(projectRoot, "docker-compose.dev.yml"), "utf8"),
+      readFile(resolve(projectRoot, ".devcontainer/devcontainer.json"), "utf8"),
+      readFile(resolve(projectRoot, ".devcontainer/mastra.env"), "utf8"),
+      readFile(resolve(projectRoot, "Dockerfile"), "utf8"),
+      readFile(resolve(projectRoot, "package.json"), "utf8"),
+      readFile(resolve(projectRoot, "scripts/dev.ts"), "utf8"),
       readFile(resolve(projectRoot, ".env.example"), "utf8"),
       readFile(resolve(projectRoot, "scripts/bootstrap.sh"), "utf8"),
       readFile(resolve(projectRoot, "docs/configuration.md"), "utf8"),
@@ -40,6 +47,52 @@ describe("community deployment", () => {
     expect(compose).toContain("redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf");
     expect(compose).toContain("${QASEY_POSTGRES_PORT:-5432}:5432");
     expect(compose).toContain("${QASEY_REDIS_PORT:-6379}:6379");
+    expect(compose).not.toContain("service-runtime");
+    expect(runtimeCompose).toContain("name: qasey-runtime");
+    expect(runtimeCompose).toContain("target: service-runtime");
+    expect(runtimeCompose).toContain("target: sandbox-runtime");
+    expect(runtimeCompose).toContain("QASEY_BUILD_PROFILE: compose");
+    expect(runtimeCompose).toContain('command: ["sh", "ci/start.sh", "migrate"]');
+    expect(runtimeCompose).toContain("condition: service_completed_successfully");
+    expect(runtimeCompose).toContain("QASEY_SANDBOX_ENDPOINT_TEMPLATE: http://sandbox-{ordinal}:4120");
+    expect(runtimeCompose).toContain("${QASEY_APP_PORT:-4111}:4111");
+    expect(developmentCompose).toContain("target: development");
+    expect(developmentCompose).toContain("name: qasey-dev");
+    expect(developmentCompose).toContain("target: sandbox-runtime");
+    expect(developmentCompose).toContain('command: ["sh", "-lc", "pnpm db:generate && exec pnpm db:migrate:deploy"]');
+    expect(developmentCompose).toContain('CI: "true"');
+    expect(developmentCompose).toContain("condition: service_completed_successfully");
+    expect(developmentCompose).toContain('command: ["sleep", "infinity"]');
+    expect(developmentCompose).toContain("- .:/app");
+    expect(developmentCompose).not.toContain("- .env.example");
+    expect(developmentCompose).toContain("QASEY_SANDBOX_ENDPOINT_TEMPLATE: http://sandbox-{ordinal}:4120");
+    expect(runtimeCompose).not.toContain("privileged: true");
+    expect(developmentCompose).not.toContain("privileged: true");
+    expect(runtimeCompose).not.toContain("SYS_ADMIN");
+    expect(developmentCompose).not.toContain("SYS_ADMIN");
+    expect(dockerfile).toContain("FROM dependencies AS development");
+    expect(dockerfile).toContain("ENV PNPM_CONFIG_STORE_DIR=/pnpm/store");
+    expect(dockerfile).toContain("ENV pnpm_config_verify_deps_before_run=false");
+    expect(dockerfile).toContain("/home/node/.cache/mastra");
+    expect(dockerfile).toContain("install -d -o node -g node -m 0750 /app/.qasey");
+    expect(devScript).toContain('argument !== "--external-sandbox"');
+    expect(devScript).toContain('"http://sandbox-{ordinal}:4120"');
+    expect(devScript).toContain('".devcontainer/mastra.env"');
+    expect(devScript).toContain('import "../src/load-env.ts"');
+    expect(mastraEnv).toContain("NODE_ENV=development");
+    expect(mastraEnv).not.toMatch(/(?:KEY|PASSWORD|TOKEN)=\S+/u);
+    expect(JSON.parse(manifest).scripts).toMatchObject({
+      "dev:container": "tsx scripts/dev.ts --external-sandbox",
+      "compose:dev": expect.stringContaining("docker-compose.dev.yml"),
+      "compose:runtime": expect.stringContaining("docker-compose.runtime.yml"),
+    });
+    expect(JSON.parse(devcontainer)).toMatchObject({
+      dockerComposeFile: ["../docker-compose.yml", "../docker-compose.dev.yml"],
+      service: "development",
+      workspaceFolder: "/app",
+      remoteUser: "node",
+      postCreateCommand: "CI=true pnpm install --frozen-lockfile",
+    });
     expect(example).toContain("DATABASE_URL=postgresql://postgres:postgres@localhost:5432/qasey");
     expect(example).toContain("QASEY_INSTANCE_ID=");
     expect(example).toContain("QASEY_DEPLOYMENT_ID=");

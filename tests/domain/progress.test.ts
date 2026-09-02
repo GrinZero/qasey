@@ -40,7 +40,7 @@ describe("agent-driven progress", () => {
     const session = new AgentProgressSession(() => undefined);
     await expect(session.report({
       milestone: "write_result",
-      title: "MeterSphere 写入完成",
+      title: "Case Hub Change Set 已提交",
       detail: "所有用例已经成功写入。",
       status: "working",
     })).resolves.toMatchObject({ accepted: false, reason: "unverified_completion_claim" });

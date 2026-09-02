@@ -7,12 +7,13 @@ import {
   QaVerdictSchema,
   RunStatusSchema,
   type CreateE2ERun,
+  type ArtifactRef,
   type E2ERun,
   type OwnerScope,
   type QaVerdict,
 } from "../../../packages/contracts/src/index.ts";
-import { canonicalMeterSphereCaseIdFromList, isCanonicalMeterSphereCaseId, testCaseSpecFromMeterSphere } from "../../../packages/domain/src/index.ts";
-import { config, e2eCoordinator, getRuntimeContext, githubClient, mcpCatalog, mcpSubject, runRepository } from "../runtime.ts";
+import { caseHubVersionToTestCase, type CaseExecutionObservation } from "../../../packages/domain/src/index.ts";
+import { artifactStore, caseHubRepository, config, e2eCoordinator, getRuntimeContext, githubClient, runRepository } from "../runtime.ts";
 import { ownerScopeFromRequestContext } from "../../platform/context/owner-scope.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY, PlatformRequestContextSchema } from "../../platform/context/schema.ts";
 import { startQaseyCorrelatedSpan } from "../applications/qasey/observability.ts";
@@ -28,7 +29,7 @@ const WorkflowOutputSchema = z.object({
 
 const freezeExecutionBriefStep = createStep({
   id: "freeze-e2e-execution-brief",
-  description: "冻结同会话上下文、MeterSphere 完整用例、仓库 base SHA 与固定执行配置。",
+  description: "冻结同会话需求、Case Hub 候选版本、仓库 base SHA 与固定执行配置。",
   inputSchema: WorkflowInputSchema,
   outputSchema: WorkflowInputSchema,
   requestContextSchema: PlatformRequestContextSchema,
@@ -44,43 +45,24 @@ const freezeExecutionBriefStep = createStep({
     if (run.contextSnapshot.blockingQuestions.length > 0) {
       throw new Error(`E2E context has unresolved blocking questions: ${run.contextSnapshot.blockingQuestions.join("; ")}`);
     }
-    const injected = requestContext.get("e2e-metersphere-tool-executor");
-    const legacyDetailExecutor = requestContext.get("e2e-case-detail-executor");
-    const tools = typeof injected === "function" || typeof legacyDetailExecutor === "function"
-      ? undefined
-      : await mcpCatalog.toolsForCaseWorkflow(getRuntimeContext(requestContext)["qasey-context"].channel, mcpSubject(requestContext));
-    const executeMeterSphereTool = async (toolName: string, input: Record<string, unknown>): Promise<unknown> => {
-      if (typeof injected === "function") {
-        return (injected as (toolName: string, input: unknown) => Promise<unknown>)(toolName, input);
-      }
-      if (toolName === "metersphere_ms_get_test_case_detail" && typeof legacyDetailExecutor === "function") {
-        return (legacyDetailExecutor as (caseId: string) => Promise<unknown>)(String(input.case_id));
-      }
-      const tool = tools?.[toolName] as { execute?: (input: unknown, context: unknown) => Promise<unknown> } | undefined;
-      if (!tool?.execute) throw new Error(`Required MeterSphere workflow tool is unavailable: ${toolName}`);
-      return tool.execute(input, { mastra, requestContext, abortSignal });
-    };
-    const cases = await mapWithConcurrency(run.sourceCaseIds, 6, async sourceCaseId => {
-      abortSignal.throwIfAborted();
-      const caseId = isCanonicalMeterSphereCaseId(sourceCaseId)
-        ? sourceCaseId
-        : canonicalMeterSphereCaseIdFromList(sourceCaseId, await executeMeterSphereTool(
-          "metersphere_ms_list_test_cases",
-          { page: 1, page_size: 100, name: sourceCaseId },
-        ));
-      const result = await executeMeterSphereTool("metersphere_ms_get_test_case_detail", { case_id: caseId });
-      return testCaseSpecFromMeterSphere(caseId, result);
-    });
-    const canonicalIds = cases.map(testCase => testCase.id);
-    if (new Set(canonicalIds).size !== canonicalIds.length) {
-      throw new Error("E2E source cases resolve to duplicate MeterSphere canonical UUID ids");
-    }
-    if (cases.some(testCase => testCase.target !== "web")) throw new Error("Web E2E MVP only accepts MeterSphere cases targeting web");
-    let baseSha = run.baseSha;
+    abortSignal.throwIfAborted();
+    const changeSet = await caseHubRepository.getChangeSet(owner, run.changeSetId);
+    if (!changeSet) throw new Error(`Case Hub change set ${run.changeSetId} not found`);
+    const versions = await caseHubRepository.versionsForChangeSet(owner, changeSet.id);
+    if (versions.length === 0) throw new Error("Case Hub change set contains no proposed cases");
+    const cases = versions.map(caseHubVersionToTestCase);
+    let baseSha = changeSet.baseSha ?? run.baseSha;
     if (!baseSha) {
       if (!githubClient) throw new Error("GitHub read client is required to freeze the E2E base SHA");
       const commit = await githubClient.repos.getCommit({ owner: run.repository.owner, repo: run.repository.repository, ref: run.repository.baseRef });
       baseSha = commit.data.sha;
+    }
+    if (changeSet.environmentSourceSha && changeSet.environmentSourceSha !== baseSha) {
+      await caseHubRepository.updateChangeSet(owner, changeSet.id, changeSet.revision, {
+        status: "blocked_environment",
+        error: `environment_version_mismatch: expected ${baseSha}, received ${changeSet.environmentSourceSha}`,
+      });
+      throw new Error("environment_version_mismatch");
     }
     const frozen = await tracedE2EOperation(mastra, requestContext, "qasey e2e context freeze", { runId: run.id, caseCount: cases.length, baseSha }, () => e2eCoordinator.freezeExecutionBrief(owner, run.id, cases, {
       owner: run.repository.owner,
@@ -96,6 +78,10 @@ const freezeExecutionBriefStep = createStep({
       verification: playwrightVerification,
     }, requestContext.get("qasey__traceId") as string | undefined));
     await runRepository.update(owner, run.id, frozen.revision, { baseSha });
+    const latestChangeSet = await caseHubRepository.getChangeSet(owner, changeSet.id);
+    if (latestChangeSet && latestChangeSet.status === "authoring") {
+      await caseHubRepository.updateChangeSet(owner, changeSet.id, latestChangeSet.revision, { status: "verifying", baseSha, runId: run.id });
+    }
     return inputData;
   },
 });
@@ -112,6 +98,7 @@ const authorAndPersistPatch = createStep({
       await tracedE2EOperation(mastra, requestContext, "qasey e2e author", { runId: inputData.runId }, () => e2eCoordinator.authorAndPersistPatch(owner, inputData.runId, inputData.qaFeedback));
     } catch (error) {
       await e2eCoordinator.fail(owner, inputData.runId, error);
+      await failChangeSet(owner, inputData.runId, error);
       throw error;
     }
     return { runId: inputData.runId };
@@ -130,11 +117,22 @@ const cleanVerifyAndPublish = createStep({
       await tracedE2EOperation(mastra, requestContext, "qasey e2e verifier and draft pr", { runId: inputData.runId }, () => e2eCoordinator.cleanVerifyAndPublish(owner, inputData.runId));
     } catch (error) {
       await e2eCoordinator.fail(owner, inputData.runId, error);
+      await failChangeSet(owner, inputData.runId, error);
       throw error;
     }
     const run = await runRepository.get(owner, inputData.runId);
     if (!run || run.status === "failed") throw new Error(run?.error ?? `E2E run ${inputData.runId} failed`);
     if (run.status !== "awaiting_qa") throw new Error(`E2E run ${inputData.runId} stopped in ${run.status}`);
+    const changeSet = await caseHubRepository.getChangeSet(owner, run.changeSetId);
+    if (!changeSet) throw new Error(`Case Hub change set ${run.changeSetId} not found`);
+    const versions = await caseHubRepository.versionsForChangeSet(owner, changeSet.id);
+    await caseHubRepository.createPendingResults(owner, changeSet.id, run.id, run.artifacts, undefined, await playwrightObservations(owner, run.artifacts, versions.map(version => version.caseId)));
+    const refreshed = await caseHubRepository.getChangeSet(owner, changeSet.id);
+    if (refreshed && refreshed.status === "verifying") {
+      await caseHubRepository.updateChangeSet(owner, refreshed.id, refreshed.revision, {
+        status: "awaiting_review", branch: run.branch, pullRequestUrl: run.pullRequestUrl,
+      });
+    }
     return { runId: inputData.runId };
   },
 });
@@ -157,19 +155,59 @@ export const awaitQaVerdictStep = createStep({
       });
     }
 
+    if (resumeData.verdict === "approve") {
+      try {
+        await e2eCoordinator.cleanVerifyAndPublish(owner, inputData.runId, true);
+        const updated = await e2eCoordinator.verdict(owner, inputData.runId, resumeData);
+        return { runId: updated.id, status: updated.status };
+      } catch (error) {
+        await e2eCoordinator.fail(owner, inputData.runId, error);
+        await failChangeSet(owner, inputData.runId, error);
+        throw error;
+      }
+    }
     const updated = await e2eCoordinator.verdict(owner, inputData.runId, resumeData);
-    if (resumeData.verdict === "approve") return { runId: updated.id, status: updated.status };
 
     try {
       await e2eCoordinator.authorAndPersistPatch(owner, inputData.runId, resumeData.feedback);
+      const runBeforeVerification = await runRepository.get(owner, inputData.runId);
+      const changeSetBeforeVerification = runBeforeVerification
+        ? await caseHubRepository.getChangeSet(owner, runBeforeVerification.changeSetId)
+        : undefined;
+      if (changeSetBeforeVerification?.status === "revising") {
+        await caseHubRepository.updateChangeSet(owner, changeSetBeforeVerification.id, changeSetBeforeVerification.revision, { status: "verifying" });
+      }
       await e2eCoordinator.cleanVerifyAndPublish(owner, inputData.runId);
     } catch (error) {
       await e2eCoordinator.fail(owner, inputData.runId, error);
+      await failChangeSet(owner, inputData.runId, error);
       throw error;
     }
     const repaired = await runRepository.get(owner, inputData.runId);
     if (!repaired || repaired.status === "failed") throw new Error(repaired?.error ?? `E2E repair ${inputData.runId} failed`);
     if (repaired.status !== "awaiting_qa") throw new Error(`E2E repair ${inputData.runId} stopped in ${repaired.status}`);
+    const repairedChangeSet = await caseHubRepository.getChangeSet(owner, repaired.changeSetId);
+    if (!repairedChangeSet) throw new Error(`Case Hub change set ${repaired.changeSetId} not found`);
+    const repairedVersions = await caseHubRepository.versionsForChangeSet(owner, repairedChangeSet.id);
+    const repairedCaseIds = repairedVersions
+      .filter(version => !resumeData.caseVersionId || version.id === resumeData.caseVersionId)
+      .map(version => version.caseId);
+    await caseHubRepository.createPendingResults(
+      owner,
+      repairedChangeSet.id,
+      repaired.id,
+      repaired.artifacts,
+      resumeData.caseVersionId ? [resumeData.caseVersionId] : undefined,
+      await playwrightObservations(owner, repaired.artifacts, repairedCaseIds),
+    );
+    const refreshedChangeSet = await caseHubRepository.getChangeSet(owner, repairedChangeSet.id);
+    if (refreshedChangeSet?.status === "verifying") {
+      await caseHubRepository.updateChangeSet(owner, refreshedChangeSet.id, refreshedChangeSet.revision, {
+        status: "awaiting_review",
+        branch: repaired.branch,
+        pullRequestUrl: repaired.pullRequestUrl,
+      });
+    }
     return await suspend({
       runId: inputData.runId,
       reason: "QA feedback was applied and the clean verifier passed again; a new verdict is required.",
@@ -190,19 +228,6 @@ export const e2eLifecycleWorkflow = createWorkflow({
   .then(cleanVerifyAndPublish)
   .then(awaitQaVerdictStep)
   .commit();
-
-async function mapWithConcurrency<T, R>(values: T[], limit: number, mapper: (value: T) => Promise<R>): Promise<R[]> {
-  const results = new Array<R>(values.length);
-  let next = 0;
-  async function worker() {
-    while (next < values.length) {
-      const index = next++;
-      results[index] = await mapper(values[index]!);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, values.length) }, () => worker()));
-  return results;
-}
 
 async function tracedE2EOperation<T>(
   mastra: Mastra | undefined,
@@ -245,6 +270,7 @@ export async function createAndStartE2ERun(
     await run.startAsync({ inputData: { runId: created.id }, requestContext });
   } catch (error) {
     await e2eCoordinator.fail(owner, created.id, error);
+    await failChangeSet(owner, created.id, error);
     throw error;
   }
   return created;
@@ -258,6 +284,7 @@ export async function rerunE2E(mastra: Mastra, owner: OwnerScope, runId: string,
     await run.startAsync({ inputData: { runId: created.id }, requestContext });
   } catch (error) {
     await e2eCoordinator.fail(owner, created.id, error);
+    await failChangeSet(owner, created.id, error);
     throw error;
   }
   return created;
@@ -274,9 +301,78 @@ export async function resumeE2EWithVerdict(mastra: Mastra, owner: OwnerScope, ru
 }
 
 export async function cancelE2ERun(mastra: Mastra, owner: OwnerScope, runId: string): Promise<E2ERun> {
-  if (!await runRepository.get(owner, runId)) throw new Error(`Run ${runId} not found`);
+  const current = await runRepository.get(owner, runId);
+  if (!current) throw new Error(`Run ${runId} not found`);
   const workflow = mastra.getWorkflow("qasey-e2e-lifecycle");
   const run = await workflow.createRun({ runId });
   await run.cancel();
-  return e2eCoordinator.cancel(owner, runId);
+  const cancelled = await e2eCoordinator.cancel(owner, runId);
+  const changeSet = await caseHubRepository.getChangeSet(owner, current.changeSetId);
+  if (changeSet && !["merged", "failed", "cancelled", "abandoned"].includes(changeSet.status)) {
+    await caseHubRepository.updateChangeSet(owner, changeSet.id, changeSet.revision, { status: "cancelled" });
+  }
+  return cancelled;
+}
+
+async function failChangeSet(owner: OwnerScope, runId: string, error: unknown): Promise<void> {
+  const run = await runRepository.get(owner, runId);
+  if (!run) return;
+  const changeSet = await caseHubRepository.getChangeSet(owner, run.changeSetId);
+  if (!changeSet || ["merged", "failed", "cancelled", "abandoned", "blocked_product", "blocked_environment"].includes(changeSet.status)) return;
+  await caseHubRepository.updateChangeSet(owner, changeSet.id, changeSet.revision, {
+    status: "failed",
+    error: error instanceof Error ? error.message : String(error),
+  });
+}
+
+async function playwrightObservations(owner: OwnerScope, artifacts: ArtifactRef[], expectedCaseIds: string[]): Promise<CaseExecutionObservation[]> {
+  const latestReports = new Map<string, ArtifactRef>();
+  for (const artifact of artifacts) {
+    if (artifact.kind === "report" && artifact.name.endsWith("-results.json")) latestReports.set(artifact.name, artifact);
+  }
+  const observed = new Map<string, CaseExecutionObservation>();
+  for (const report of latestReports.values()) {
+    const opened = await artifactStore.open(owner, report);
+    const payload = JSON.parse(await new Response(opened.body).text()) as unknown;
+    collectPlaywrightSuites(payload, observed);
+  }
+  return expectedCaseIds.map(caseId => observed.get(caseId) ?? { caseId, executionStatus: "blocked" });
+}
+
+function collectPlaywrightSuites(payload: unknown, observed: Map<string, CaseExecutionObservation>): void {
+  if (!payload || typeof payload !== "object") return;
+  const record = payload as Record<string, unknown>;
+  if (Array.isArray(record.specs)) {
+    for (const spec of record.specs) {
+      if (!spec || typeof spec !== "object") continue;
+      const specRecord = spec as Record<string, unknown>;
+      const tests = Array.isArray(specRecord.tests) ? specRecord.tests : [];
+      for (const test of tests) collectPlaywrightTest(test, String(specRecord.title ?? ""), observed);
+    }
+  }
+  if (Array.isArray(record.suites)) for (const suite of record.suites) collectPlaywrightSuites(suite, observed);
+}
+
+function collectPlaywrightTest(test: unknown, fallbackTitle: string, observed: Map<string, CaseExecutionObservation>): void {
+  if (!test || typeof test !== "object") return;
+  const record = test as Record<string, unknown>;
+  const annotations = Array.isArray(record.annotations) ? record.annotations : [];
+  const annotatedCase = annotations.find(annotation => annotation && typeof annotation === "object" && (annotation as Record<string, unknown>).type === "qasey.case");
+  const description = annotatedCase && typeof annotatedCase === "object" ? (annotatedCase as Record<string, unknown>).description : undefined;
+  const caseId = typeof description === "string" ? description : `${String(record.title ?? "")} ${fallbackTitle}`.match(/QASEY-\d+/u)?.[0];
+  if (!caseId) return;
+  const results = Array.isArray(record.results) ? record.results.filter(result => result && typeof result === "object") as Record<string, unknown>[] : [];
+  const statuses = results.map(result => String(result.status ?? ""));
+  const executionStatus: CaseExecutionObservation["executionStatus"] = statuses.some(status => ["failed", "timedOut", "interrupted"].includes(status))
+    ? "failed"
+    : statuses.length > 0 && statuses.every(status => status === "skipped") ? "skipped" : "passed";
+  const durationMs = results.reduce((total, result) => total + (typeof result.duration === "number" ? result.duration : 0), 0);
+  const previous = observed.get(caseId);
+  if (!previous || executionRank(executionStatus) > executionRank(previous.executionStatus)) {
+    observed.set(caseId, { caseId, executionStatus, durationMs });
+  }
+}
+
+function executionRank(status: CaseExecutionObservation["executionStatus"]): number {
+  return status === "failed" ? 3 : status === "blocked" ? 2 : status === "skipped" ? 1 : 0;
 }

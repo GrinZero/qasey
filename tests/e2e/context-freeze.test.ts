@@ -1,27 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { canonicalMeterSphereCaseIdFromList, freezeE2EContext, freezeE2EExecutionBrief, isCanonicalMeterSphereCaseId, testCaseSpecFromMeterSphere } from "../../packages/domain/src/index.ts";
+import { freezeE2EContext, freezeE2EExecutionBrief } from "../../packages/domain/src/index.ts";
 
 describe("immutable E2E context", () => {
-  it("resolves numeric MeterSphere case numbers to canonical UUID ids", () => {
-    const canonicalId = "97bb25db-18df-428e-af86-be305ad8b2ff";
-    const response = {
-      content: [{
-        type: "text",
-        text: JSON.stringify([{ cases: [
-          { id: canonicalId, num: 175088, name: "Exact case" },
-          { id: "d825e3e4-9dc3-4ad6-829c-2f31ead90bbb", num: 1750880, name: "Fuzzy result" },
-        ] }]),
-      }],
-    };
-
-    expect(canonicalMeterSphereCaseIdFromList("175088", response)).toBe(canonicalId);
-    expect(isCanonicalMeterSphereCaseId(canonicalId)).toBe(true);
-    expect(() => canonicalMeterSphereCaseIdFromList("175089", response)).toThrow(
-      "did not resolve to a canonical UUID id",
-    );
-  });
-
-  it("redacts secrets and keeps conversation evidence alongside complete MeterSphere steps", () => {
+  it("redacts secrets and keeps conversation evidence alongside complete Case Hub steps", () => {
     const snapshot = freezeE2EContext({
       goal: "Cover checkout",
       requirementSummary: "Use Authorization: Bearer secret-value-that-must-not-leak",
@@ -29,10 +10,12 @@ describe("immutable E2E context", () => {
       criticalFlows: ["submit order"], boundaryCases: [], negativeCases: [], testDataNeeds: ["testing account"], repositoryFindings: ["reuse checkout fixture"],
       blockingQuestions: [], evidenceRefs: [{ kind: "message", ref: "thread:42", summary: "confirmed behavior" }],
     }, { sessionId: "session", threadId: "thread", taskRunId: "task", requestId: "request", resourceId: "resource" }, new Date("2026-08-25T00:00:00.000Z"));
-    const testCase = testCaseSpecFromMeterSphere("MS-1", {
-      id: "MS-1", name: "Checkout succeeds", platform: "web", priority: "P1",
-      preconditions: ["signed in"], steps: [{ action: "Submit order", expected_result: "Success page is shown" }], test_data: { tenant: "testing", password: "do-not-persist" },
-    });
+    const testCase = {
+      id: "QASEY-1", title: "Checkout succeeds", target: "web" as const, priority: "P1" as const,
+      evidenceRefs: [{ source: "case", ref: "QASEY-1" }], preconditions: ["signed in"],
+      steps: [{ action: "1. Submit order", expected: ["Success page is shown"] }],
+      testData: { tenant: "testing", password: "do-not-persist" }, tags: [], unresolvedQuestions: [],
+    };
     const brief = freezeE2EExecutionBrief({
       context: snapshot, cases: [testCase],
       repository: {

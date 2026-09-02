@@ -1,6 +1,6 @@
 ---
 name: qa-review
-description: 用于只读 review 或 audit 需求、设计、代码、PR 或已有测试用例，识别风险、范围和覆盖缺口；不用于把结论写入 MeterSphere。
+description: 用于只读 review 或 audit 需求、设计、代码、PR 或已有测试用例，识别风险、范围和覆盖缺口；不提交 Case Hub Change Set。
 ---
 
 # QA 评审
@@ -12,6 +12,6 @@ description: 用于只读 review 或 audit 需求、设计、代码、PR 或已�
 3. 只读取与目标相关的 Jira、PR、Slack、飞书、Figma、附件、代码或已有用例；对大结果分页、过滤和去重。
 4. 区分矛盾、遗漏、歧义、不可测性、重复覆盖与实现偏差，并说明影响和来源。
 5. 从角色/权限、状态迁移、数据边界、异步副作用、失败恢复、兼容性和可观测性中选择适用维度，不机械穷举。
-6. 证据足够支持风险判断时停止；不得写入 MeterSphere 或 QA Experience。
+6. 证据足够支持风险判断时停止；不得创建或修改 Case Hub Change Set，也不得写入 QA Experience。
 
 输出总体判断、关键发现及风险级别、建议测试范围和待确认问题。没有发现时也说明实际核对范围。只在发现具体证据差异、风险或阻塞时报告进展。

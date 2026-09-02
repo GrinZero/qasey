@@ -21,7 +21,7 @@ describe("Skill-driven system prompt", () => {
     expect(result.text).toContain("意图识别与 Skill 路由（必须先执行）");
     expect(result.text).toContain("intent=qa_quick_query：加载 `qa-quick-query` Skill");
     expect(result.text).toContain("intent=qa_review：加载 `qa-review` Skill");
-    expect(result.text).toContain("case_create_full 或 case_maintain_fast：加载 `metersphere-case-management` Skill");
+    expect(result.text).toContain("case_create_full、case_maintain_fast 或 e2e_generate：加载 `e2e-lifecycle` Skill");
     expect(result.text).toContain("experience_read 或 experience_write：加载 `qa-experience` Skill");
     expect(result.text).toContain("e2e_generate、e2e_rerun、e2e_repair 或 e2e_status：加载 `e2e-lifecycle` Skill");
     expect(result.text).toContain("intent=meta_or_out_of_scope：不加载专门 Skill");

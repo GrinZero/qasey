@@ -27,30 +27,6 @@ export interface E2EContextSource {
   resourceId: string;
 }
 
-const CANONICAL_METERSPHERE_CASE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
-
-export function isCanonicalMeterSphereCaseId(value: string): boolean {
-  return CANONICAL_METERSPHERE_CASE_ID_PATTERN.test(value.trim());
-}
-
-/** Resolve an exact numeric MeterSphere case number from an ms_list_test_cases response. */
-export function canonicalMeterSphereCaseIdFromList(caseNumberInput: string, result: unknown): string {
-  const caseNumber = caseNumberInput.trim();
-  if (!/^\d+$/u.test(caseNumber)) throw new Error(`MeterSphere case reference is neither a canonical UUID nor a numeric num: ${caseNumber}`);
-  const matches = collectCaseRecords(result)
-    .filter(record => stringValue(record.num ?? record.case_num ?? record.caseNumber) === caseNumber)
-    .map(record => stringValue(record.id ?? record.case_id ?? record.caseId))
-    .filter(isCanonicalMeterSphereCaseId);
-  const ids = [...new Set(matches)];
-  if (ids.length === 0) {
-    throw new Error(`MeterSphere case num ${caseNumber} did not resolve to a canonical UUID id`);
-  }
-  if (ids.length > 1) {
-    throw new Error(`MeterSphere case num ${caseNumber} resolved to multiple canonical UUID ids`);
-  }
-  return ids[0]!;
-}
-
 export function freezeE2EContext(draftInput: E2EContextDraft, source: E2EContextSource, now = new Date()): E2EContextSnapshot {
   const draft = E2EContextDraftSchema.parse(redactValue(draftInput));
   const body = { version: 1 as const, ...draft, source, createdAt: now.toISOString() };
@@ -73,45 +49,11 @@ export function freezeE2EExecutionBrief(input: {
   return E2EExecutionBriefSchema.parse({ ...body, briefHash: hashJson(body) });
 }
 
-export function createE2EAmendment(reviewerId: string, feedbackInput: string, now = new Date()): E2EAmendment {
+export function createE2EAmendment(reviewerId: string, feedbackInput: string, now = new Date(), caseVersionId?: string): E2EAmendment {
   const feedback = redactString(feedbackInput).trim();
   if (!feedback) throw new Error("QA amendment feedback is empty after redaction");
-  const body = { id: randomUUID(), createdAt: now.toISOString(), reviewerId, feedback };
+  const body = { id: randomUUID(), createdAt: now.toISOString(), reviewerId, feedback, ...(caseVersionId ? { caseVersionId } : {}) };
   return { ...body, hash: hashJson(body) };
-}
-
-/** Convert the deliberately loose MeterSphere MCP response into the durable E2E case contract. */
-export function testCaseSpecFromMeterSphere(caseId: string, result: unknown): TestCaseSpec {
-  const record = findCaseRecord(result, caseId);
-  if (!record) throw new Error(`MeterSphere case ${caseId} did not return a case detail record`);
-  const title = stringValue(record.name ?? record.title ?? record.case_name ?? record.caseName);
-  if (!title) throw new Error(`MeterSphere case ${caseId} is missing a title`);
-  const rawSteps = parseArray(record.steps ?? record.step_list ?? record.test_steps ?? record.caseSteps);
-  const steps = rawSteps.flatMap((value, index) => {
-    if (!isRecord(value)) return [];
-    const action = stringValue(value.action ?? value.step ?? value.description ?? value.desc);
-    const expectedValues = parseStringArray(value.expected ?? value.expected_result ?? value.result ?? value.expectation);
-    if (!action || expectedValues.length === 0) return [];
-    return [{ action: `${index + 1}. ${action}`, expected: expectedValues }];
-  });
-  if (steps.length === 0) throw new Error(`MeterSphere case ${caseId} has no complete action/expected steps`);
-  const targetRaw = stringValue(record.target ?? record.platform ?? record.test_platform).toLowerCase();
-  const target = targetRaw.includes("android") ? "android" as const : targetRaw.includes("ios") ? "ios" as const : "web" as const;
-  const priorityRaw = stringValue(record.priority ?? record.level).toUpperCase();
-  const priority = /^(P0|P1|P2|P3)$/u.test(priorityRaw) ? priorityRaw as "P0" | "P1" | "P2" | "P3" : "P2";
-  return TestCaseSpecSchema.parse({
-    id: caseId,
-    ...(stringValue(record.requirement_id ?? record.requirementId) ? { requirementId: stringValue(record.requirement_id ?? record.requirementId) } : {}),
-    title,
-    target,
-    priority,
-    evidenceRefs: [{ source: "metersphere", ref: caseId }],
-    preconditions: parseStringArray(record.preconditions ?? record.prerequisites ?? record.precondition),
-    steps,
-    testData: isRecord(record.test_data ?? record.testData) ? record.test_data ?? record.testData : {},
-    tags: parseStringArray(record.tags),
-    unresolvedQuestions: parseStringArray(record.unresolved_questions ?? record.unresolvedQuestions),
-  });
 }
 
 export function hashJson(value: unknown): string {

@@ -20,7 +20,7 @@ const DEFAULT_ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
 const DEFAULT_REDIRECT_PATH = "/admin";
 const DUMMY_PASSWORD_HASH = encodePasswordHash(Buffer.alloc(SCRYPT_SALT_LENGTH), Buffer.alloc(SCRYPT_KEY_LENGTH));
 
-export const PASSWORD_MIN_LENGTH = 15;
+export const PASSWORD_MIN_LENGTH = 10;
 export const PASSWORD_MAX_LENGTH = 128;
 
 export type PasswordAuthErrorCode =
@@ -99,7 +99,7 @@ export class PasswordAuthService {
     this.assertConfigured();
     if (!this.registrationConfigured) throw new PasswordAuthError("registration_disabled");
     const email = normalizeEmail(input.email);
-    const password = validPassword(input.password);
+    const password = validRegistrationPassword(input.password);
     const displayName = normalizeDisplayName(input.displayName);
     const attemptKey = authAttemptKey("register", email);
     this.consumeAttempt(attemptKey);
@@ -129,7 +129,7 @@ export class PasswordAuthService {
   }): Promise<PasswordAuthResult> {
     this.assertConfigured();
     const email = normalizeEmail(input.email);
-    const password = validPassword(input.password);
+    const password = validLoginPassword(input.password);
     const attemptKey = authAttemptKey("login", email);
     this.consumeAttempt(attemptKey);
     const resolved = await this.organizationStore.resolvePasswordCredential(email);
@@ -199,7 +199,7 @@ export class PasswordAuthService {
 }
 
 export async function hashPassword(passwordInput: string): Promise<string> {
-  const password = validPassword(passwordInput);
+  const password = validRegistrationPassword(passwordInput);
   const salt = randomBytes(SCRYPT_SALT_LENGTH);
   const derived = await deriveScrypt(password, salt, SCRYPT_COST, SCRYPT_BLOCK_SIZE, SCRYPT_PARALLELIZATION);
   return encodePasswordHash(salt, derived);
@@ -208,7 +208,7 @@ export async function hashPassword(passwordInput: string): Promise<string> {
 export async function verifyPassword(passwordInput: string, encodedHash: string): Promise<boolean> {
   let password: string;
   try {
-    password = validPassword(passwordInput);
+    password = validLoginPassword(passwordInput);
   } catch {
     password = "invalid-password-shape";
   }
@@ -288,9 +288,17 @@ function normalizeEmail(input: string): string {
   return value;
 }
 
-function validPassword(input: string): string {
+function validRegistrationPassword(input: string): string {
   const length = [...input].length;
   if (length < PASSWORD_MIN_LENGTH || length > PASSWORD_MAX_LENGTH || Buffer.byteLength(input, "utf8") > 512) {
+    throw new PasswordAuthError("invalid_input");
+  }
+  return input;
+}
+
+function validLoginPassword(input: string): string {
+  const length = [...input].length;
+  if (length < 1 || length > PASSWORD_MAX_LENGTH || Buffer.byteLength(input, "utf8") > 512) {
     throw new PasswordAuthError("invalid_input");
   }
   return input;

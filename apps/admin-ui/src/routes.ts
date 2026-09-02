@@ -4,6 +4,7 @@ export type View =
   | "activity"
   | "qasey-overview"
   | "qasey-runs"
+  | "qasey-cases"
   | "qasey-review"
   | "qasey-cua"
   | "triggers"
@@ -15,6 +16,7 @@ export const adminPaths = {
   activity: "/admin/activity",
   "qasey-overview": "/admin/apps/qasey",
   "qasey-runs": "/admin/apps/qasey/runs",
+  "qasey-cases": "/admin/apps/qasey/cases",
   "qasey-review": "/admin/apps/qasey/reviews",
   "qasey-cua": "/admin/apps/qasey/workspace",
   triggers: "/admin/triggers",

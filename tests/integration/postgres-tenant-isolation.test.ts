@@ -598,7 +598,7 @@ function integrationRun(owner: OwnerScope, id: string): E2ERun {
       allowedPaths: ["tests"],
       skillsPaths: [],
     },
-    sourceCaseIds: ["synthetic-case"],
+    changeSetId: "97bb25db-18df-428e-af86-be305ad8b2ff",
     contextSnapshot,
     caseSnapshot: [],
     amendments: [],

@@ -273,11 +273,12 @@ export function createAdminUiApplication(options: {
 
 const PasswordLoginInputSchema = z.object({
   email: z.email().max(320),
-  password: z.string().min(PASSWORD_MIN_LENGTH).max(PASSWORD_MAX_LENGTH),
+  password: z.string().min(1).max(PASSWORD_MAX_LENGTH),
   redirectUri: z.string().max(2_048).optional(),
 }).strict();
 
 const PasswordRegistrationInputSchema = PasswordLoginInputSchema.extend({
+  password: z.string().min(PASSWORD_MIN_LENGTH).max(PASSWORD_MAX_LENGTH),
   displayName: z.string().trim().min(1).max(100).optional(),
 }).strict();
 
@@ -298,7 +299,7 @@ function passwordAuthRoutes(options: {
         try {
           input = PasswordRegistrationInputSchema.parse(await c.req.json());
         } catch {
-          return invalidPasswordAuthRequest(c);
+          return invalidPasswordAuthRequest(c, "register");
         }
         try {
           const result = await options.passwordAuth.register({
@@ -313,7 +314,7 @@ function passwordAuthRoutes(options: {
           c.header("set-cookie", options.googleOidc.clearOrganizationSelectionCookie(), { append: true });
           return c.json({ redirectTo: result.redirectTo }, 201);
         } catch (error) {
-          return passwordAuthErrorResponse(c, error);
+          return passwordAuthErrorResponse(c, error, "register");
         }
       },
     }), true),
@@ -328,7 +329,7 @@ function passwordAuthRoutes(options: {
         try {
           input = PasswordLoginInputSchema.parse(await c.req.json());
         } catch {
-          return invalidPasswordAuthRequest(c);
+          return invalidPasswordAuthRequest(c, "login");
         }
         try {
           const result = await options.passwordAuth.login({
@@ -342,18 +343,21 @@ function passwordAuthRoutes(options: {
           c.header("set-cookie", options.googleOidc.clearOrganizationSelectionCookie(), { append: true });
           return c.json({ redirectTo: result.redirectTo });
         } catch (error) {
-          return passwordAuthErrorResponse(c, error);
+          return passwordAuthErrorResponse(c, error, "login");
         }
       },
     }), true),
   ];
 }
 
-function invalidPasswordAuthRequest(c: any): Response {
-  return c.json({ error: "invalid_input", message: `请输入有效邮箱和 ${PASSWORD_MIN_LENGTH}–${PASSWORD_MAX_LENGTH} 位密码。` }, 400);
+function invalidPasswordAuthRequest(c: any, action: "register" | "login"): Response {
+  const message = action === "register"
+    ? `请输入有效邮箱和 ${PASSWORD_MIN_LENGTH}–${PASSWORD_MAX_LENGTH} 位密码。`
+    : "请输入有效邮箱和密码。";
+  return c.json({ error: "invalid_input", message }, 400);
 }
 
-function passwordAuthErrorResponse(c: any, error: unknown): Response {
+function passwordAuthErrorResponse(c: any, error: unknown, action: "register" | "login"): Response {
   if (!(error instanceof PasswordAuthError)) throw error;
   if (error.code === "rate_limited") {
     c.header("retry-after", "900");
@@ -374,7 +378,7 @@ function passwordAuthErrorResponse(c: any, error: unknown): Response {
   if (error.code === "not_configured") {
     return c.json({ error: error.code, message: "密码登录尚未配置。" }, 503);
   }
-  return invalidPasswordAuthRequest(c);
+  return invalidPasswordAuthRequest(c, action);
 }
 
 function apiTokenRoutes(options: {

@@ -11,12 +11,12 @@ import type { CodeModeTransport, ToolObserve } from "@mastra/core/tools";
 import { QuickJsCodeModeTransport } from "@mastra/quickjs";
 import { ObservabilityStoragePostgresVNext, PostgresStore } from "@mastra/pg";
 import { z } from "zod";
-import { AgentProgressInputSchema, CreateE2ERunRequestSchema, QaseyRequestContextSchema } from "../../packages/contracts/src/index.ts";
+import { AgentProgressInputSchema, CreateCaseHubChangeSetSchema, QaseyRequestContextSchema } from "../../packages/contracts/src/index.ts";
 import type { E2ERun, QaseyRequestContext } from "../../packages/contracts/src/index.ts";
-import { AgentProgressSession } from "../../packages/domain/src/index.ts";
+import { AgentProgressSession, freezeE2EContext } from "../../packages/domain/src/index.ts";
 import type { ToolsInput } from "@mastra/core/agent";
 import {
-  InMemoryRunRepository, PrismaRunRepository,
+  InMemoryCaseHubRepository, InMemoryRunRepository, PrismaCaseHubRepository, PrismaRunRepository,
 } from "../../packages/domain/src/index.ts";
 import { assertOpenAICompatibleToolSchemas, createGitHubClient, GitHubInstallationTokenProvider, GitHubPublisher, loadConfig, QaseyMcpCatalog, JiraClient, ReadConnectorCatalog, resolveCredentialKeyring } from "../../packages/adapters/src/index.ts";
 import {
@@ -30,6 +30,8 @@ import { InMemorySandboxLeaseStore, PrismaSandboxLeaseStore } from "../platform/
 import { SandboxPoolClient } from "../platform/workspace/sandbox-client.ts";
 import { PooledSandboxCodeTaskRunnerProvider } from "../platform/code-task/pooled-sandbox-runner.ts";
 import { webE2EConfigurationFromSkill } from "../platform/code-task/e2e-repository-skill.ts";
+import { resolveBuildMetadata } from "../platform/e2e/build-metadata.ts";
+import { E2EFixtureLeaseService } from "../platform/e2e/fixture-service.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../platform/context/schema.ts";
 import { applyDevRuntimeApprovalGate } from "./applications/qasey/dev-runtime-approval-gate.ts";
 import { createApplicationDatabase } from "../platform/storage/prisma.ts";
@@ -56,6 +58,7 @@ export const studioMcpPreviewEnabled = config.QASEY_ENABLE_STUDIO_MCP_PREVIEW
   ?? false;
 export const QASEY_REQUEST_CONTEXT_REQUIRED_MESSAGE = "Qasey request context has not been initialized";
 export const applicationDatabase = config.DATABASE_URL ? createApplicationDatabase(config.DATABASE_URL) : undefined;
+export const buildMetadata = resolveBuildMetadata(projectRoot);
 
 /**
  * Compose Mastra application state and telemetry domains explicitly.
@@ -70,6 +73,9 @@ const runtimeStore = createCompositeStore({
 export const mastraStorage = runtimeStore.primary;
 export function createMastraRuntimeStorage(): MastraCompositeStore { return runtimeStore.storage; }
 export const runRepository = applicationDatabase ? new PrismaRunRepository(applicationDatabase.client) : new InMemoryRunRepository();
+export const caseHubRepository = applicationDatabase
+  ? new PrismaCaseHubRepository(applicationDatabase.client)
+  : new InMemoryCaseHubRepository();
 export const failureInboxStore = applicationDatabase
   ? new PrismaFailureInboxStore(applicationDatabase.client)
   : new InMemoryFailureInboxStore();
@@ -130,6 +136,7 @@ runtimeReadiness.register("mastra-storage", async () => {
 });
 if (applicationDatabase) runtimeReadiness.register("application-database", () => applicationDatabase.healthCheck());
 runtimeReadiness.register("run-repository", () => runRepository.healthCheck?.() ?? Promise.resolve());
+runtimeReadiness.register("case-hub-repository", () => caseHubRepository.healthCheck?.() ?? Promise.resolve());
 runtimeReadiness.register("failure-inbox", () => failureInboxStore.healthCheck?.() ?? Promise.resolve());
 runtimeReadiness.register("effect-receipts", () => effectReceiptStore.healthCheck?.() ?? Promise.resolve());
 runtimeReadiness.register("channel-delivery-inbox", () => channelDeliveryInbox.healthCheck?.() ?? Promise.resolve());
@@ -141,9 +148,6 @@ export const mcpCatalog = new QaseyMcpCatalog(config, {
   connectionStore: externalConnectionStore,
 });
 runtimeReadiness.register("mcp-oauth-storage", () => mcpCatalog.healthCheck());
-if (config.QASEY_REQUIRE_METERSPHERE_MCP) {
-  runtimeReadiness.register("metersphere-mcp-tools", () => mcpCatalog.healthCheckRequiredMeterSphereTools());
-}
 export const githubClient = createGitHubClient(config);
 export const readConnectorCatalog = new ReadConnectorCatalog(
   config,
@@ -176,7 +180,7 @@ const draftPrBroker = githubPublisher.configured || config.QASEY_TENANCY_MODE ==
           baseSha: run.baseSha!,
           branch: run.branch ?? `qasey/${run.id}`,
           title: `test(e2e): Qasey run ${run.id}`,
-          body: [`## Qasey generated E2E`, ``, `Cases: ${run.sourceCaseIds.join(", ")}`, `Review and evidence: ${reviewUrl}`, ``, `Clean verifier passed. QA approval is still required.`].join("\n"),
+          body: [`## Qasey generated E2E`, ``, `Change Set: ${run.changeSetId}`, `Review and evidence: ${reviewUrl}`, ``, `Clean verifier completed. Per-case review is still required.`].join("\n"),
           changes,
           ...(run.pullRequestUrl ? { existingPullRequestUrl: run.pullRequestUrl } : {}),
         });
@@ -190,6 +194,11 @@ const draftPrBroker = githubPublisher.configured || config.QASEY_TENANCY_MODE ==
       },
     }
   : new NoopDraftPrBroker();
+export const e2eFixtureLeaseService = new E2EFixtureLeaseService(
+  buildMetadata,
+  config.QASEY_PUBLIC_BASE_URL,
+  applicationDatabase?.client,
+);
 export const e2eCoordinator = new E2ECoordinator(
   runRepository,
   artifactStore,
@@ -199,6 +208,7 @@ export const e2eCoordinator = new E2ECoordinator(
     reviewBaseUrl: config.QASEY_PUBLIC_BASE_URL,
     effects: sideEffectExecutor,
     ...(codeTaskRunnerProvider ? { codeTasks: codeTaskRunnerProvider } : {}),
+    fixtureLeases: e2eFixtureLeaseService,
   },
 );
 
@@ -210,6 +220,7 @@ export function initializeQaseyInfrastructure(): Promise<void> {
     runtimeStore.storage.init(),
     applicationDatabase?.init(),
     runRepository.init?.(),
+    caseHubRepository.init?.(),
     failureInboxStore.init?.(),
     effectReceiptStore.init?.(),
     channelDeliveryInbox.init?.(),
@@ -222,7 +233,7 @@ export function initializeQaseyInfrastructure(): Promise<void> {
 
 export async function closeQaseyInfrastructure(): Promise<void> {
   const resources: Array<{ close(): Promise<void> }> = [
-    mcpCatalog, externalConnectionStore, effectReceiptStore, failureInboxStore, artifactStore, channelDeliveryInbox, runRepository, runtimeStore.storage,
+    mcpCatalog, externalConnectionStore, effectReceiptStore, failureInboxStore, artifactStore, channelDeliveryInbox, caseHubRepository, runRepository, runtimeStore.storage,
     ...(sandboxLeaseStore ? [sandboxLeaseStore] : []),
     ...(applicationDatabase ? [applicationDatabase] : []),
   ];
@@ -233,10 +244,7 @@ export async function closeQaseyInfrastructure(): Promise<void> {
 
 export interface QaseyRequestContextMap {
   "qasey-context": QaseyRequestContext;
-  "case-plan"?: import("../../packages/domain/src/index.ts").MeterSphereCasePlan;
-  "case-completion-receipt"?: import("../../packages/domain/src/index.ts").MeterSphereCaseCompletionReceipt;
   "agent-progress-session"?: AgentProgressSession;
-  "case-operation-phase"?: "planning" | "execution";
   "qasey-agent-run-id"?: string;
   "qasey-execution-events"?: unknown;
   native?: boolean;
@@ -386,37 +394,71 @@ export function createAgentProgressTool(progressSession: AgentProgressSession) {
 
 function e2eTools() {
   return {
-    e2eCreateRun: createTool({
-      id: "e2e_create_run",
-      description: "创建一个隔离的 Playwright（Web）或 Maestro（App）代码生成与验证运行。sourceCaseIds 优先原样使用 ms_list_test_cases 返回的 canonical UUID id；兼容纯数字 num，冻结阶段会先精确解析为 UUID。禁止名称、module_id 和 URL。",
-      inputSchema: CreateE2ERunRequestSchema,
+    caseHubSearchCases: createTool({
+      id: "case_hub_search_cases",
+      description: "在 Qasey Case Hub 中搜索现有测试用例。只读；用于在提交 Change Set 前判断新增或更新。",
+      inputSchema: z.object({ query: z.string().max(500).default("") }),
+      execute: async ({ query }, { requestContext }) => {
+        if (!requestContext) throw new Error("Trusted request context is required");
+        return { cases: await caseHubRepository.listCases(ownerScopeFromRequestContext(requestContext), query) };
+      },
+    }),
+    caseHubCreateChangeSet: createTool({
+      id: "case_hub_create_change_set",
+      description: "冻结当前需求并提交不可变 Case Change Plan；随后在隔离 sandbox 中生成和验证 Web Playwright。存在 blocking question 时拒绝启动。",
+      inputSchema: CreateCaseHubChangeSetSchema,
       execute: async (input, { mastra, requestContext }) => {
         if (!requestContext) throw new Error("Trusted request context is required");
         const owner = ownerScopeFromRequestContext(requestContext);
-        if (input.platform !== "web" || input.framework !== "playwright") throw new Error("The first CodeTask-backed E2E release only supports Web Playwright");
+        if (input.requirement.blockingQuestions.length > 0) throw new Error("Resolve blocking questions before creating a Case Hub change set");
         const requestId = String(requestContext.get("requestId"));
         const sessionId = String(requestContext.get("sessionId"));
         const resourceId = String(requestContext.get(MASTRA_RESOURCE_ID_KEY));
         const threadId = String(requestContext.get(MASTRA_THREAD_ID_KEY) ?? sessionId);
         const taskRunId = String(requestContext.get("taskId") ?? requestContext.get("executionId") ?? requestId);
         const webE2EConfiguration = webE2EConfigurationFromSkill();
+        const actorId = getRuntimeContext(requestContext)["qasey-context"].actor.id;
+        const requirement = freezeE2EContext(input.requirement, { sessionId, threadId, taskRunId, requestId, resourceId });
+        const changeSet = await caseHubRepository.createChangeSet(owner, {
+          requirement,
+          proposals: input.proposals,
+          repository: webE2EConfiguration.target,
+          createdBy: actorId,
+          environmentSourceSha: buildMetadata.sourceSha,
+        });
         const created = await e2eCoordinator.create(owner, {
-          ...input,
+          changeSetId: changeSet.id,
+          handoff: input.requirement,
+          platform: "web",
+          framework: "playwright",
           requestId,
           sourceSessionId: sessionId,
           repository: webE2EConfiguration.target,
           playwrightVerification: webE2EConfiguration.verification,
         }, { sessionId, threadId, taskRunId, requestId, resourceId });
         if (!mastra) throw new Error("Mastra runtime is required to start the E2E workflow");
-        const workflowResourceId = getRuntimeContext(requestContext)["qasey-context"].actor.id;
-        const run = await mastra.getWorkflow("qasey-e2e-lifecycle").createRun({ runId: created.id, resourceId: workflowResourceId });
+        const run = await mastra.getWorkflow("qasey-e2e-lifecycle").createRun({ runId: created.id, resourceId: actorId });
         try {
           await run.startAsync({ inputData: { runId: created.id }, requestContext });
         } catch (error) {
           await e2eCoordinator.fail(owner, created.id, error);
           throw error;
         }
-        return created;
+        return { changeSet, run: created };
+      },
+    }),
+    caseHubGetChangeSet: createTool({
+      id: "case_hub_get_change_set",
+      description: "读取 Change Set、候选 Case Version 与逐 Case Result。只读。",
+      inputSchema: z.object({ changeSetId: z.string().uuid() }),
+      execute: async ({ changeSetId }, { requestContext }) => {
+        if (!requestContext) throw new Error("Trusted request context is required");
+        const owner = ownerScopeFromRequestContext(requestContext);
+        return {
+          changeSet: await caseHubRepository.getChangeSet(owner, changeSetId),
+          versions: await caseHubRepository.versionsForChangeSet(owner, changeSetId),
+          results: await caseHubRepository.listResults(owner, changeSetId),
+        };
       },
     }),
     e2eGetRun: createTool({
@@ -428,12 +470,21 @@ function e2eTools() {
         return { run: await runRepository.get(owner, runId), events: await runRepository.events(owner, runId) };
       },
     }),
-    e2eRerun: createTool({
-      id: "e2e_rerun", description: "基于已有 E2E 运行创建新的执行，不修改旧证据。",
+    caseHubRerunResults: createTool({
+      id: "case_hub_rerun_results", description: "基于已有 Change Set 的运行创建新 Run 与 Result Attempt，不修改旧证据。",
       inputSchema: z.object({ runId: z.string().min(1) }),
       execute: async ({ runId }, { mastra, requestContext }) => {
         if (!requestContext) throw new Error("Trusted request context is required");
         const owner = ownerScopeFromRequestContext(requestContext);
+        const previous = await runRepository.get(owner, runId);
+        if (!previous) throw new Error(`Run ${runId} not found`);
+        const changeSet = await caseHubRepository.getChangeSet(owner, previous.changeSetId);
+        if (!changeSet) throw new Error(`Case Hub change set ${previous.changeSetId} not found`);
+        if (changeSet.status === "blocked_product" || changeSet.status === "blocked_environment") {
+          await caseHubRepository.updateChangeSet(owner, changeSet.id, changeSet.revision, { status: "verifying" });
+        } else if (changeSet.status !== "verifying") {
+          throw new Error(`Case Hub result rerun requires a blocked Change Set, received ${changeSet.status}`);
+        }
         const created = await e2eCoordinator.rerun(owner, runId);
         if (!mastra) throw new Error("Mastra runtime is required to start the E2E workflow");
         const resourceId = getRuntimeContext(requestContext)["qasey-context"].actor.id;
@@ -487,9 +538,8 @@ export async function toolsForRequest(requestContext?: RequestContext<any>) {
   } : {};
   // Raw case mutations never enter the Agent catalog. The trusted commit Tool
   // invokes the required MCP primitive inside the deterministic Workflow.
-  const ownershipScopedExternal = omitMeterSphereCaseMutations(guardCaseMutationsForWorkflow(external));
   return applyDevRuntimeApprovalGate(
-    { getCurrentTime, ...progressTool, ...readTools, ...ownershipScopedExternal, ...executionTools },
+    { getCurrentTime, ...progressTool, ...readTools, ...external, ...executionTools },
     requestContext,
   );
 }
@@ -558,8 +608,9 @@ function isQaseyCodeModeReadTool(toolName: string): boolean {
   const normalized = toolName.toLowerCase();
   return normalized === "getcurrenttime"
     || normalized === "e2egetrun"
+    || normalized === "casehubsearchcases"
+    || normalized === "casehubgetchangeset"
     || /^(?:slack_(?:search|get)|github_(?:get|list|search)|jira_(?:get|search))/.test(normalized)
-    || /^metersphere_ms_(?:get|list)/.test(normalized)
     || /^figma_(?:get|list|export)/.test(normalized)
     || /^qaexperience_(?:qa_context_get|qa_experience_(?:list|read))/.test(normalized)
     || normalized === "rag_answer"
@@ -583,34 +634,4 @@ export function mcpSubject(requestContext?: RequestContext<any>) {
   const subjectId = "userId" in identity ? (identity as { userId?: unknown }).userId : undefined;
   if (typeof tenantId !== "string" || typeof subjectId !== "string") return undefined;
   return { applicationId, tenantId, subjectId };
-}
-
-/** Defense-in-depth guard applied before raw mutations are removed from the Agent catalog. */
-export function guardCaseMutationsForWorkflow(tools: ToolsInput): ToolsInput {
-  return Object.fromEntries(Object.entries(tools).map(([toolName, tool]) => {
-    if (!isMeterSphereCaseMutation(toolName)) return [toolName, tool];
-    const execute = (tool as { execute?: (input: unknown, context: unknown) => Promise<unknown> }).execute;
-    if (!execute) return [toolName, tool];
-    return [toolName, {
-      ...tool,
-      execute: async (input: unknown, executionContext: Parameters<typeof execute>[1]) => {
-        if (toolName.toLowerCase().includes("bulk_upsert_test_cases")
-          && input && typeof input === "object"
-          && (input as { dry_run?: unknown }).dry_run === true) {
-          return execute(input, executionContext);
-        }
-        throw new Error(`Case mutation ${toolName} is owned by the MeterSphere case operation workflow`);
-      },
-    }];
-  }));
-}
-
-export function omitMeterSphereCaseMutations(tools: ToolsInput): ToolsInput {
-  return Object.fromEntries(Object.entries(tools).filter(([toolName]) => !isMeterSphereCaseMutation(toolName)));
-}
-
-function isMeterSphereCaseMutation(toolName: string): boolean {
-  const normalized = toolName.toLowerCase();
-  return normalized.includes("metersphere")
-    && /(?:bulk_upsert_test_cases|create_test_case|edit_test_case|batch_edit_test_cases)/.test(normalized);
 }

@@ -3,6 +3,7 @@ import {
   InMemoryOrganizationStore,
 } from "../../src/platform/auth/organization-store.ts";
 import {
+  PASSWORD_MIN_LENGTH,
   PasswordAuthService,
   hashPassword,
   verifyPassword,
@@ -13,9 +14,33 @@ const NOW = Date.parse("2026-08-27T08:00:00.000Z");
 const ORGANIZATION_ID = "tenant-password";
 const EMAIL = "member@example.invalid";
 const PASSWORD = "synthetic-password-phrase";
-const TEST_HASH_PREFIX = "test-password-hash:";
+const TEST_HASH_PREFIX = "test-password-hash-with-padding:";
 
 describe("password authentication", () => {
+  it("requires ten characters for registration while allowing legacy short passwords at login", async () => {
+    expect(PASSWORD_MIN_LENGTH).toBe(10);
+    const { service, store } = await authFixture();
+
+    await expect(service.register({
+      email: "short-registration@example.invalid",
+      password: "123456789",
+      request: authRequest("register"),
+    })).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(service.register({
+      email: "minimum-registration@example.invalid",
+      password: "1234567890",
+      request: authRequest("register"),
+    })).resolves.toMatchObject({ redirectTo: "/admin" });
+
+    await store.registerPasswordUser({
+      organizationId: ORGANIZATION_ID,
+      email: "legacy@example.invalid",
+      passwordHash: `${TEST_HASH_PREFIX}short`,
+    });
+    await expect(loginWith(service, "legacy@example.invalid", "short"))
+      .resolves.toMatchObject({ redirectTo: "/admin" });
+  });
+
   it("creates independently salted, versioned scrypt hashes and verifies without accepting bad input", async () => {
     const first = await hashPassword(PASSWORD);
     const second = await hashPassword(PASSWORD);

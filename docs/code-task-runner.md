@@ -98,6 +98,8 @@ verification mapping. The Service strictly parses the target and mapping in one
 read when it creates a run, persists that server-owned snapshot, includes it in
 the hashed execution brief, and copies it into every Code Task spec. The
 Sandbox image does not contain or mount the ignored deployment file, and the
+deployed source SHA is likewise taken from the build artifact rather than an
+Agent/API field or a manually maintained Qasey environment variable. The
 worker never reads it. Missing, malformed, duplicate, escaping, partially
 covered, or unmatched mappings fail closed; legacy in-flight runs without a
 snapshot must be recreated.
@@ -167,7 +169,7 @@ pnpm exec vitest run \
 
 A live author/verifier test additionally requires the built Sandbox worker,
 model credentials for authoring, a control-plane GitHub read credential for the
-private repository, MeterSphere access, target repository package access, and the
+private repository, Case Hub access, target repository package access, and the
 Playwright browsers. `QASEY_IMAGE_DIGEST` is not required locally.
 Production sandbox startup rejects a missing or non-immutable value, and the
 exact release smoke asserts that every task provenance record matches the

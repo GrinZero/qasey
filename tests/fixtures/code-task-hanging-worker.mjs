@@ -58,7 +58,7 @@ if (manifest.spec.taskId.startsWith("terminal-delay")) {
     modelReceivedInMemory: Boolean(credentials.openaiApiKey),
     modelCanaryInWorkerOrChildProc: [process.pid, child.pid].some(pid => procEnvironment(pid).includes(credentials.openaiApiKey ?? "never-match-empty-credential")),
     github: Boolean(process.env.GH_TOKEN || process.env.GITHUB_TOKEN || process.env.GIT_CONFIG_VALUE_0),
-    controlPlane: Boolean(process.env.QASEY_DEV_AUTH_TOKEN || process.env.DATABASE_URL || process.env.METERSPHERE_API_TOKEN),
+    controlPlane: Boolean(process.env.QASEY_DEV_AUTH_TOKEN || process.env.DATABASE_URL),
     repositoryBroker: Boolean(process.env.QASEY_GH_BROKER_URL || process.env.QASEY_GH_BROKER_TOKEN),
   }));
   await symlink("/etc/hosts", join(manifest.artifactRoot, "escaping-link"));

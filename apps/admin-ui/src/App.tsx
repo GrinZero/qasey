@@ -22,6 +22,7 @@ import {
   Inbox,
   KeyRound,
   LayoutDashboard,
+  Library,
   ListFilter,
   LoaderCircle,
   LogOut,
@@ -51,7 +52,7 @@ import { api, ApiError, errorMessage } from "./api";
 import { canRunQaseyTask } from "./catalog";
 import { adminPaths, legacyAdminPath, viewForAdminPath, type View } from "./routes";
 import { presentScope } from "./scopes";
-import type { AgentApplication, ApiTokenRecord, AuditRecord, AuthConfig, CatalogEntry, OrganizationSelection, QaseyRun, RunStatus, SandboxSessionState, Session, TriggerConnection, TriggerConnectionStatus, TriggerProvider, TriggerTarget } from "./types";
+import type { AgentApplication, ApiTokenRecord, AuditRecord, AuthConfig, CaseHubCase, CaseHubCaseVersion, CaseHubChangeSet, CaseHubResult, CatalogEntry, OrganizationSelection, QaseyRun, RunStatus, SandboxSessionState, Session, TriggerConnection, TriggerConnectionStatus, TriggerProvider, TriggerTarget } from "./types";
 
 type AuthState =
   | { kind: "loading" }
@@ -73,6 +74,7 @@ const statusMeta: Record<RunStatus, { label: string; tone: string; step: number 
 };
 
 const activeStatuses: RunStatus[] = ["queued", "preparing_workspace", "authoring", "author_running", "repairing", "clean_verifying"];
+const registrationPasswordMinLength = 10;
 const shortDateFormatter = new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric" });
 const tokenDateFormatter = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "short", day: "numeric" });
 const evidenceStages = [
@@ -162,6 +164,7 @@ export function App() {
   ];
   const qaseyNav: Array<{ id: View; label: string; icon: typeof Gauge; badge?: number }> = [
     { id: "qasey-overview", label: "工作台", icon: MessageSquareText },
+    { id: "qasey-cases", label: "Case Hub", icon: Library },
     { id: "qasey-runs", label: "测试运行", icon: Activity, badge: activeCount },
     { id: "qasey-review", label: "待我审阅", icon: ClipboardCheck, badge: reviewCount },
     { id: "qasey-cua", label: "Ubuntu 工作台", icon: MonitorPlay },
@@ -241,7 +244,8 @@ export function App() {
             <Route path={adminPaths.activity} element={<ActivityView runs={runs} loading={loadingRuns} onRefresh={loadWorkspace} />} />
             <Route path={adminPaths["qasey-overview"]} element={<Overview catalog={catalog} runs={runs} loading={loadingRuns} onRefresh={loadWorkspace} onOpenRuns={() => openView("qasey-runs")} />} />
             <Route path={adminPaths["qasey-runs"]} element={<RunsView runs={runs} loading={loadingRuns} onRefresh={loadWorkspace} />} />
-            <Route path={adminPaths["qasey-review"]} element={<ReviewView runs={runs} onChanged={loadWorkspace} />} />
+            <Route path={adminPaths["qasey-cases"]} element={<CaseHubView />} />
+            <Route path={adminPaths["qasey-review"]} element={<CaseHubView />} />
             <Route path={adminPaths["qasey-cua"]} element={<CuaView subjectId={auth.session.subjectId} />} />
             <Route path={adminPaths.triggers} element={auth.session.isAdmin ? <TriggersView /> : <Navigate to={adminPaths["platform-home"]} replace />} />
             <Route path={adminPaths.access} element={auth.session.isAdmin ? <AccessView session={auth.session} /> : <Navigate to={adminPaths["platform-home"]} replace />} />
@@ -399,15 +403,16 @@ function LoginScreen({ message, redirectUri }: { message: string | undefined; re
               <label htmlFor="auth-email">邮箱
                 <input id="auth-email" name="email" type="email" inputMode="email" autoComplete="email" value={email} disabled={Boolean(busy)} required maxLength={320} autoFocus onChange={event => setEmail(event.target.value)} placeholder="name@example.com" />
               </label>
-              <label htmlFor="auth-password">密码
+              <div className="credential-field">
+                <label htmlFor="auth-password">密码</label>
                 <span className="password-field">
-                  <input id="auth-password" name="password" type={showPassword ? "text" : "password"} autoComplete={mode === "register" ? "new-password" : "current-password"} value={password} disabled={Boolean(busy)} required minLength={15} maxLength={128} onChange={event => setPassword(event.target.value)} placeholder={mode === "register" ? "至少 15 位，建议使用长密码短语" : "输入你的密码"} />
+                  <input id="auth-password" name="password" type={showPassword ? "text" : "password"} autoComplete={mode === "register" ? "new-password" : "current-password"} value={password} disabled={Boolean(busy)} required minLength={mode === "register" ? registrationPasswordMinLength : undefined} maxLength={128} onChange={event => setPassword(event.target.value)} placeholder={mode === "register" ? "至少 10 位，建议使用长密码短语" : "输入你的密码"} />
                   <button type="button" className="password-toggle" aria-label={showPassword ? "隐藏密码" : "显示密码"} aria-pressed={showPassword} disabled={Boolean(busy)} onClick={() => setShowPassword(current => !current)}>{showPassword ? <EyeOff size={17} /> : <Eye size={17} />}</button>
                 </span>
-              </label>
+              </div>
               {mode === "register" && (
                 <label htmlFor="auth-password-confirmation">确认密码
-                  <input id="auth-password-confirmation" name="password-confirmation" type={showPassword ? "text" : "password"} autoComplete="new-password" value={passwordConfirmation} disabled={Boolean(busy)} required minLength={15} maxLength={128} onChange={event => setPasswordConfirmation(event.target.value)} placeholder="再次输入密码" />
+                  <input id="auth-password-confirmation" name="password-confirmation" type={showPassword ? "text" : "password"} autoComplete="new-password" value={passwordConfirmation} disabled={Boolean(busy)} required minLength={registrationPasswordMinLength} maxLength={128} onChange={event => setPasswordConfirmation(event.target.value)} placeholder="再次输入密码" />
                 </label>
               )}
               <button className="credential-submit" type="submit" disabled={Boolean(busy)}>
@@ -608,6 +613,55 @@ function Overview({ catalog, runs, loading, onRefresh, onOpenRuns }: { catalog: 
   );
 }
 
+function CaseHubView() {
+  const [cases, setCases] = useState<CaseHubCase[]>([]);
+  const [changeSets, setChangeSets] = useState<CaseHubChangeSet[]>([]);
+  const [selected, setSelected] = useState<{ changeSet: CaseHubChangeSet; versions: CaseHubCaseVersion[]; results: CaseHubResult[] } | null>(null);
+  const [query, setQuery] = useState("");
+  const [feedback, setFeedback] = useState<Record<string, string>>({});
+  const [error, setError] = useState("");
+  const load = useCallback(async () => {
+    setError("");
+    try {
+      const [caseResponse, changeSetResponse] = await Promise.all([api.listCases(query), api.listChangeSets()]);
+      setCases(caseResponse.cases); setChangeSets(changeSetResponse.changeSets);
+      if (selected) setSelected(await api.getChangeSet(selected.changeSet.id));
+    } catch (cause) { setError(errorMessage(cause)); }
+  }, [query, selected?.changeSet.id]);
+  useEffect(() => { void load(); }, [load]);
+  const open = async (id: string) => { try { setSelected(await api.getChangeSet(id)); } catch (cause) { setError(errorMessage(cause)); } };
+  const review = async (result: CaseHubResult, verdict: "approve" | "request_changes" | "product_bug" | "environment_issue") => {
+    const note = feedback[result.id]?.trim();
+    if (verdict !== "approve" && !note) { setError("非批准结论需要填写反馈。"); return; }
+    try { await api.reviewCaseResult(result.id, verdict, note); await open(result.changeSetId ?? selected!.changeSet.id); }
+    catch (cause) { setError(errorMessage(cause)); }
+  };
+  const latest = selected ? latestCaseResults(selected.results) : [];
+  return <>
+    <PageHeading eyebrow="Case Hub · QASEY" title="测试用例与变更审阅" description="Case Hub 保存不可变 Case Version；Git 只保存与版本绑定的 Playwright。" action={<button className="secondary-button" onClick={() => void load()}><RefreshCw size={16} />刷新</button>} />
+    {error && <InlineError message={error} />}
+    <div className="overview-grid">
+      <section className="surface runs-surface"><div className="list-heading"><div><h2>Case repository</h2><p>{cases.length} 条 QASEY Case</p></div><label className="filter-button"><Search size={15} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索 ID、标题或 Suite" /></label></div>
+        <div className="run-table">{cases.map(testCase => <div className="run-row" key={testCase.id}><div className="run-name"><span className="run-icon"><TestTube2 size={16} /></span><div><strong>{testCase.id} · {testCase.title}</strong><span>{testCase.suitePath}</span></div></div><span>{testCase.activeVersionId ? "Active" : "Proposed"}</span></div>)}</div>
+      </section>
+      <section className="surface runs-surface"><div className="list-heading"><div><h2>Change Sets</h2><p>需求快照、PR 与逐 Case 进度</p></div></div>
+        <div className="handoff-list">{changeSets.map(changeSet => <button key={changeSet.id} onClick={() => void open(changeSet.id)}><span className="app-glyph qasey"><GitBranch size={15} /></span><div><strong>{changeSet.requirement.goal}</strong><small>{changeSet.status} · {changeSet.caseVersionIds.length} cases · {formatRelative(changeSet.updatedAt)}</small></div><ChevronRight size={16} /></button>)}</div>
+      </section>
+    </div>
+    {selected && <section className="surface recent-section"><div className="list-heading"><div><h2>{selected.changeSet.requirement.goal}</h2><p>{selected.changeSet.requirement.requirementSummary}</p></div><span className="status-badge review">{latest.filter(result => result.reviewStatus === "approved").length} / {latest.length} approved</span></div>
+      <div className="review-grid">{selected.versions.map(version => { const result = latest.find(item => item.caseVersionId === version.id); return <article className="review-card" key={version.id}><div className="review-card-head"><div><span>{version.priority} · {version.suitePath}</span><h3>{version.caseId} · {version.title}</h3><p>{version.automationPath} · v{version.version}</p></div><span className="status-badge review">{result?.reviewStatus ?? "verifying"}</span></div><ol>{version.steps.map(step => <li key={`${version.id}:${step.action}`}><strong>{step.action}</strong><span>{step.expected.join("；")}</span></li>)}</ol>{result && <><div className="artifact-links">{result.artifacts.map(artifact => <a key={artifact.id} href={`/v1/runs/${encodeURIComponent(result.runId)}/artifacts/${encodeURIComponent(artifact.id)}`} target="_blank" rel="noreferrer">{artifact.kind} · {artifact.name}</a>)}</div>{result.reviewStatus === "pending" && <><label htmlFor={`case-feedback-${result.id}`}>审阅反馈</label><textarea id={`case-feedback-${result.id}`} value={feedback[result.id] ?? ""} onChange={event => setFeedback(current => ({ ...current, [result.id]: event.target.value }))} placeholder="打回、产品缺陷或环境问题的具体反馈" /><div className="review-actions"><button className="primary-button" onClick={() => void review(result, "approve")}>批准</button><button className="secondary-button" onClick={() => void review(result, "request_changes")}>要求修改</button><button className="secondary-button" onClick={() => void review(result, "product_bug")}>产品缺陷</button><button className="secondary-button" onClick={() => void review(result, "environment_issue")}>环境问题</button></div></>}</>}</article>; })}</div>
+    </section>}
+  </>;
+}
+
+function latestCaseResults(results: CaseHubResult[]): CaseHubResult[] {
+  return [...results.reduce((map, result) => {
+    const current = map.get(result.caseVersionId);
+    if (!current || result.attempt > current.attempt) map.set(result.caseVersionId, result);
+    return map;
+  }, new Map<string, CaseHubResult>()).values()];
+}
+
 function RunsView({ runs, loading, onRefresh }: { runs: QaseyRun[]; loading: boolean; onRefresh: () => Promise<void> }) {
   const [filter, setFilter] = useState<"all" | "active" | "review" | "done">("all");
   const filtered = useMemo(() => runs.filter(run => filter === "all" || filter === "active" && activeStatuses.includes(run.status) || filter === "review" && run.status === "awaiting_qa" || filter === "done" && ["succeeded", "failed", "cancelled"].includes(run.status)), [filter, runs]);
@@ -618,16 +672,6 @@ function RunsView({ runs, loading, onRefresh }: { runs: QaseyRun[]; loading: boo
         <div className="filter-row"><div className="segmented" aria-label="筛选运行">{([['all','全部'],['active','进行中'],['review','待审阅'],['done','已结束']] as const).map(([id,label]) => <button key={id} className={filter === id ? "active" : ""} onClick={() => setFilter(id)}>{label}<span>{countFor(runs,id)}</span></button>)}</div><button className="filter-button"><ListFilter size={16} />更多筛选</button></div>
         <RunTable runs={filtered} loading={loading} expanded />
       </section>
-    </>
-  );
-}
-
-function ReviewView({ runs, onChanged }: { runs: QaseyRun[]; onChanged: () => Promise<void> }) {
-  const reviewRuns = runs.filter(run => run.status === "awaiting_qa");
-  return (
-    <>
-      <PageHeading eyebrow="人工关口" title="待我审阅" description="根据运行证据决定是否通过；要求修改时请留下可执行的反馈。" />
-      {reviewRuns.length === 0 ? <EmptyState icon={ClipboardCheck} title="没有等待审阅的运行" text="新的运行进入人工关口后，会出现在这里。" /> : <div className="review-grid">{reviewRuns.map(run => <ReviewCard key={run.id} run={run} onChanged={onChanged} />)}</div>}
     </>
   );
 }
@@ -733,21 +777,6 @@ function CuaView({ subjectId }: { subjectId: string }) {
       {running && <div className={`cua-controls ${mode === "desktop" ? "desktop" : ""}`}>{mode === "browser" && <><button className="icon-button bordered" onClick={() => void act({ action: "back" })} aria-label="后退">←</button><button className="icon-button bordered" onClick={() => void act({ action: "forward" })} aria-label="前进">→</button><button className="icon-button bordered" onClick={() => void act({ action: "reload" })} aria-label="刷新"><RefreshCw size={15} /></button></>}<label className="cua-type-field"><span>键盘输入</span><input value={typing} onChange={event => setTyping(event.target.value)} placeholder="输入发送到当前焦点…" onKeyDown={event => { if (event.key === "Enter" && typing) { void act({ action: "type", text: typing }); setTyping(""); } }} /></label><button className="secondary-button" disabled={!typing} onClick={() => { void act({ action: "type", text: typing }); setTyping(""); }}>发送</button></div>}
     </section>
   </>;
-}
-
-function ReviewCard({ run, onChanged }: { run: QaseyRun; onChanged: () => Promise<void> }) {
-  const [feedback, setFeedback] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const decide = async (verdict: "approve" | "request_changes") => {
-    if (verdict === "request_changes" && !feedback.trim()) { setError("要求修改时，请说明需要调整的内容。"); return; }
-    if (verdict === "approve" && !window.confirm("确认批准这次运行？批准后将完成当前 QA 关口。")) return;
-    setBusy(true); setError("");
-    try { await api.verdict(run.id, verdict, feedback.trim()); await onChanged(); }
-    catch (cause) { setError(errorMessage(cause)); }
-    finally { setBusy(false); }
-  };
-  return <section className="surface review-card"><div className="review-card-head"><div><span className="mono">{compactId(run.id)}</span><h2>{run.repository.owner}/{run.repository.repository}</h2><p>{run.framework === "playwright" ? "Web · Playwright" : "App · Maestro"} · {formatRelative(run.updatedAt)}</p></div><StatusBadge status={run.status} /></div><EvidenceRail run={run} compact /><div className="artifact-row">{run.artifacts.length ? run.artifacts.slice(0,4).map(item => <a key={item.id} href={`/v1/runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(item.id)}`} target="_blank" rel="noreferrer"><FileSearch size={15} />{item.name}</a>) : <span>此运行暂未上传证据产物</span>}</div><label htmlFor={`feedback-${run.id}`}>审阅反馈 <span>要求修改时必填</span></label><textarea id={`feedback-${run.id}`} rows={3} value={feedback} onChange={event => { setFeedback(event.target.value); setError(""); }} placeholder="指出需要修改的测试、证据或实现…" />{error && <p className="field-error" role="alert"><CircleAlert size={15} />{error}</p>}<div className="review-actions"><button className="secondary-button danger-text" disabled={busy} onClick={() => void decide("request_changes")}><RotateCcw size={16} />要求修改</button><button className="primary-button success-button" disabled={busy} onClick={() => void decide("approve")}>{busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}批准运行</button></div></section>;
 }
 
 const triggerStatusMeta: Record<TriggerConnectionStatus, { label: string; tone: string }> = {
@@ -975,7 +1004,7 @@ function AccessView({ session }: { session: Session }) {
     if (!window.confirm(`确认在租户 ${session.tenantId} 中为 ${subject} 绑定 ${bindingRole}？`)) return;
     try { await api.bind(subject.trim(), bindingRole.trim()); setNotice("成员角色已绑定，并已写入审计记录。"); setError(""); await load(); } catch (cause) { setError(errorMessage(cause)); }
   };
-  return <><PageHeading eyebrow="平台管理" title="访问与审计" description={`所有变更仅作用于 ${session.tenantId}，并记录操作人与请求 ID。`} />{error && <InlineError message={error} />}{notice && <div className="success-notice"><CheckCircle2 size={17} />{notice}</div>}<ApiTokenVault onAuditChanged={() => void load()} onError={setError} /><div className="access-grid"><section className="surface access-card"><div className="section-title"><div><span className="section-icon"><KeyRound size={18} /></span><div><h2>角色权限</h2><p>为已有或新的角色授予一项权限。</p></div></div></div><label>角色<input value={role} onChange={event => setRole(event.target.value)} placeholder="例如 qa-lead" /></label><label>权限<input value={permission} onChange={event => setPermission(event.target.value)} placeholder="例如 qasey.runs.approve" /></label><button className="secondary-button" onClick={() => void grant()}>预览并授予</button></section><section className="surface access-card"><div className="section-title"><div><span className="section-icon"><UserRound size={18} /></span><div><h2>成员角色</h2><p>将组织成员绑定到一个角色。</p></div></div></div><label>成员标识<input value={subject} onChange={event => setSubject(event.target.value)} placeholder="平台用户 ID" /></label><label>角色<input value={bindingRole} onChange={event => setBindingRole(event.target.value)} placeholder="例如 qa-lead" /></label><button className="secondary-button" onClick={() => void bind()}>预览并绑定</button></section></div><section className="surface audit-section"><div className="list-heading"><div><h2>最近审计</h2><p>访问判定与权限变更</p></div><button className="icon-button bordered" onClick={() => void load()} aria-label="刷新审计"><RefreshCw size={17} /></button></div>{records.length === 0 ? <p className="empty-row">暂无审计记录</p> : <div className="audit-list">{records.slice(0,50).map(record => <div key={`${record.requestId}-${record.resourceType}-${record.resourceId}-${record.action}`}><span className={`decision ${record.decision}`}>{record.decision === "allow" ? "允许" : "拒绝"}</span><div><strong>{record.action} · {record.resourceId}</strong><span>{record.subjectId ?? "匿名请求"} · {record.reason}</span></div><code>{compactId(record.requestId)}</code></div>)}</div>}</section></>;
+  return <><PageHeading eyebrow="平台管理" title="访问与审计" description={`所有变更仅作用于 ${session.tenantId}，并记录操作人与请求 ID。`} />{error && <InlineError message={error} />}{notice && <div className="success-notice"><CheckCircle2 size={17} />{notice}</div>}<ApiTokenVault onAuditChanged={() => void load()} onError={setError} /><div className="access-grid"><section className="surface access-card"><div className="section-title"><div><span className="section-icon"><KeyRound size={18} /></span><div><h2>角色权限</h2><p>为已有或新的角色授予一项权限。</p></div></div></div><label>角色<input value={role} onChange={event => setRole(event.target.value)} placeholder="例如 qa-lead" /></label><label>权限<input value={permission} onChange={event => setPermission(event.target.value)} placeholder="例如 qasey.results.approve" /></label><button className="secondary-button" onClick={() => void grant()}>预览并授予</button></section><section className="surface access-card"><div className="section-title"><div><span className="section-icon"><UserRound size={18} /></span><div><h2>成员角色</h2><p>将组织成员绑定到一个角色。</p></div></div></div><label>成员标识<input value={subject} onChange={event => setSubject(event.target.value)} placeholder="平台用户 ID" /></label><label>角色<input value={bindingRole} onChange={event => setBindingRole(event.target.value)} placeholder="例如 qa-lead" /></label><button className="secondary-button" onClick={() => void bind()}>预览并绑定</button></section></div><section className="surface audit-section"><div className="list-heading"><div><h2>最近审计</h2><p>访问判定与权限变更</p></div><button className="icon-button bordered" onClick={() => void load()} aria-label="刷新审计"><RefreshCw size={17} /></button></div>{records.length === 0 ? <p className="empty-row">暂无审计记录</p> : <div className="audit-list">{records.slice(0,50).map(record => <div key={`${record.requestId}-${record.resourceType}-${record.resourceId}-${record.action}`}><span className={`decision ${record.decision}`}>{record.decision === "allow" ? "允许" : "拒绝"}</span><div><strong>{record.action} · {record.resourceId}</strong><span>{record.subjectId ?? "匿名请求"} · {record.reason}</span></div><code>{compactId(record.requestId)}</code></div>)}</div>}</section></>;
 }
 
 function EvidenceRail({ run, compact = false }: { run: QaseyRun; compact?: boolean }) {
@@ -1029,5 +1058,5 @@ function formatRelative(value: string): string { const seconds = Math.max(0, Mat
 function blobDataUrl(blob: Blob): Promise<string> { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("浏览器画面格式无效。")); reader.onerror = () => reject(reader.error ?? new Error("无法读取浏览器画面。")); reader.readAsDataURL(blob); }); }
 function friendlySsoError(error: string): string { let decoded = error; try { decoded = decodeURIComponent(error); } catch { /* malformed OAuth errors remain safe to display generically */ } if (/domain|hosted/iu.test(decoded)) return "此 Google 账户不属于允许的组织，请切换工作账户。"; if (/expired|state/iu.test(decoded)) return "登录链接已失效，请重新开始登录。"; return "登录未完成，请重试；如果问题持续出现，请联系平台管理员。"; }
 function extractAgentText(response: Record<string, unknown>): string { if (typeof response.text === "string") return response.text; const message = response.message; if (message && typeof message === "object" && "content" in message && typeof message.content === "string") return message.content; return "Qasey 已完成处理。打开运行记录查看后续进度与证据。"; }
-function railDetail(run: QaseyRun, index: number): string { if (index === 0) return `${run.sourceCaseIds.length} 个来源`; if (index === 3) return run.framework === "playwright" ? "Playwright" : "Maestro"; if (index === 4) return `${run.artifacts.length} 项证据`; return index < statusMeta[run.status].step ? "已完成" : index === statusMeta[run.status].step ? statusMeta[run.status].label : "等待中"; }
+function railDetail(run: QaseyRun, index: number): string { if (index === 0) return `Change Set ${run.changeSetId.slice(0, 8)}`; if (index === 3) return "Playwright"; if (index === 4) return `${run.artifacts.length} 项证据`; return index < statusMeta[run.status].step ? "已完成" : index === statusMeta[run.status].step ? statusMeta[run.status].label : "等待中"; }
 function countFor(runs: QaseyRun[], id: "all" | "active" | "review" | "done"): number { if (id === "all") return runs.length; if (id === "active") return runs.filter(run => activeStatuses.includes(run.status)).length; if (id === "review") return runs.filter(run => run.status === "awaiting_qa").length; return runs.filter(run => ["succeeded","failed","cancelled"].includes(run.status)).length; }

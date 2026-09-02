@@ -23,23 +23,11 @@ import { TenantMcpConnectionResolver, type TenantMcpServer } from "../../../src/
 import { sanitizeOpenAIToolInputSchema } from "./tool-schema-compat.ts";
 
 const allowedTools = {
-  metersphere: new Set([
-    "ms_bulk_upsert_test_cases", "ms_list_modules", "ms_get_test_case_detail", "ms_create_test_case",
-    "ms_batch_edit_test_cases", "ms_list_test_cases", "ms_edit_test_case", "ms_upsert_module",
-  ]),
   figma: new Set(["figma_get_comments", "figma_get_components", "figma_export_image", "figma_get_node_detail", "figma_get_page_structure", "figma_list_pages"]),
   qaExperience: new Set(["qa_context_get", "qa_experience_list", "qa_experience_read", "qa_experience_upsert"]),
   rag: new Set(["answer"]),
   lark: new Set(["lark_doc_search", "lark_doc_read"]),
 } as const;
-
-/** Runtime-critical tools that every production MeterSphere connection must expose. */
-export const QASEY_REQUIRED_METERSPHERE_TOOL_NAMES = [
-  "metersphere_ms_bulk_upsert_test_cases",
-  "metersphere_ms_get_test_case_detail",
-  "metersphere_ms_list_modules",
-  "metersphere_ms_list_test_cases",
-] as const;
 
 /** Static upper bound used by safe experiment validation; does not contact MCP servers. */
 export const QASEY_MCP_ALLOWED_TOOL_NAMES = Object.entries(allowedTools).flatMap(([server, tools]) =>
@@ -47,7 +35,6 @@ export const QASEY_MCP_ALLOWED_TOOL_NAMES = Object.entries(allowedTools).flatMap
 );
 
 const defaultTimeouts: Record<McpServerName, number> = {
-  metersphere: 60_000,
   figma: 120_000,
   qaExperience: 60_000,
   rag: 180_000,
@@ -352,17 +339,6 @@ export class QaseyMcpCatalog {
     await this.oauthBackend?.healthCheck();
   }
 
-  async healthCheckRequiredMeterSphereTools(): Promise<void> {
-    if (!this.servers.metersphere) {
-      throw new Error("Required MCP server is not configured: metersphere");
-    }
-    const tools = await this.discoveredTools();
-    const missing = QASEY_REQUIRED_METERSPHERE_TOOL_NAMES.filter(name => !tools[name]);
-    if (missing.length > 0) {
-      throw new Error(`Required MeterSphere MCP tools are unavailable: ${missing.join(", ")}`);
-    }
-  }
-
   private oauthServerNames(): McpServerName[] {
     return this.configuredServers().filter(name => this.servers[name]!.auth.type === "oauth");
   }
@@ -389,8 +365,8 @@ export class QaseyMcpCatalog {
 
   /**
    * Caller-bound catalog for qasey-main Tool Discovery. Semantic intent does
-   * not prune this catalog. Real case mutation is still blocked by the Agent
-   * wrapper and owned by the deterministic MeterSphere workflow.
+   * not prune this catalog. Case Hub mutations are separate owned tools and
+   * never enter the external MCP catalog.
    */
   async toolsForDiscovery(
     channel: QaseyChannel,
@@ -399,18 +375,8 @@ export class QaseyMcpCatalog {
   ): Promise<ToolsInput> {
     const tools = await this.discoveredTools(subject);
     return this.selectTools(tools, channel, {
-      canWriteCases: !options.readOnly,
       canWriteExperience: !options.readOnly && channel === "slack",
       ...(options.readOnly === undefined ? {} : { readOnly: options.readOnly }),
-    });
-  }
-
-  /** Write-capable tools are exposed only inside the owned case Workflow. */
-  async toolsForCaseWorkflow(channel: QaseyChannel, subject?: McpCredentialSubject): Promise<ToolsInput> {
-    const tools = await this.discoveredTools(subject);
-    return this.selectTools(tools, channel, {
-      canWriteCases: true,
-      canWriteExperience: false,
     });
   }
 
@@ -437,7 +403,6 @@ export class QaseyMcpCatalog {
     tools: ToolsInput,
     channel: QaseyChannel,
     access: {
-      canWriteCases: boolean;
       canWriteExperience: boolean;
       readOnly?: boolean;
     },
@@ -447,7 +412,6 @@ export class QaseyMcpCatalog {
       const tool = parts.join("_");
       const allowlist = allowedTools[server as keyof typeof allowedTools];
       if (!allowlist?.has(tool as never)) return false;
-      if (server === "metersphere" && /create|edit|upsert|delete/.test(tool)) return access.canWriteCases && !tool.includes("delete");
       if (server === "qaExperience" && tool === "qa_experience_upsert") return access.canWriteExperience;
       return true;
     });
@@ -455,9 +419,7 @@ export class QaseyMcpCatalog {
     for (const [qualified, tool] of selected) {
       const [server = "", ...parts] = qualified.split("_");
       const name = parts.join("_");
-      const policyId = server === "metersphere"
-        ? (/create|edit|upsert|delete/.test(name) ? "metersphere_write" : "metersphere_read")
-        : server === "qaExperience" && name === "qa_experience_upsert"
+      const policyId = server === "qaExperience" && name === "qa_experience_upsert"
           ? "qa_experience_write"
           : "external_read";
       const policy = TOOL_POLICIES[policyId]!;

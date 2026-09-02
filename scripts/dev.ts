@@ -4,7 +4,15 @@ import { readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import process from "node:process";
+import "../src/load-env.ts";
 import { acquireDevelopmentLock } from "./dev-lock.ts";
+
+const arguments_ = process.argv.slice(2);
+const unknownArguments = arguments_.filter(argument => argument !== "--external-sandbox");
+if (unknownArguments.length > 0) {
+  throw new Error(`Unknown development argument: ${unknownArguments.join(", ")}`);
+}
+const externalSandbox = arguments_.includes("--external-sandbox");
 
 // Mastra recreates `.mastra` during startup, so the outer process lock must
 // live in Qasey's own ignored runtime directory.
@@ -35,15 +43,23 @@ const localSandboxLeaseKey = randomBytes(32).toString("base64url");
 const developmentEnv: NodeJS.ProcessEnv = {
   ...process.env,
   NODE_ENV: "development",
-  QASEY_DATA_ROOT: resolve(".qasey/local-sandbox"),
-  QASEY_SANDBOX_ENDPOINT_TEMPLATE: "http://127.0.0.1:412{ordinal}",
-  QASEY_SANDBOX_PORT: String(localSandboxPort),
-  QASEY_SANDBOX_REPLICAS: "1",
-  QASEY_SANDBOX_MAX_SESSIONS: "1",
-  QASEY_SANDBOX_DESKTOP_ENABLED: "false",
-  QASEY_SANDBOX_CONTROL_KEY: localSandboxControlKey,
-  QASEY_SANDBOX_LEASE_KEY: localSandboxLeaseKey,
-  PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH ?? defaultPlaywrightBrowsersPath(),
+  ...(externalSandbox
+    ? {
+        QASEY_SANDBOX_ENDPOINT_TEMPLATE: process.env.QASEY_SANDBOX_ENDPOINT_TEMPLATE ?? "http://sandbox-{ordinal}:4120",
+        QASEY_SANDBOX_REPLICAS: process.env.QASEY_SANDBOX_REPLICAS ?? "1",
+        QASEY_SANDBOX_MAX_SESSIONS: process.env.QASEY_SANDBOX_MAX_SESSIONS ?? "1",
+      }
+    : {
+        QASEY_DATA_ROOT: resolve(".qasey/local-sandbox"),
+        QASEY_SANDBOX_ENDPOINT_TEMPLATE: "http://127.0.0.1:412{ordinal}",
+        QASEY_SANDBOX_PORT: String(localSandboxPort),
+        QASEY_SANDBOX_REPLICAS: "1",
+        QASEY_SANDBOX_MAX_SESSIONS: "1",
+        QASEY_SANDBOX_DESKTOP_ENABLED: "false",
+        QASEY_SANDBOX_CONTROL_KEY: localSandboxControlKey,
+        QASEY_SANDBOX_LEASE_KEY: localSandboxLeaseKey,
+        PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH ?? defaultPlaywrightBrowsersPath(),
+      }),
 };
 
 function defaultPlaywrightBrowsersPath(): string {
@@ -151,6 +167,21 @@ try {
   const adminBuild = await run("pnpm", ["admin-ui:build"]);
   if (adminBuild.code !== 0) {
     process.exitCode = exitCode(adminBuild);
+  } else if (externalSandbox) {
+    forwardedSignal = undefined;
+    const mastra = spawnChild("pnpm", [
+      "exec",
+      "mastra",
+      "dev",
+      "--dir",
+      "src/mastra",
+      "--env",
+      ".devcontainer/mastra.env",
+    ], developmentEnv);
+    await waitForSpawn(mastra);
+    await lock.setChildPid(mastra.pid!);
+    const result = await waitForExit(mastra);
+    process.exitCode = forwardedSignal ? signalExitCode(forwardedSignal) : exitCode(result) || 1;
   } else {
     const runtimeBuild = await run("pnpm", ["exec", "tsup"]);
     if (runtimeBuild.code !== 0) {

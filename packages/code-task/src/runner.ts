@@ -14,8 +14,15 @@ export interface TaskHandle {
   status: CodeTaskState["status"];
 }
 
+export interface CodeTaskSecrets {
+  environment?: {
+    QASEY_E2E_BASE_URL?: string;
+    QASEY_E2E_SESSION_TOKEN?: string;
+  };
+}
+
 export interface CodeTaskRunner {
-  submit(spec: CodeTaskSpec): Promise<TaskHandle>;
+  submit(spec: CodeTaskSpec, secrets?: CodeTaskSecrets): Promise<TaskHandle>;
   get(taskId: string): Promise<CodeTaskState>;
   events(taskId: string, after?: string): Promise<CodeTaskEventPage>;
   cancel(taskId: string, reason: string): Promise<void>;
@@ -33,6 +40,7 @@ export interface WaitForCodeTaskOptions {
   onEvents?: (events: CodeTaskEvent[]) => Promise<void> | void;
   onHeartbeat?: () => Promise<void> | void;
   lostRetries?: number;
+  secrets?: CodeTaskSecrets;
 }
 
 export async function waitForCodeTask(
@@ -68,7 +76,7 @@ export async function submitAndWaitForCodeTask(
   let current = spec;
   const retries = options.lostRetries ?? 1;
   for (let recovery = 0; recovery <= retries; recovery += 1) {
-    await runner.submit(current);
+    await runner.submit(current, options.secrets);
     try {
       return { result: await waitForCodeTaskWithEvents(runner, current.taskId, options), spec: current };
     } catch (error) {

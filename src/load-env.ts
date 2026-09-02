@@ -46,10 +46,13 @@ export function resolveRuntimeEnvironment(
   cwd = process.cwd(),
   defaultEnvironment = "development",
 ): string {
+  // Validate caller-controlled defaults before consulting filesystem paths so
+  // a local env file cannot mask an unsafe environment selector.
+  const parsedDefaultEnvironment = parseRuntimeEnvironment(defaultEnvironment);
   return runtimeEnvironment(env)
     ?? environmentFromFile(resolve(cwd, ".env.local"))
     ?? environmentFromFile(resolve(cwd, ".env"))
-    ?? parseRuntimeEnvironment(defaultEnvironment)
+    ?? parsedDefaultEnvironment
     ?? "development";
 }
 

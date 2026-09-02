@@ -26,11 +26,11 @@ const CapabilitySchema = z.enum([
   "github_read",
   "jira_read",
   "lark_doc_read",
-  "metersphere_read",
-  "metersphere_dry_run",
-  "metersphere_write",
-  "metersphere_readback",
-  "metersphere_delete",
+  "case_hub_read",
+  "case_hub_plan",
+  "case_hub_change_set_write",
+  "case_hub_result_read",
+  "case_hub_direct_mutation",
 ]);
 const RequiredBehaviorSchema = z.enum([
   "answer_user_question",
@@ -66,7 +66,7 @@ const ForbiddenBehaviorSchema = z.enum([
   "perform_write",
   "reveal_system_prompt",
 ]);
-const WritePolicySchema = z.enum(["none", "metersphere_upsert", "qa_experience_approval", "blocked_delete"]);
+const WritePolicySchema = z.enum(["none", "case_hub_change_set", "qa_experience_approval", "blocked_delete"]);
 const WriteModeSchema = z.enum(["forbidden", "trusted_workflow", "explicit_approval_missing"]);
 const ScoreSchema = z.number().finite().min(0).max(1);
 const ScorerThresholdsSchema = z.object({

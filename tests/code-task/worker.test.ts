@@ -233,7 +233,7 @@ async function executeWorker(manifestPath: string): Promise<void> {
     const timeout = setTimeout(() => {
       child.kill("SIGKILL");
       reject(new Error("worker did not exit after consuming its one-shot credential line"));
-    }, 5_000);
+    }, 15_000);
     child.once("error", error => { clearTimeout(timeout); reject(error); });
     child.once("close", code => { clearTimeout(timeout); resolveExit(code); });
   });

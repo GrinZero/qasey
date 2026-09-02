@@ -59,8 +59,6 @@ describe("shared runtime configuration", () => {
     expect(config.DD_LLMOBS_AGENTLESS_ENABLED).toBe(false);
     expect(config.DD_SITE).toBe("datadoghq.com");
     expect(config.DD_SERVICE).toBe("qasey");
-    expect(config.METERSPHERE_BASE_URL).toBeUndefined();
-    expect(config.METERSPHERE_PROJECT_ID).toBeUndefined();
     expect(config.SLACK_CHANNEL_MODE).toBe("auto");
     expect(config.QASEY_SANDBOX_ENDPOINT_TEMPLATE).toBeUndefined();
     expect(config.QASEY_DEV_RUNTIME_ID).toBeUndefined();

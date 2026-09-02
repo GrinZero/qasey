@@ -6,7 +6,6 @@ import {
   ToolSearchProcessor,
 } from "@mastra/core/processors";
 import type { Processor, ProcessInputStepArgs, ProcessInputStepResult } from "@mastra/core/processors";
-import { QASEY_REQUIRED_METERSPHERE_TOOL_NAMES } from "../../../../packages/adapters/src/index.ts";
 import {
   config,
   getRuntimeContext,
@@ -14,10 +13,6 @@ import {
   studioMcpPreviewEnabled,
   toolsForRequest,
 } from "../../runtime.ts";
-import {
-  METERSPHERE_COMMIT_CASE_PLAN_TOOL_NAME,
-  meterSphereCommitCasePlanTool,
-} from "../../applications/qasey/metersphere-case-tools.ts";
 
 /** Time is the primary run limit; this only protects against an unexpectedly hot loop. */
 export const QASEY_AGENT_SAFETY_MAX_STEPS = 10_000;
@@ -25,8 +20,8 @@ export const QASEY_AGENT_FINAL_RESPONSE_GRACE_MS = 5 * 60_000;
 
 const QASEY_RUN_STARTED_AT_STATE_KEY = "qasey-run-started-at";
 const QASEY_DIRECT_TOOL_NAMES = new Set<string>([
-  ...QASEY_REQUIRED_METERSPHERE_TOOL_NAMES.filter(name => name !== "metersphere_ms_bulk_upsert_test_cases"),
-  METERSPHERE_COMMIT_CASE_PLAN_TOOL_NAME,
+  "caseHubCreateChangeSet",
+  "caseHubRerunResults",
 ]);
 
 /** Reserve time for a final answer before the wall-clock abort signal fires. */
@@ -124,8 +119,8 @@ export function createQaseyStreamBatcher() {
 }
 
 /**
- * Resolve the caller-bound capability catalog once per request. Stable
- * MeterSphere case-management tools are injected directly; optional tools stay
+ * Resolve the caller-bound capability catalog once per request. Mutating Case
+ * Hub and E2E tools remain direct; optional external tools stay
  * out of the prompt until qasey-main discovers them. Agent-level Skill tools
  * remain framework-managed and are not hidden here.
  */
@@ -143,10 +138,7 @@ export async function resolveQaseyMainInputProcessors({
     // empty RequestContext. It needs the stable processor topology, not tools.
     tools = {} as Awaited<ReturnType<typeof toolsForRequest>>;
   }
-  const trustedQaseyRequest = Boolean(requestContext.get("qasey-context"));
-  const requestTools = trustedQaseyRequest
-    ? { ...tools, [METERSPHERE_COMMIT_CASE_PLAN_TOOL_NAME]: meterSphereCommitCasePlanTool }
-    : tools;
+  const requestTools = tools;
   const { directTools, searchableTools } = partitionQaseyDirectTools(requestTools);
   const modelOutputToolNames = Object.entries(requestTools)
     .filter(([, tool]) => {

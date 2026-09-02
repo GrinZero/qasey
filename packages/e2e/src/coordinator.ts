@@ -28,6 +28,18 @@ export interface PublishedChange {
   content?: Buffer;
 }
 
+export interface E2EFixtureLease {
+  id: string;
+  baseUrl: string;
+  sourceSha: string;
+  sessionToken: string;
+}
+
+export interface E2EFixtureLeaseProvider {
+  acquire(input: { owner: OwnerScope; runId: string; expectedSourceSha: string }): Promise<E2EFixtureLease>;
+  release(lease: E2EFixtureLease): Promise<void>;
+}
+
 export class NoopDraftPrBroker implements DraftPrBroker {
   async publishChanges(): Promise<undefined> { return undefined; }
   async markReady(): Promise<void> {}
@@ -38,7 +50,7 @@ export class E2ECoordinator {
     private readonly repository: RunRepository,
     private readonly artifacts: ArtifactStore,
     private readonly prBroker: DraftPrBroker,
-    private readonly options: { maxRepairs: number; reviewBaseUrl: string; codeTasks?: CodeTaskRunnerProvider; effects?: SideEffectRunner },
+    private readonly options: { maxRepairs: number; reviewBaseUrl: string; codeTasks?: CodeTaskRunnerProvider; effects?: SideEffectRunner; fixtureLeases?: E2EFixtureLeaseProvider },
   ) {}
 
   assertExecutionAvailable(): void {
@@ -66,7 +78,7 @@ export class E2ECoordinator {
     const run: E2ERun = {
       ...owner,
       id: randomUUID(), requestId, sourceSessionId: source.sessionId,
-      sourceCaseIds: trustedInput.sourceCaseIds, contextSnapshot, caseSnapshot: [], amendments: [], codeTaskIds: [],
+      changeSetId: trustedInput.changeSetId, contextSnapshot, caseSnapshot: [], amendments: [], codeTaskIds: [],
       repository: trustedInput.repository, platform: trustedInput.platform,
       playwrightVerification: trustedInput.playwrightVerification,
       framework: trustedInput.framework, status: "queued", revision: 1, createdAt: now, updatedAt: now, artifacts: [],
@@ -124,9 +136,9 @@ export class E2ECoordinator {
     return this.authorWithCodeTasks(owner, runId, qaFeedback);
   }
 
-  async cleanVerifyAndPublish(owner: OwnerScope, runId: string): Promise<void> {
+  async cleanVerifyAndPublish(owner: OwnerScope, runId: string, requirePassing = false): Promise<void> {
     this.assertExecutionAvailable();
-    return this.verifyWithCodeTask(owner, runId);
+    return this.verifyWithCodeTask(owner, runId, requirePassing);
   }
 
   private async authorWithCodeTasks(owner: OwnerScope, runId: string, qaFeedback?: string): Promise<void> {
@@ -186,13 +198,14 @@ export class E2ECoordinator {
     }
   }
 
-  private async verifyWithCodeTask(owner: OwnerScope, runId: string): Promise<void> {
+  private async verifyWithCodeTask(owner: OwnerScope, runId: string, requirePassing: boolean): Promise<void> {
     let run = await this.requireRun(owner, runId);
     if (!run.executionBrief || !run.briefHash || !run.baseSha) throw new Error("E2E execution brief and pinned base SHA must be frozen before verification");
     const patchRef = run.artifacts.find(item => item.kind === "patch" && item.id === `${run.id}:patch`);
     if (!patchRef) throw new Error("Clean verifier requires the persisted author patch");
     const runner = await this.options.codeTasks!.forScope({ ...owner, sessionId: run.sourceSessionId });
-    const taskId = `${run.id}:verifier:0`;
+    const verifierAttempt = run.codeTaskIds.filter(id => id.startsWith(`${run.id}:verifier:`)).length;
+    const taskId = `${run.id}:verifier:${verifierAttempt}`;
     const contextContent = JSON.stringify({ brief: run.executionBrief, purpose: "Apply the immutable patch and run fixed clean verification only." });
     const contextRef = await this.artifacts.saveTaskContext(owner, run.id, taskId, contextContent);
     run = await this.appendArtifacts(owner, run, [contextRef]);
@@ -205,17 +218,34 @@ export class E2ECoordinator {
     run = await this.repository.update(owner, run.id, run.revision, { codeTaskIds: [...run.codeTaskIds, taskId] });
     await this.repository.addEvent(owner, run.id, "code_task.submitted", "Sandbox verifier CodeTask submitted", codeTaskMetadata(spec));
     const startedAt = Date.now();
-    const executed = await submitAndWaitForCodeTask(runner, spec, {
-      deadlineMs: spec.deadlineMs + 30_000,
-      lostRetries: 1,
-      onHeartbeat: throttledHeartbeat(() => this.repository.heartbeat(owner, run.id)),
-    });
+    const fixtureLease = this.options.fixtureLeases
+      ? await this.options.fixtureLeases.acquire({ owner, runId: run.id, expectedSourceSha: run.baseSha! })
+      : undefined;
+    let executed;
+    try {
+      executed = await submitAndWaitForCodeTask(runner, spec, {
+        deadlineMs: spec.deadlineMs + 30_000,
+        lostRetries: 1,
+        onHeartbeat: throttledHeartbeat(() => this.repository.heartbeat(owner, run.id)),
+        ...(fixtureLease ? { secrets: { environment: {
+          QASEY_E2E_BASE_URL: fixtureLease.baseUrl,
+          QASEY_E2E_SESSION_TOKEN: fixtureLease.sessionToken,
+        } } } : {}),
+      });
+    } finally {
+      if (fixtureLease) await this.options.fixtureLeases!.release(fixtureLease);
+    }
     const result = executed.result;
     await this.repository.addEvent(owner, run.id, "code_task.completed", `Sandbox verifier CodeTask ${result.status}`, {
       ...codeTaskMetadata(executed.spec), status: result.status, durationMs: Date.now() - startedAt, provenance: result.provenance,
     });
-    run = await this.persistCodeTaskEvidence(owner, run, "verifier", runner, result.artifacts.filter(item => item.kind === "log"));
-    if (result.status !== "succeeded") throw new Error(`Clean verifier CodeTask failed: ${result.summary.slice(-1_500)}`);
+    run = await this.persistCodeTaskEvidence(owner, run, "verifier", runner, result.artifacts);
+    const reviewableTestFailure = result.status === "failed"
+      && result.checks.some(check => check.id === "playwright" && !check.passed)
+      && result.checks.every(check => check.id === "playwright" || check.passed);
+    if (result.status !== "succeeded" && (!reviewableTestFailure || requirePassing)) {
+      throw new Error(`Clean verifier CodeTask failed: ${result.summary.slice(-1_500)}`);
+    }
     const changes = await this.materializePublishedChanges(runner, result.changes);
     const reviewUrl = `${this.options.reviewBaseUrl.replace(/\/$/, "")}/runs/${run.id}`;
     const publication = this.options.effects
@@ -246,7 +276,9 @@ export class E2ECoordinator {
     const pullRequestUrl = publication.pullRequestUrl;
     if (pullRequestUrl) run = await this.repository.update(owner, run.id, run.revision, { pullRequestUrl });
     else await this.repository.addEvent(owner, run.id, "pr.skipped", "Verifier passed; remote Draft PR broker is disabled");
-    await this.transition(owner, run, "awaiting_qa", "Clean Sandbox verifier passed; awaiting QA review");
+    await this.transition(owner, run, "awaiting_qa", reviewableTestFailure
+      ? "Clean Sandbox verifier completed with Case failures; awaiting QA classification"
+      : "Clean Sandbox verifier passed; awaiting QA review");
   }
 
   private codeTaskSpec(
@@ -279,7 +311,7 @@ export class E2ECoordinator {
       baseSha: run.baseSha!,
       executionProfileId: options.profile,
       allowedPaths: run.repository.allowedPaths,
-      fixedChecks: [{ id: "repo-install" }, { id: "playwright" }],
+      fixedChecks: options.profile === "web-e2e-verifier" ? [{ id: "repo-install" }, { id: "playwright" }] : [{ id: "repo-install" }],
       playwrightVerification,
       deadlineMs: 20 * 60_000,
       traceContext: { ...(run.traceId ? { traceId: run.traceId } : {}) },
@@ -326,9 +358,12 @@ export class E2ECoordinator {
       if (run.pullRequestUrl) await this.prBroker.markReady(run);
       return this.transition(owner, run, "succeeded", `Approved by ${verdict.reviewerId}; Draft PR marked ready`);
     }
+    if (verdict.caseVersionId && run.amendments.filter(item => item.caseVersionId === verdict.caseVersionId).length >= 2) {
+      throw new Error(`Case Version ${verdict.caseVersionId} reached the two-revision limit`);
+    }
     let repaired = await this.transition(owner, run, "repairing", `Changes requested by ${verdict.reviewerId}`);
     if (verdict.feedback) {
-      repaired = await this.repository.update(owner, runId, repaired.revision, { amendments: [...repaired.amendments, createE2EAmendment(verdict.reviewerId, verdict.feedback)] });
+      repaired = await this.repository.update(owner, runId, repaired.revision, { amendments: [...repaired.amendments, createE2EAmendment(verdict.reviewerId, verdict.feedback, new Date(), verdict.caseVersionId)] });
     }
     await this.repository.addEvent(owner, runId, "qa.feedback", verdict.feedback ?? "Changes requested");
     return repaired;

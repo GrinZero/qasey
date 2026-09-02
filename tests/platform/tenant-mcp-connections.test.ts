@@ -18,8 +18,8 @@ describe("tenant-owned MCP connections", () => {
     const resolver = new TenantMcpConnectionResolver(store);
 
     const tenantA = await resolver.resolve("tenant-a", []);
-    expect(Object.keys(tenantA.servers)).toEqual(["metersphere"]);
-    expect(tenantA.servers.metersphere).toMatchObject({
+    expect(Object.keys(tenantA.servers)).toEqual(["figma"]);
+    expect(tenantA.servers.figma).toMatchObject({
       url: "https://mcp-a.example.com/mcp",
       allowedHosts: ["mcp-a.example.com"],
       bearerToken: "a-token",
@@ -56,7 +56,7 @@ describe("tenant-owned MCP connections", () => {
     await createConnection(duplicate, "tenant-a", "two", { name: "second" });
     await expect(new TenantMcpConnectionResolver(duplicate).resolve("tenant-a", []))
       .rejects.toThrow(/duplicate serverName/u);
-    await expect(new TenantMcpConnectionResolver(duplicate).resolve("tenant-a", ["metersphere"]))
+    await expect(new TenantMcpConnectionResolver(duplicate).resolve("tenant-a", ["figma"]))
       .rejects.toThrow(/collides/u);
   });
 
@@ -72,8 +72,8 @@ describe("tenant-owned MCP connections", () => {
         disconnect,
         listToolsWithErrors: vi.fn(async () => ({
           tools: Object.fromEntries(Object.keys(options.servers).map(serverName => [
-            `${serverName}_ms_list_modules`,
-            { id: `${serverName}_ms_list_modules`, execute: async () => ({ ok: true }) },
+            `${serverName}_figma_list_pages`,
+            { id: `${serverName}_figma_list_pages`, execute: async () => ({ ok: true }) },
           ])),
           errors: {},
         })),
@@ -90,8 +90,8 @@ describe("tenant-owned MCP connections", () => {
       const toolsA = await catalog.toolsForDiscovery("api", subject("tenant-a"));
       await catalog.toolsForDiscovery("api", subject("tenant-a"));
       const toolsB = await catalog.toolsForDiscovery("api", subject("tenant-b"));
-      expect(Object.keys(toolsA)).toEqual(["metersphere_ms_list_modules"]);
-      expect(Object.keys(toolsB)).toEqual(["metersphere_ms_list_modules"]);
+      expect(Object.keys(toolsA)).toEqual(["figma_figma_list_pages"]);
+      expect(Object.keys(toolsB)).toEqual(["figma_figma_list_pages"]);
       expect(createClient).toHaveBeenCalledTimes(2);
       expect(bearer(created[0]!.options)).toBe("Bearer a-token");
       expect(bearer(created[1]!.options)).toBe("Bearer b-token");
@@ -127,9 +127,9 @@ async function createConnection(
   return store.create({
     tenantId,
     provider: "mcp",
-    name: options.name ?? "metersphere",
+    name: options.name ?? "figma",
     configuration: {
-      serverName: "metersphere",
+      serverName: "figma",
       url: options.url ?? `https://mcp-${tenantId.endsWith("a") ? "a" : "b"}.example.com/mcp`,
       allowedHosts: [`mcp-${tenantId.endsWith("a") ? "a" : "b"}.example.com`],
       timeoutMs: 30_000,
@@ -141,7 +141,7 @@ async function createConnection(
 }
 
 function bearer(options: MCPClientOptions): string | null {
-  const server = options.servers.metersphere;
+  const server = options.servers.figma;
   if (!server || !("requestInit" in server)) return null;
   return new Headers(server.requestInit?.headers).get("authorization");
 }

@@ -9,7 +9,6 @@ import { config } from "../../runtime.ts";
 import { traceQaseyOperation } from "./observability.ts";
 import { executeQasey, QaseyResponseSchema } from "./service.ts";
 import { logError, logInfo } from "../../../../packages/adapters/src/index.ts";
-import { slackCaseCompletionCards } from "./slack-case-delivery.ts";
 import {
   markSlackRequestFinished,
   markSlackRequestStarted,
@@ -316,12 +315,7 @@ export function createQaseySlackChannelConfig(options: QaseySlackChannelOptions)
           },
         });
       }
-      const completionCards = config.METERSPHERE_BASE_URL && config.METERSPHERE_PROJECT_ID
-        ? slackCaseCompletionCards(result.completionReceipt, {
-            baseUrl: config.METERSPHERE_BASE_URL,
-            projectId: config.METERSPHERE_PROJECT_ID,
-          })
-        : [];
+      const completionCards: never[] = [];
       const sourceFooter = executionSource ? `\n\n_运行环境：${executionSource}_` : "";
       const finalText = `${result.text}${sourceFooter}`;
       await traceQaseyOperation(

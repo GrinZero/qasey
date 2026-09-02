@@ -296,6 +296,7 @@ export class QaseySandboxRuntime {
       return sendJson(response, this.ready ? 200 : 503, {
         status: this.ready ? "ready" : "not_ready",
         isolation: this.options.isolation,
+        capabilities: ["native-mastra"],
         ...(this.readinessError ? { error: this.readinessError } : {}),
       });
     }
@@ -571,7 +572,7 @@ export class QaseySandboxRuntime {
 
   private async startReservedCodeTask(
     session: ActiveSession,
-    input: { spec: CodeTaskSpec; context: string },
+    input: ReturnType<typeof SandboxCodeTaskStartSchema.parse>,
     reservation: CodeTaskStartReservation,
   ): Promise<CodeTaskState> {
     const { spec } = input;
@@ -627,7 +628,25 @@ export class QaseySandboxRuntime {
       repositoryMounts: prepared.mounts,
     };
     await writeFile(manifestPath, JSON.stringify(manifest), { mode: 0o600 });
-    const workerEnvironment = this.codeTaskWorkerEnvironment(session, spec, taskRoot);
+    const workerEnvironment = this.codeTaskWorkerEnvironment(session, spec, taskRoot, input.secrets?.environment);
+    if (input.secrets?.environment?.QASEY_E2E_SESSION_TOKEN && input.secrets.environment.QASEY_E2E_BASE_URL) {
+      const baseUrl = new URL(input.secrets.environment.QASEY_E2E_BASE_URL);
+      const storageStatePath = join(home, ".qasey-e2e-storage-state.json");
+      await writeFile(storageStatePath, JSON.stringify({
+        cookies: [{
+          name: "qasey_session",
+          value: input.secrets.environment.QASEY_E2E_SESSION_TOKEN,
+          domain: baseUrl.hostname,
+          path: "/",
+          expires: -1,
+          httpOnly: true,
+          secure: baseUrl.protocol === "https:",
+          sameSite: "Lax",
+        }],
+        origins: [],
+      }), { mode: 0o600 });
+      workerEnvironment.QASEY_E2E_STORAGE_STATE_PATH = storageStatePath;
+    }
     const taskReadOnlyPaths = [...checkRuntimeReadOnlyPaths, ...prepared.readOnlyRoots];
     const taskReadWritePaths = [controlRoot, artifactRoot, checkRoot, home, ...prepared.readWriteRoots];
     const taskBwrapArgs = buildFreshDeviceBwrapArgs({
@@ -927,6 +946,7 @@ export class QaseySandboxRuntime {
     session: ActiveSession,
     spec: CodeTaskSpec,
     taskRoot: string,
+    executionSecrets?: { QASEY_E2E_BASE_URL?: string | undefined; QASEY_E2E_SESSION_TOKEN?: string | undefined },
   ): NodeJS.ProcessEnv {
     const home = join(taskRoot, "home");
     const profile = executionProfile(spec.executionProfileId);
@@ -951,6 +971,12 @@ export class QaseySandboxRuntime {
     for (const key of allowed) {
       const value = process.env[key];
       if (value !== undefined) environment[key] = value;
+    }
+    if (spec.executionProfileId !== "web-e2e-verifier" && executionSecrets && Object.values(executionSecrets).some(Boolean)) {
+      throw new HttpError(400, "Per-run E2E secrets are restricted to the verifier profile");
+    }
+    if (spec.executionProfileId === "web-e2e-verifier") {
+      if (executionSecrets?.QASEY_E2E_BASE_URL) environment.QASEY_E2E_BASE_URL = executionSecrets.QASEY_E2E_BASE_URL;
     }
     for (const [source, target] of Object.entries(profile.environmentAliases ?? {})) {
       const value = environment[source];

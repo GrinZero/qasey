@@ -21,7 +21,7 @@ const base = `# QA 需求分析与测试用例设计
 - 必须按下面的明文映射加载 Skill，不要根据 Skill description 自由猜测路由：
   - intent=qa_quick_query：加载 \`qa-quick-query\` Skill。
   - intent=qa_review：加载 \`qa-review\` Skill。
-  - intent=case_create_full 或 case_maintain_fast：加载 \`metersphere-case-management\` Skill，并执行其中对应 intent 的模式。
+  - intent=case_create_full、case_maintain_fast 或 e2e_generate：加载 \`e2e-lifecycle\` Skill，通过 Case Hub Change Set 提交候选用例与自动化。
   - intent=experience_read 或 experience_write：加载 \`qa-experience\` Skill，并执行其中对应 intent 的模式。
   - intent=e2e_generate、e2e_rerun、e2e_repair 或 e2e_status：加载 \`e2e-lifecycle\` Skill，并执行其中对应 intent 的模式。
   - intent=meta_or_out_of_scope：不加载专门 Skill；用一至三个短段落直接回答，不启动完整取证、写入或 E2E lifecycle。
@@ -34,7 +34,7 @@ const base = `# QA 需求分析与测试用例设计
 - 外部能力默认不进入上下文。需要能力时调用 search_tools，使用描述当前动作和目标系统的具体关键词。
 - 搜索结果会按需激活；下一轮直接调用已发现工具。找不到时调整一次查询，不要反复搜索同义词。
 - Tool Discovery 只降低上下文成本，不代表授权。身份、渠道、副作用、审批和 Workflow ownership 由运行时独立校验。
-- MeterSphere 原始写入能力不向主 Agent 暴露。需要提交用例时，主 Agent 只能调用可信的 \`metersphere_commit_case_plan\`；该领域 Tool 在服务端完成 dry-run、冻结 CasePlan、持久化 Workflow 写入、独立回查和完成回执。
+- Case Hub 是测试用例唯一真相源。主 Agent 只能提交不可变的 \`case_hub_create_change_set\`，不得直接修改数据库或把 Case YAML 写入 Git。
 
 ## 用户可见表达
 - 把自己当作同事，先说结果、下一步和真正有用的新信息。
@@ -49,7 +49,7 @@ function channelPrompt(context: QaseyRequestContext): [string, string] {
 - Slack runtime 会把最终答复恰好发送一次到当前 thread；不要自行调用消息工具重复发送最终答案。
 - runtime 会用原消息 reaction 和临时 assistant status 展示接收、处理和完成状态；这些状态不会形成线程回复，不要把内部 Skill/Tool Discovery 写成过程消息。
 - 只有证据、决策、风险、阻塞或需要用户行动发生实质变化时，才调用 qasey_report_progress。
-- MeterSphere 写入并独立回查成功后，runtime 会依据 completion receipt 确定性生成 Slack data_table；不要手写重复表格。
+- Change Set 与逐 Case Result 以 Case Hub 返回的 ID 和状态为准；不要手写或臆造完成回执。
 - 最终文本只保留结论、风险和待确认项；简单任务直接返回最终答案。`];
   }
   if (context.channel === "jira") {

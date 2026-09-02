@@ -18,7 +18,7 @@ describe("E2E coordinator", () => {
   it("rejects client-supplied dependency commands", () => {
     expect(CreateE2ERunSchema.safeParse({
       sourceSessionId: "s",
-      sourceCaseIds: ["case-1"],
+      changeSetId: "97bb25db-18df-428e-af86-be305ad8b2ff",
       handoff: handoff(),
       platform: "web",
       framework: "playwright",
@@ -37,11 +37,11 @@ describe("E2E coordinator", () => {
 
   it("keeps the target repository server-owned at the public boundary", () => {
     expect(CreateE2ERunRequestSchema.safeParse({
-      sourceCaseIds: ["175088"], handoff: handoff(), platform: "web", framework: "playwright",
+      changeSetId: "97bb25db-18df-428e-af86-be305ad8b2ff", handoff: handoff(), platform: "web", framework: "playwright",
       repository: { owner: "attacker", repository: "arbitrary" },
     }).success).toBe(false);
     expect(CreateE2ERunRequestSchema.safeParse({
-      sourceCaseIds: ["175088"], handoff: handoff(), platform: "web", framework: "playwright",
+      changeSetId: "97bb25db-18df-428e-af86-be305ad8b2ff", handoff: handoff(), platform: "web", framework: "playwright",
       playwrightVerification,
     }).success).toBe(false);
   });
@@ -64,14 +64,10 @@ describe("E2E coordinator", () => {
       .rejects.toThrow(/playwrightVerification/u);
   });
 
-  it("accepts only canonical UUID ids or numeric nums as source case references", () => {
+  it("requires a canonical Change Set id", () => {
     const base = { handoff: handoff(), platform: "web", framework: "playwright" };
-    expect(CreateE2ERunRequestSchema.safeParse({ ...base, sourceCaseIds: ["175088"] }).success).toBe(true);
-    expect(CreateE2ERunRequestSchema.safeParse({
-      ...base,
-      sourceCaseIds: ["97bb25db-18df-428e-af86-be305ad8b2ff"],
-    }).success).toBe(true);
-    expect(CreateE2ERunRequestSchema.safeParse({ ...base, sourceCaseIds: ["Checkout succeeds"] }).success).toBe(false);
+    expect(CreateE2ERunRequestSchema.safeParse({ ...base, changeSetId: "97bb25db-18df-428e-af86-be305ad8b2ff" }).success).toBe(true);
+    expect(CreateE2ERunRequestSchema.safeParse({ ...base, changeSetId: "not-a-change-set" }).success).toBe(false);
   });
 
   it("fails before creating an orphaned queued run when CodeTask execution is unavailable", async () => {
@@ -206,7 +202,7 @@ describe("E2E coordinator", () => {
 function createInput() {
   return {
     sourceSessionId: "s",
-    sourceCaseIds: ["175088"],
+    changeSetId: "97bb25db-18df-428e-af86-be305ad8b2ff",
     platform: "web" as const,
     framework: "playwright" as const,
     handoff: handoff(),

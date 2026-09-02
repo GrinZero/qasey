@@ -114,6 +114,16 @@ describe("same-origin Admin UI", () => {
     expect(crossOrigin.response.status).toBe(403);
     await expect(crossOrigin.response.json()).resolves.toMatchObject({ error: "forbidden" });
 
+    const shortRegistration = await invokePasswordRoute(app, "password-register", {
+      email: "short@example.invalid",
+      password: "123456789",
+    });
+    expect(shortRegistration.response.status).toBe(400);
+    await expect(shortRegistration.response.json()).resolves.toEqual({
+      error: "invalid_input",
+      message: "请输入有效邮箱和 10–128 位密码。",
+    });
+
     const registered = await invokePasswordRoute(app, "password-register", {
       email: "Member@Example.Invalid",
       password: "synthetic-password-phrase",
@@ -145,6 +155,16 @@ describe("same-origin Admin UI", () => {
       message: "邮箱或密码不正确。",
     });
     expect(wrongPassword.headers.some(header => header.startsWith("set-cookie:"))).toBe(false);
+
+    const shortPassword = await invokePasswordRoute(app, "password-login", {
+      email: "member@example.invalid",
+      password: "short",
+    });
+    expect(shortPassword.response.status).toBe(401);
+    await expect(shortPassword.response.json()).resolves.toEqual({
+      error: "invalid_credentials",
+      message: "邮箱或密码不正确。",
+    });
 
     const loggedIn = await invokePasswordRoute(app, "password-login", {
       email: "member@example.invalid",
@@ -799,7 +819,7 @@ function adminFixtureRun(owner: OwnerScope, id: string): E2ERun {
       allowedPaths: ["tests"],
       skillsPaths: [],
     },
-    sourceCaseIds: ["case"],
+    changeSetId: "97bb25db-18df-428e-af86-be305ad8b2ff",
     contextSnapshot,
     caseSnapshot: [],
     amendments: [],

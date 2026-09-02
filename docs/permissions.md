@@ -11,7 +11,7 @@ Important platform permissions:
 - `platform.catalog.read`: native global/list endpoints.
 - `platform.runtime.inspect`: observability, storage, channel-management, stored-primitive surfaces, and the development-only Mastra Studio UI.
 
-Qasey permissions include `qasey.agent.execute` for the public workflow-backed task ingress, internal `qasey.task.execute`, `qasey.e2e.execute`, `qasey.runs.read`, `qasey.runs.write`, `qasey.runs.approve`, and `qasey.channel.receive`.
+Qasey permissions include `qasey.agent.execute` for the public workflow-backed task ingress, internal `qasey.task.execute`, `qasey.e2e.execute`, `qasey.runs.read`, `qasey.runs.write`, `qasey.cases.read`, `qasey.cases.write`, `qasey.results.read`, `qasey.results.approve`, service-only `qasey.test-environments.provision`, and `qasey.channel.receive`. Review is intentionally granted only at the immutable Case Result level; there is no run-level approval permission.
 
 Tenant API Tokens can be granted the read-only Studio platform scopes `platform.runtime.inspect`, `platform.catalog.read`, `platform.background-tasks.read`, `platform.schedules.read`, and `platform.internal-workflow.read`. Native workflow execution scopes (`qasey.task.execute`, `qasey.e2e.execute`, and `qasey.case-workflow.execute`) and `qasey.scorers.read` remain available to trusted runtime identities but are intentionally excluded from the API Token issuance UI.
 

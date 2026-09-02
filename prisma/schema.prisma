@@ -38,6 +38,101 @@ model AgentApplicationRunEvent {
   @@map("agent_application_run_events")
 }
 
+model QaseyCaseProject {
+  applicationId   String   @map("application_id")
+  tenantId        String   @map("tenant_id")
+  code            String
+  nextCaseSequence Int     @default(1) @map("next_case_sequence")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@id([applicationId, tenantId, code])
+  @@map("qasey_case_projects")
+}
+
+model QaseyCaseRecord {
+  applicationId String   @map("application_id")
+  tenantId      String   @map("tenant_id")
+  id            String
+  projectCode   String   @map("project_code")
+  suitePath     String   @map("suite_path")
+  title         String
+  activeVersionId String? @map("active_version_id") @db.Uuid
+  payload       Json
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@id([applicationId, tenantId, id])
+  @@index([applicationId, tenantId, projectCode, suitePath], map: "qasey_cases_repository_idx")
+  @@map("qasey_cases")
+}
+
+model QaseyCaseVersionRecord {
+  applicationId String   @map("application_id")
+  tenantId      String   @map("tenant_id")
+  id            String   @db.Uuid
+  caseId        String   @map("case_id")
+  changeSetId   String   @map("change_set_id") @db.Uuid
+  version       Int
+  status        String
+  payload       Json
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@id([applicationId, tenantId, id])
+  @@unique([applicationId, tenantId, caseId, version], map: "qasey_case_versions_case_version_key")
+  @@index([applicationId, tenantId, changeSetId], map: "qasey_case_versions_change_set_idx")
+  @@map("qasey_case_versions")
+}
+
+model QaseyCaseChangeSetRecord {
+  applicationId String   @map("application_id")
+  tenantId      String   @map("tenant_id")
+  id            String   @db.Uuid
+  status        String
+  revision      Int      @default(1)
+  payload       Json
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@id([applicationId, tenantId, id])
+  @@index([applicationId, tenantId, status, updatedAt(sort: Desc)], map: "qasey_case_change_sets_status_idx")
+  @@map("qasey_case_change_sets")
+}
+
+model QaseyCaseResultRecord {
+  applicationId String   @map("application_id")
+  tenantId      String   @map("tenant_id")
+  id            String   @db.Uuid
+  changeSetId   String   @map("change_set_id") @db.Uuid
+  runId         String   @map("run_id") @db.Uuid
+  caseVersionId String   @map("case_version_id") @db.Uuid
+  caseId        String   @map("case_id")
+  attempt       Int
+  executionStatus String @map("execution_status")
+  reviewStatus  String   @map("review_status")
+  payload       Json
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@id([applicationId, tenantId, id])
+  @@unique([applicationId, tenantId, runId, caseVersionId, attempt], map: "qasey_case_results_attempt_key")
+  @@index([applicationId, tenantId, changeSetId, reviewStatus], map: "qasey_case_results_review_idx")
+  @@map("qasey_case_results")
+}
+
+model QaseyE2EFixtureLease {
+  id             String   @id @db.Uuid
+  owner          String
+  organizationId String   @map("organization_id")
+  userId         String   @map("user_id") @db.Uuid
+  sessionId      String   @map("session_id") @db.Uuid
+  expiresAt      DateTime @map("expires_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([owner, expiresAt], map: "qasey_e2e_fixture_leases_owner_expiry_idx")
+  @@map("qasey_e2e_fixture_leases")
+}
+
 model PlatformChannelDelivery {
   applicationId String   @map("application_id")
   tenantId      String   @map("tenant_id")

@@ -1,4 +1,4 @@
-import type { AgentApplication, ApiTokenRecord, AuditRecord, AuthConfig, AuthRedirect, CatalogEntry, OrganizationSelection, QaseyRun, SandboxSessionState, Session, TriggerConnection, TriggerProvider, TriggerTarget } from "./types";
+import type { AgentApplication, ApiTokenRecord, AuditRecord, AuthConfig, AuthRedirect, CaseHubCase, CaseHubCaseVersion, CaseHubChangeSet, CaseHubResult, CatalogEntry, OrganizationSelection, QaseyRun, SandboxSessionState, Session, TriggerConnection, TriggerProvider, TriggerTarget } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -61,6 +61,10 @@ export const api = {
   catalog: () => requestJson<CatalogEntry[]>("/admin/api/catalog"),
   applications: () => requestJson<AgentApplication[]>("/admin/api/applications"),
   listRuns: () => requestJson<{ runs: QaseyRun[] }>("/v1/runs?limit=100"),
+  listCases: (query = "") => requestJson<{ cases: CaseHubCase[] }>(`/v1/case-hub/cases?q=${encodeURIComponent(query)}`),
+  listChangeSets: () => requestJson<{ changeSets: CaseHubChangeSet[] }>("/v1/case-hub/change-sets?limit=100"),
+  getChangeSet: (id: string) => requestJson<{ changeSet: CaseHubChangeSet; versions: CaseHubCaseVersion[]; results: CaseHubResult[] }>(`/v1/case-hub/change-sets/${encodeURIComponent(id)}`),
+  reviewCaseResult: (id: string, verdict: "approve" | "request_changes" | "product_bug" | "environment_issue", feedback?: string) => requestJson<{ result: CaseHubResult; changeSet: CaseHubChangeSet }>(`/v1/case-hub/results/${encodeURIComponent(id)}/review`, { method: "POST", body: JSON.stringify({ verdict, ...(feedback ? { feedback } : {}) }) }),
   runQaseyTask: (prompt: string) => requestJson<Record<string, unknown>>(
     "/v1/qasey/tasks",
     { method: "POST", body: JSON.stringify({ prompt }) },
@@ -97,10 +101,6 @@ export const api = {
   ),
   sandboxStop: (sessionId: string) => requestJson<{ stopped: true }>(
     `/v1/sandbox-sessions/${encodeURIComponent(sessionId)}/stop`, { method: "POST" },
-  ),
-  verdict: (runId: string, verdict: "approve" | "request_changes", feedback?: string) => requestJson<QaseyRun>(
-    `/v1/runs/${encodeURIComponent(runId)}/qa-verdict`,
-    { method: "POST", body: JSON.stringify({ verdict, ...(feedback ? { feedback } : {}) }) },
   ),
   audit: () => requestJson<{ records: AuditRecord[] }>("/admin/api/audit"),
   apiTokens: () => requestJson<{ tokens: ApiTokenRecord[]; availableScopes: string[] }>("/admin/api/tokens"),

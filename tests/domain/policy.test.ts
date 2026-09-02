@@ -12,8 +12,8 @@ describe("intent-independent side-effect policy", () => {
 
   it("keeps evidence researchers read-only", () => {
     expect(() => authorizeDiscoveredToolAccess(
-      "metersphere_write",
-      TOOL_POLICIES.metersphere_write!,
+      "case_hub_change_set_write",
+      TOOL_POLICIES.case_hub_change_set_write!,
       { channel: "slack", subagentRole: "evidence_researcher" },
     )).toThrow(/read-only/);
   });

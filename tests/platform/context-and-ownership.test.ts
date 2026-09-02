@@ -82,7 +82,7 @@ function testRun(owner: OwnerScope, id: string): E2ERun {
   }, { sessionId: "session", threadId: "thread", taskRunId: "task", requestId: "request", resourceId: "test" });
   return {
     ...owner, id, requestId: "request", sourceSessionId: "session", status: "queued", platform: "web", framework: "playwright",
-    repository: { owner: "o", repository: "r", cloneUrl: "https://example.test/r.git", baseRef: "main", allowedPaths: ["tests"], skillsPaths: [] }, sourceCaseIds: ["case"],
+    repository: { owner: "o", repository: "r", cloneUrl: "https://example.test/r.git", baseRef: "main", allowedPaths: ["tests"], skillsPaths: [] }, changeSetId: "97bb25db-18df-428e-af86-be305ad8b2ff",
     contextSnapshot, caseSnapshot: [], amendments: [], codeTaskIds: [], artifacts: [], revision: 1, createdAt: now, updatedAt: now,
   };
 }

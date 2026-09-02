@@ -1,11 +1,9 @@
 import type { Mastra } from "@mastra/core/mastra";
 import { describe, expect, it, vi } from "vitest";
 import type { QaseyRequestContext } from "../../packages/contracts/src/index.ts";
-import type { MeterSphereCaseCompletionReceipt } from "../../packages/domain/src/index.ts";
 import {
   agentRuntimeEventFromChunk,
   assertNormalCompletion,
-  completionReceiptText,
   executeQasey,
   QaseyResponseSchema,
   restoreProcessedAgentOutput,
@@ -37,10 +35,6 @@ describe("Qasey service completion", () => {
       }],
     })).not.toThrow();
     expect(() => assertNormalCompletion({ finishReason: "tool-calls", steps: [] })).toThrow(/normally/i);
-  });
-
-  it("renders a workflow-owned completion receipt", () => {
-    expect(completionReceiptText(completionReceipt("plan"))).toContain("独立回查通过 1/1");
   });
 
   it("preserves informative Agent lifecycle payloads for channel projection", () => {
@@ -158,27 +152,6 @@ describe("Qasey service completion", () => {
     expect(toolEvents).toEqual(["start:github_get_file", "end:github_get_file:executed"]);
   });
 
-  it("uses the trusted Tool receipt recorded during the direct Agent run", async () => {
-    const receipt = completionReceipt("plan-1");
-    const runAgent = vi.fn(async (_prompt: unknown, options: Record<string, any>) => {
-      options.requestContext.set("case-completion-receipt", receipt);
-      return {
-        finishReason: "stop",
-        text: "tool finished",
-        steps: [{ finishReason: "stop", text: "tool finished", toolCalls: [], toolResults: [] }],
-      };
-    });
-    const mastra = mockMastra(runAgent);
-
-    const response = await executeQasey(mastra, { ...context, chatInput: "create cases" });
-
-    expect(response).toMatchObject({
-      outcome: "success",
-      finalization: "workflow",
-      completionReceipt: { casePlanHash: "plan-1" },
-    });
-    expect(response.text).toContain("独立回查通过 1/1");
-  });
 });
 
 function mockMastra(
@@ -205,30 +178,4 @@ function mockMastra(
       },
     }),
   } as unknown as Mastra;
-}
-
-function completionReceipt(casePlanHash: string): MeterSphereCaseCompletionReceipt {
-  return {
-    casePlanHash,
-    verificationMode: "separate_read_back",
-    caseOperation: {
-      moduleId: "module",
-      modulePath: "/AI Draft/Feature",
-      featureName: "Feature",
-      cases: [{
-        id: "case-1",
-        num: 1,
-        name: "Case",
-        priority: "P1",
-        verified: true,
-        nodeId: "module",
-        nodePath: "/AI Draft/Feature",
-      }],
-      itemCount: 1,
-      createdCount: 1,
-      updatedCount: 0,
-      verifiedCount: 1,
-      verificationMode: "separate_read_back",
-    },
-  };
 }
