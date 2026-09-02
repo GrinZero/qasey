@@ -1,0 +1,20 @@
+{
+  "servers": {
+    "figma": {
+      "url": "https://mcp.figma.com/mcp",
+      "auth": { "type": "oauth" }
+    },
+    "qaExperience": {
+      "url": "https://qa-experience-mcp.example.com/mcp",
+      "auth": { "type": "bearer", "tokenEnv": "QASEY_MCP_BEARER_TOKEN" }
+    },
+    "rag": {
+      "url": "https://rag-mcp.example.com/mcp",
+      "auth": { "type": "bearer", "tokenEnv": "QASEY_MCP_BEARER_TOKEN" }
+    },
+    "lark": {
+      "url": "https://lark-mcp.example.com/mcp",
+      "auth": { "type": "bearer", "tokenEnv": "QASEY_MCP_BEARER_TOKEN" }
+    }
+  }
+}

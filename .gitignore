@@ -1,0 +1,26 @@
+node_modules/
+.pnpm-store/
+dist/
+.mastra/
+.qasey/
+artifacts/
+playwright-report/
+test-results/
+output/playwright/
+*.log
+.DS_Store
+.playwright-cli
+*.key
+*.p12
+*.pfx
+*.pem
+
+# Runtime configuration is deployment-owned. Only redacted templates are tracked.
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Runtime integration catalogues may contain private endpoints and repository names.
+config/mcp.json
+config/e2e-repository.json

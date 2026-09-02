@@ -1,0 +1,49 @@
+services:
+  - type: web
+    name: qasey
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: sh ci/start.sh api
+    healthCheckPath: /readyz
+    autoDeployTrigger: off
+    maxShutdownDelaySeconds: 60
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: QASEY_DEPLOYMENT_MODE
+        value: standalone
+      - key: QASEY_INSTANCE_ID
+        value: render-standalone
+      - key: QASEY_DEPLOYMENT_ID
+        value: render-standalone
+      - key: DD_VERSION
+        sync: false
+      - key: QASEY_SINGLE_TENANT_ID
+        sync: false
+      - key: QASEY_PUBLIC_BASE_URL
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_ALLOWED_DOMAINS
+        sync: false
+      - key: QASEY_CREDENTIAL_ENCRYPTION_KEY
+        generateValue: true
+      - key: QASEY_CREDENTIAL_ACTIVE_KEY_ID
+        value: "default"
+      - key: PLATFORM_BOOTSTRAP_ADMIN_EMAILS
+        sync: false
+      - key: QASEY_ENABLE_STUDIO_MCP_PREVIEW
+        value: "false"
+      - key: QASEY_ENABLE_CODE_MODE
+        value: "false"
+      - key: QASEY_ENABLE_LOCAL_CODE_MODE
+        value: "false"
+      - key: QASEY_ENABLE_DATADOG
+        value: "false"

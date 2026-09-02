@@ -1,0 +1,25 @@
+{
+  "name": "Qasey development",
+  "dockerComposeFile": [
+    "../docker-compose.yml",
+    "../docker-compose.dev.yml"
+  ],
+  "service": "development",
+  "runServices": [
+    "postgres",
+    "redis",
+    "sandbox-0",
+    "development"
+  ],
+  "workspaceFolder": "/app",
+  "remoteUser": "node",
+  "updateRemoteUserUID": true,
+  "forwardPorts": [4111],
+  "portsAttributes": {
+    "4111": {
+      "label": "Qasey"
+    }
+  },
+  "postCreateCommand": "CI=true pnpm install --frozen-lockfile",
+  "shutdownAction": "stopCompose"
+}

@@ -1,0 +1,63 @@
+import { describe, expect, it } from "vitest";
+import { freezeE2EContext, freezeE2EExecutionBrief } from "../../packages/domain/src/index.ts";
+
+describe("immutable E2E context", () => {
+  it("redacts secrets and keeps conversation evidence alongside complete Case Hub steps", () => {
+    const snapshot = freezeE2EContext({
+      goal: "Cover checkout",
+      requirementSummary: "Use Authorization: Bearer secret-value-that-must-not-leak",
+      inScope: ["checkout"], outOfScope: [], confirmedDecisions: ["web only"], constraints: [], assumptions: [],
+      criticalFlows: ["submit order"], boundaryCases: [], negativeCases: [], testDataNeeds: ["testing account"], repositoryFindings: ["reuse checkout fixture"],
+      blockingQuestions: [], evidenceRefs: [{ kind: "message", ref: "thread:42", summary: "confirmed behavior" }],
+    }, { sessionId: "session", threadId: "thread", taskRunId: "task", requestId: "request", resourceId: "resource" }, new Date("2026-08-25T00:00:00.000Z"));
+    const testCase = {
+      id: "QASEY-1", title: "Checkout succeeds", target: "web" as const, priority: "P1" as const,
+      evidenceRefs: [{ source: "case", ref: "QASEY-1" }], preconditions: ["signed in"],
+      steps: [{ action: "1. Submit order", expected: ["Success page is shown"] }],
+      testData: { tenant: "testing", password: "do-not-persist" }, tags: [], unresolvedQuestions: [],
+    };
+    const brief = freezeE2EExecutionBrief({
+      context: snapshot, cases: [testCase],
+      repository: {
+        owner: "example-org", repository: "web-e2e", workspacePath: "repos/example-org/web-e2e", baseSha: "a".repeat(40),
+        allowedPaths: ["tests"], skillPaths: [".agents/skills"], specGlobs: ["tests"], artifactGlobs: ["artifacts/**"],
+        verification: playwrightVerification,
+      },
+      now: new Date("2026-08-25T00:01:00.000Z"),
+    });
+
+    expect(snapshot.requirementSummary).not.toContain("secret-value-that-must-not-leak");
+    expect(snapshot.requirementSummary).toContain("[REDACTED]");
+    expect(brief.context.evidenceRefs).toContainEqual(expect.objectContaining({ ref: "thread:42" }));
+    expect(brief.cases[0]!.steps[0]).toEqual({ action: "1. Submit order", expected: ["Success page is shown"] });
+    expect(brief.cases[0]!.testData.password).toBe("[REDACTED]");
+    expect(brief.briefHash).toMatch(/^[a-f0-9]{64}$/u);
+    const differentVerification = freezeE2EExecutionBrief({
+      context: snapshot,
+      cases: [testCase],
+      repository: {
+        ...brief.repository,
+        verification: {
+          ...brief.repository.verification,
+          projects: brief.repository.verification.projects.map(project => ({
+            ...project,
+            playwrightProject: "firefox",
+          })),
+        },
+      },
+      now: new Date("2026-08-25T00:01:00.000Z"),
+    });
+    expect(differentVerification.briefHash).not.toBe(brief.briefHash);
+  });
+});
+
+const playwrightVerification = {
+  strategy: "changed-project-playwright" as const,
+  projects: [{
+    id: "tests",
+    root: "tests",
+    testRoot: "tests",
+    config: "tests/playwright.config.ts",
+    playwrightProject: "chromium",
+  }],
+};

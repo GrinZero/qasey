@@ -1,0 +1,121 @@
+name: security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
+        with:
+          fail-on-severity: high
+
+  secret-scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan all fetched Git history for secrets
+        id: history-secret-scan
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --env GIT_CONFIG_COUNT=1 \
+            --env GIT_CONFIG_KEY_0=safe.directory \
+            --env GIT_CONFIG_VALUE_0=/repo \
+            --volume "${GITHUB_WORKSPACE}:/repo:ro" \
+            ghcr.io/gitleaks/gitleaks@sha256:aa036a2f4bdfe3cc3c55fa4326308efabb4a6be498c883c864fd1d0d5585438a \
+            git /repo --log-opts=--all --redact --no-banner --no-color
+      - name: Scan the current tracked tree for secrets
+        id: current-tree-secret-scan
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          current_tree="${RUNNER_TEMP}/qasey-current-tree"
+          mkdir "${current_tree}"
+          git archive --format=tar HEAD | tar -xf - -C "${current_tree}"
+          docker run --rm \
+            --volume "${current_tree}:/repo:ro" \
+            ghcr.io/gitleaks/gitleaks@sha256:aa036a2f4bdfe3cc3c55fa4326308efabb4a6be498c883c864fd1d0d5585438a \
+            dir /repo --redact --no-banner --no-color
+      - name: Enforce secret scan results
+        if: always()
+        env:
+          CURRENT_TREE_SCAN_OUTCOME: ${{ steps.current-tree-secret-scan.outcome }}
+          HISTORY_SCAN_OUTCOME: ${{ steps.history-secret-scan.outcome }}
+        run: |
+          set -euo pipefail
+          if [[ "${HISTORY_SCAN_OUTCOME}" != "success" || "${CURRENT_TREE_SCAN_OUTCOME}" != "success" ]]; then
+            echo "::error::One or more redacted secret scans failed. Review the preceding scan summaries."
+            exit 1
+          fi
+
+  lockfile-vulnerability-scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Scan the production lockfile with OSV-Scanner
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/src:ro" \
+            --workdir /src \
+            ghcr.io/google/osv-scanner-action@sha256:2b2b9fbe57b14097fb6953577f2fbecf49941e2346c4eceb9f0852a9682ae868 \
+            scan source --lockfile=pnpm-lock.yaml --format=table
+
+  license-policy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+        with:
+          version: 11.21.0
+          run_install: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install the production dependency closure without lifecycle scripts
+        run: pnpm install --frozen-lockfile --prod --ignore-scripts
+      - name: Enforce the production dependency license policy
+        run: node scripts/check-license-policy.mjs
+
+  codeql:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+      packages: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
+        with:
+          languages: javascript-typescript
+          queries: security-extended
+      - uses: github/codeql-action/analyze@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0

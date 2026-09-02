@@ -1,0 +1,26 @@
+# The build stage receives only the current Git reference so it can stamp an
+# immutable source SHA. Objects, remotes, hooks, credentials, and history stay
+# outside the build context; the final images copy no .git paths.
+.git/*
+!.git/HEAD
+!.git/refs/
+!.git/refs/heads/
+!.git/refs/heads/**
+*.key
+*.p12
+*.pfx
+*.pem
+.env
+.env.*
+!.env.example
+!.env.*.example
+.qasey/*
+.mastra
+dist
+node_modules
+.pnpm-store
+test-results
+playwright-report
+**/artifacts
+config/mcp.json
+config/e2e-repository.json

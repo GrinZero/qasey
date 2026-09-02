@@ -1,0 +1,22 @@
+[
+  { "method": "POST", "path": "/studio/api/agents/alpha-main/generate", "type": "agent", "id": "alpha-main", "action": "execute" },
+  { "method": "POST", "path": "/studio/api/agents/alpha-main/stream", "type": "agent", "id": "alpha-main", "action": "execute" },
+  { "method": "POST", "path": "/studio/api/workflows/alpha-job/start", "type": "workflow", "id": "alpha-job", "action": "execute" },
+  { "method": "POST", "path": "/studio/api/workflows/alpha-job/resume", "type": "workflow", "id": "alpha-job", "action": "execute" },
+  { "method": "GET", "path": "/studio/api/workflows/run-counts", "type": "platform", "id": "workflow-catalog", "action": "read" },
+  { "method": "POST", "path": "/studio/api/workflows/events", "type": "platform", "id": "workflow-events", "action": "execute" },
+  { "method": "POST", "path": "/studio/api/v1/conversations", "type": "protocol", "id": "alpha:conversations", "action": "write" },
+  { "method": "GET", "path": "/studio/api/v1/conversations/conversation-1", "type": "protocol", "id": "alpha:conversations", "action": "read" },
+  { "method": "POST", "path": "/studio/api/v1/responses", "type": "protocol", "id": "alpha:responses", "action": "write" },
+  { "method": "GET", "path": "/studio/api/v1/responses/response-1", "type": "protocol", "id": "alpha:responses", "action": "read" },
+  { "method": "GET", "path": "/studio/api/scorers/alpha-quality", "type": "scorer", "id": "alpha-quality", "action": "read" },
+  { "method": "POST", "path": "/studio/api/agents/alpha-main/channels/slack/webhook", "type": "channel", "id": "slack", "action": "receive" },
+  { "method": "GET", "path": "/studio/api/agents", "type": "platform", "id": "catalog", "action": "list" },
+  { "method": "GET", "path": "/studio/api/mcp/v0/servers", "type": "platform", "id": "runtime", "action": "read" },
+  { "method": "GET", "path": "/studio/api/observability/traces", "type": "platform", "id": "runtime", "action": "read" },
+  { "method": "GET", "path": "/studio/api/stored/agents", "type": "platform", "id": "runtime", "action": "read" },
+  { "method": "GET", "path": "/studio/api/channels/platforms", "type": "platform", "id": "runtime", "action": "read" },
+  { "method": "GET", "path": "/studio/api/system/packages", "type": "platform", "id": "runtime", "action": "read" },
+  { "method": "GET", "path": "/studio/api/editor/builder/settings", "type": "platform", "id": "runtime", "action": "read" },
+  { "method": "GET", "path": "/studio/api/scores/scorers", "type": "platform", "id": "runtime", "action": "read" }
+]

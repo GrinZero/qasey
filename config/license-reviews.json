@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "reviews": [
+    {
+      "name": "@mastra/redis-streams",
+      "version": "0.3.0",
+      "pnpmLockIntegrity": "sha512-aFm8olMKjrWIj3JsugQjjhKTkwgbVcp1MFwWxVPY/MY4i48tlstZNMaWzzbkXMDTDevWEnb6MZApE7It4zkvWw==",
+      "licenseFile": "LICENSE.md",
+      "licenseSha256": "2b16edbc165d42dee8248296cb22979a26930fad9efaef4ebe263698a416c19c",
+      "expectedLicense": "Apache-2.0",
+      "repository": {
+        "type": "git",
+        "url": "git+https://github.com/mastra-ai/mastra.git",
+        "directory": "pubsub/redis-streams"
+      }
+    }
+  ]
+}

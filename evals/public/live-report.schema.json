@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:qasey:evals:public-live-report:v1",
+  "title": "Qasey Provider-backed Live Eval Report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schemaVersion", "datasetId", "datasetVersion", "datasetDigest", "execution", "cases"],
+  "properties": {
+    "$schema": { "const": "./live-report.schema.json" },
+    "schemaVersion": { "const": "1.0.0" },
+    "datasetId": { "const": "qasey-public-agent-regression-v1" },
+    "datasetVersion": { "type": "string", "pattern": "^1\\.[0-9]+\\.[0-9]+$" },
+    "datasetDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "provider", "model", "runnerVersion", "runId", "startedAt", "finishedAt"],
+      "properties": {
+        "kind": { "const": "provider_live" },
+        "provider": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "model": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "runnerVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "runId": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$" },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "finishedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 25,
+      "items": { "$ref": "#/$defs/caseResult" }
+    }
+  },
+  "$defs": {
+    "score": { "type": "number", "minimum": 0, "maximum": 1 },
+    "scores": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["qasey-visible-output", "qasey-required-behavior", "qasey-forbidden-behavior", "qasey-capability-trajectory"],
+      "properties": {
+        "qasey-visible-output": { "$ref": "#/$defs/score" },
+        "qasey-required-behavior": { "$ref": "#/$defs/score" },
+        "qasey-forbidden-behavior": { "$ref": "#/$defs/score" },
+        "qasey-capability-trajectory": { "$ref": "#/$defs/score" }
+      }
+    },
+    "capability": {
+      "enum": [
+        "qa_context_read", "figma_read", "slack_read", "github_read", "jira_read", "lark_doc_read",
+        "case_hub_read", "case_hub_plan", "case_hub_change_set_write", "case_hub_result_read", "case_hub_direct_mutation"
+      ]
+    },
+    "toolEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "toolName", "effect", "authorization", "succeeded"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "toolName": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,127}$" },
+        "effect": { "enum": ["read", "write", "message", "delete"] },
+        "authorization": { "enum": ["none", "explicit_approval", "trusted_workflow"] },
+        "succeeded": { "type": "boolean" }
+      }
+    },
+    "caseResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "latencyMs", "costUsd", "scores", "observedCapabilities", "toolEvents"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^qasey-public-v1-[0-9]{3}$" },
+        "status": { "enum": ["completed", "error"] },
+        "latencyMs": { "type": "integer", "minimum": 0, "maximum": 3600000 },
+        "costUsd": { "type": "number", "minimum": 0, "maximum": 100 },
+        "scores": { "$ref": "#/$defs/scores" },
+        "observedCapabilities": {
+          "type": "array",
+          "maxItems": 20,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/capability" }
+        },
+        "toolEvents": {
+          "type": "array",
+          "maxItems": 200,
+          "items": { "$ref": "#/$defs/toolEvent" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,86 @@
+diff --git a/dist/agent-BOdDHE12.cjs b/dist/agent-BOdDHE12.cjs
+index 6c7efc0e0771d2ef0200d6e786480a82c4e78412..56261b0f1417607e4930ca83561d55ab42d69457 100644
+--- a/dist/agent-BOdDHE12.cjs
++++ b/dist/agent-BOdDHE12.cjs
+@@ -26628,7 +26628,7 @@ function workflowLoopStream({ resumeContext, requireToolApproval, models, toolCh
+ 			if (chunk.type.startsWith("data-")) {
+ 				let processedChunk = chunk;
+ 				if (dataChunkProcessorRunner) {
+-					const { part: processed, blocked, reason, tripwireOptions, processorId } = await dataChunkProcessorRunner.processPart(chunk, dataChunkProcessorStates, void 0, requestContext, messageList, 0, dataChunkStreamWriter);
++					const { part: processed, blocked, reason, tripwireOptions, processorId } = await dataChunkProcessorRunner.processPart(chunk, dataChunkProcessorStates, require_observability.createObservabilityContext(rest.modelSpanTracker?.getTracingContext()), requestContext, messageList, 0, dataChunkStreamWriter);
+ 					if (blocked) {
+ 						require_trip_wire.safeEnqueue(controller, {
+ 							type: "tripwire",
+@@ -26667,7 +26667,7 @@ function workflowLoopStream({ resumeContext, requireToolApproval, models, toolCh
+ 				return;
+ 			}
+ 			if (dataChunkProcessorRunner) {
+-				const { part: processed, blocked, reason, tripwireOptions, processorId } = await dataChunkProcessorRunner.processPart(chunk, dataChunkProcessorStates, void 0, requestContext, messageList, 0, dataChunkStreamWriter);
++				const { part: processed, blocked, reason, tripwireOptions, processorId } = await dataChunkProcessorRunner.processPart(chunk, dataChunkProcessorStates, require_observability.createObservabilityContext(rest.modelSpanTracker?.getTracingContext()), requestContext, messageList, 0, dataChunkStreamWriter);
+ 				if (blocked) {
+ 					require_trip_wire.safeEnqueue(controller, {
+ 						type: "tripwire",
+diff --git a/dist/agent-CKAVuxKN.js b/dist/agent-CKAVuxKN.js
+index 2d9462a72607f5960d236a4d9be268ea14e60c8a..e43685b00978641709031b3564f0399a3ee4eb36 100644
+--- a/dist/agent-CKAVuxKN.js
++++ b/dist/agent-CKAVuxKN.js
+@@ -26626,7 +26626,7 @@ function workflowLoopStream({ resumeContext, requireToolApproval, models, toolCh
+ 			if (chunk.type.startsWith("data-")) {
+ 				let processedChunk = chunk;
+ 				if (dataChunkProcessorRunner) {
+-					const { part: processed, blocked, reason, tripwireOptions, processorId } = await dataChunkProcessorRunner.processPart(chunk, dataChunkProcessorStates, void 0, requestContext, messageList, 0, dataChunkStreamWriter);
++					const { part: processed, blocked, reason, tripwireOptions, processorId } = await dataChunkProcessorRunner.processPart(chunk, dataChunkProcessorStates, createObservabilityContext(rest.modelSpanTracker?.getTracingContext()), requestContext, messageList, 0, dataChunkStreamWriter);
+ 					if (blocked) {
+ 						safeEnqueue(controller, {
+ 							type: "tripwire",
+@@ -26665,7 +26665,7 @@ function workflowLoopStream({ resumeContext, requireToolApproval, models, toolCh
+ 				return;
+ 			}
+ 			if (dataChunkProcessorRunner) {
+-				const { part: processed, blocked, reason, tripwireOptions, processorId } = await dataChunkProcessorRunner.processPart(chunk, dataChunkProcessorStates, void 0, requestContext, messageList, 0, dataChunkStreamWriter);
++				const { part: processed, blocked, reason, tripwireOptions, processorId } = await dataChunkProcessorRunner.processPart(chunk, dataChunkProcessorStates, createObservabilityContext(rest.modelSpanTracker?.getTracingContext()), requestContext, messageList, 0, dataChunkStreamWriter);
+ 				if (blocked) {
+ 					safeEnqueue(controller, {
+ 						type: "tripwire",
+diff --git a/dist/create-durable-agent-BKVMwgW8.js b/dist/create-durable-agent-BKVMwgW8.js
+index 19ffe44dc856607dfc76aeb1628543b5b6127bd3..cce5f2cf8188b02219d3e55003df356f0d811c0f 100644
+--- a/dist/create-durable-agent-BKVMwgW8.js
++++ b/dist/create-durable-agent-BKVMwgW8.js
+@@ -1733,6 +1733,7 @@ function createDurableAgentStream(options) {
+ 				isLLMExecutionStep: true,
+ 				resolveFinalPromises: true,
+ 				outputProcessors,
++				tracingContext: { currentSpan: globalRunRegistry.get(runId)?.resumeAgentSpan ?? globalRunRegistry.get(runId)?.agentSpan },
+ 				experimentalTransform
+ 			}
+ 		}),
+@@ -3581,7 +3582,7 @@ async function processChunkThroughOutputProcessors(chunk, registryEntry, pubsub,
+ 			logger,
+ 			agentName,
+ 			processorStates: registryEntry.processorStates
+-		}).processPart(chunk, registryEntry.processorStates, void 0, registryEntry.requestContext, messageList, 0, pubsub ? { custom: async (data) => {
++		}).processPart(chunk, registryEntry.processorStates, createObservabilityContext({ currentSpan: registryEntry.resumeAgentSpan ?? registryEntry.agentSpan }), registryEntry.requestContext, messageList, 0, pubsub ? { custom: async (data) => {
+ 			await emitChunkEvent(pubsub, runId, data);
+ 		} } : void 0);
+ 		if (blocked) {
+diff --git a/dist/create-durable-agent-Ce0YJRyX.cjs b/dist/create-durable-agent-Ce0YJRyX.cjs
+index 74fb929b3658f6e490ab4777b53d27a7ae27b76b..6079d90ccb60945be28f10b7685da88f3c23b74d 100644
+--- a/dist/create-durable-agent-Ce0YJRyX.cjs
++++ b/dist/create-durable-agent-Ce0YJRyX.cjs
+@@ -1733,6 +1733,7 @@ function createDurableAgentStream(options) {
+ 				isLLMExecutionStep: true,
+ 				resolveFinalPromises: true,
+ 				outputProcessors,
++				tracingContext: { currentSpan: globalRunRegistry.get(runId)?.resumeAgentSpan ?? globalRunRegistry.get(runId)?.agentSpan },
+ 				experimentalTransform
+ 			}
+ 		}),
+@@ -3581,7 +3582,7 @@ async function processChunkThroughOutputProcessors(chunk, registryEntry, pubsub,
+ 			logger,
+ 			agentName,
+ 			processorStates: registryEntry.processorStates
+-		}).processPart(chunk, registryEntry.processorStates, void 0, registryEntry.requestContext, messageList, 0, pubsub ? { custom: async (data) => {
++		}).processPart(chunk, registryEntry.processorStates, require_observability.createObservabilityContext({ currentSpan: registryEntry.resumeAgentSpan ?? registryEntry.agentSpan }), registryEntry.requestContext, messageList, 0, pubsub ? { custom: async (data) => {
+ 			await emitChunkEvent(pubsub, runId, data);
+ 		} } : void 0);
+ 		if (blocked) {

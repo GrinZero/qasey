@@ -1,0 +1,1062 @@
+import {
+  Activity,
+  AppWindow,
+  ArrowRight,
+  Bot,
+  Boxes,
+  Cable,
+  Check,
+  CheckCircle2,
+  ChevronRight,
+  CircleAlert,
+  ClipboardCheck,
+  Copy,
+  Clock3,
+  Eye,
+  EyeOff,
+  FileSearch,
+  FileText,
+  FolderOpen,
+  Gauge,
+  GitBranch,
+  Inbox,
+  KeyRound,
+  LayoutDashboard,
+  Library,
+  ListFilter,
+  LoaderCircle,
+  LogOut,
+  Menu,
+  MessageSquareText,
+  MonitorPlay,
+  Plus,
+  Power,
+  Play,
+  RefreshCw,
+  RotateCcw,
+  Search,
+  Settings2,
+  ShieldCheck,
+  Sparkles,
+  Square,
+  TestTube2,
+  Terminal,
+  Trash2,
+  UserRound,
+  X,
+  XCircle,
+} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { api, ApiError, errorMessage } from "./api";
+import { canRunQaseyTask } from "./catalog";
+import { adminPaths, legacyAdminPath, viewForAdminPath, type View } from "./routes";
+import { presentScope } from "./scopes";
+import type { AgentApplication, ApiTokenRecord, AuditRecord, AuthConfig, CaseHubCase, CaseHubCaseVersion, CaseHubChangeSet, CaseHubResult, CatalogEntry, OrganizationSelection, QaseyRun, RunStatus, SandboxSessionState, Session, TriggerConnection, TriggerConnectionStatus, TriggerProvider, TriggerTarget } from "./types";
+
+type AuthState =
+  | { kind: "loading" }
+  | { kind: "anonymous"; message?: string }
+  | { kind: "selecting-organization"; selection: OrganizationSelection }
+  | { kind: "authenticated"; session: Session };
+
+const statusMeta: Record<RunStatus, { label: string; tone: string; step: number }> = {
+  queued: { label: "等待开始", tone: "neutral", step: 0 },
+  preparing_workspace: { label: "准备环境", tone: "progress", step: 1 },
+  authoring: { label: "设计测试", tone: "progress", step: 2 },
+  author_running: { label: "执行测试", tone: "progress", step: 3 },
+  repairing: { label: "修复重试", tone: "warning", step: 3 },
+  clean_verifying: { label: "验证结果", tone: "progress", step: 4 },
+  awaiting_qa: { label: "等待审阅", tone: "review", step: 5 },
+  succeeded: { label: "已通过", tone: "success", step: 6 },
+  failed: { label: "未通过", tone: "danger", step: 6 },
+  cancelled: { label: "已取消", tone: "neutral", step: 6 },
+};
+
+const activeStatuses: RunStatus[] = ["queued", "preparing_workspace", "authoring", "author_running", "repairing", "clean_verifying"];
+const registrationPasswordMinLength = 10;
+const shortDateFormatter = new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric" });
+const tokenDateFormatter = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "short", day: "numeric" });
+const evidenceStages = [
+  [FileSearch, "需求"], [Settings2, "环境"], [Bot, "设计"], [Play, "执行"], [ShieldCheck, "验证"], [ClipboardCheck, "审阅"],
+] as const;
+
+export function App() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [auth, setAuth] = useState<AuthState>({ kind: "loading" });
+  const [loginRedirect] = useState(() => new URLSearchParams(window.location.search).get("redirect_uri")
+    ?? legacyAdminPath(window.location.pathname, window.location.hash)
+    ?? `${window.location.pathname}${window.location.hash}`);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
+  const [applications, setApplications] = useState<AgentApplication[]>([]);
+  const [runs, setRuns] = useState<QaseyRun[]>([]);
+  const [dataError, setDataError] = useState("");
+  const [loadingRuns, setLoadingRuns] = useState(false);
+
+  const loadWorkspace = useCallback(async () => {
+    setLoadingRuns(true);
+    setDataError("");
+    try {
+      const [catalogResponse, applicationsResponse, runsResponse] = await Promise.all([api.catalog(), api.applications(), api.listRuns()]);
+      setCatalog(catalogResponse);
+      setApplications(applicationsResponse);
+      setRuns(runsResponse.runs);
+    } catch (error) {
+      if (!(error instanceof ApiError && error.status === 401)) setDataError(errorMessage(error));
+    } finally {
+      setLoadingRuns(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const error = new URLSearchParams(window.location.search).get("error");
+    api.session()
+      .then(session => {
+        if (!active) return;
+        setAuth({ kind: "authenticated", session });
+      })
+      .catch(async () => {
+        try {
+          const { selection } = await api.organizationSelection();
+          if (!active) return;
+          if (selection) {
+            setAuth({ kind: "selecting-organization", selection });
+            return;
+          }
+        } catch {
+          // Authentication failures remain intentionally indistinguishable here.
+        }
+        if (active) setAuth({ kind: "anonymous", ...(error ? { message: friendlySsoError(error) } : {}) });
+      });
+    const unauthorized = () => setAuth({ kind: "anonymous", message: "登录已过期。重新登录后，你的草稿仍会保留。" });
+    window.addEventListener("qasey:unauthorized", unauthorized);
+    return () => {
+      active = false;
+      window.removeEventListener("qasey:unauthorized", unauthorized);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (auth.kind !== "authenticated") return;
+    void loadWorkspace();
+  }, [auth.kind, loadWorkspace]);
+
+  useEffect(() => {
+    if (auth.kind !== "authenticated" || !runs.some(run => activeStatuses.includes(run.status))) return;
+    const id = window.setInterval(() => void loadWorkspace(), 8000);
+    return () => window.clearInterval(id);
+  }, [auth.kind, loadWorkspace, runs]);
+
+  if (auth.kind === "loading") return <BootScreen />;
+  if (auth.kind === "anonymous") return <LoginScreen message={auth.message} redirectUri={loginRedirect} />;
+  if (auth.kind === "selecting-organization") return <OrganizationSelectionScreen initialSelection={auth.selection} />;
+
+  const activeCount = runs.filter(run => activeStatuses.includes(run.status)).length;
+  const reviewCount = runs.filter(run => run.status === "awaiting_qa").length;
+  const view = viewForAdminPath(location.pathname);
+  const platformNav: Array<{ id: View; label: string; icon: typeof Gauge; badge?: number }> = [
+    { id: "platform-home", label: "平台首页", icon: LayoutDashboard },
+    { id: "inbox", label: "待处理", icon: Inbox, badge: reviewCount },
+    { id: "activity", label: "活动", icon: Activity, badge: activeCount },
+  ];
+  const qaseyNav: Array<{ id: View; label: string; icon: typeof Gauge; badge?: number }> = [
+    { id: "qasey-overview", label: "工作台", icon: MessageSquareText },
+    { id: "qasey-cases", label: "Case Hub", icon: Library },
+    { id: "qasey-runs", label: "测试运行", icon: Activity, badge: activeCount },
+    { id: "qasey-review", label: "待我审阅", icon: ClipboardCheck, badge: reviewCount },
+    { id: "qasey-cua", label: "Ubuntu 工作台", icon: MonitorPlay },
+  ];
+  const qaseyActive = view?.startsWith("qasey-") ?? false;
+  const currentLabel = [...platformNav, ...qaseyNav,
+    { id: "triggers" as View, label: "触发器", icon: Cable },
+    { id: "access" as View, label: "访问与审计", icon: ShieldCheck },
+  ].find(item => item.id === view)?.label ?? "平台首页";
+
+  const logout = async () => {
+    try { await api.logout(); } finally { setAuth({ kind: "anonymous" }); }
+  };
+  const openView = (nextView: View) => {
+    navigate(adminPaths[nextView]);
+    setMenuOpen(false);
+  };
+  const openApplication = (application: AgentApplication) => {
+    setMenuOpen(false);
+    const legacyPath = legacyAdminPath(
+      application.homePath.split("#", 1)[0] ?? application.homePath,
+      application.homePath.includes("#") ? `#${application.homePath.split("#").slice(1).join("#")}` : "",
+    );
+    const destination = legacyPath ?? application.homePath;
+    if (destination.startsWith("/admin")) {
+      navigate(destination);
+      return;
+    }
+    window.location.assign(destination);
+  };
+
+  return (
+    <div className="app-shell">
+      <aside className={menuOpen ? "sidebar sidebar--open" : "sidebar"}>
+        <div className="brand">
+          <BrandMark />
+          <div><strong>Qasey</strong><span>Application platform</span></div>
+          <button className="icon-button sidebar-close" onClick={() => setMenuOpen(false)} aria-label="关闭导航"><X size={20} /></button>
+        </div>
+        <button className="new-task" onClick={() => openView("qasey-overview")}>
+          <Plus size={17} /> 发起工作 <span>⌘ K</span>
+        </button>
+        <nav className="nav-list" aria-label="主导航">
+          <p className="nav-label">平台</p>
+          {platformNav.map(item => <NavButton key={item.id} item={item} active={view === item.id} onClick={() => openView(item.id)} />)}
+          <p className="nav-label application-label">Applications</p>
+          {applications.map(application => <button key={application.id} className={application.id === "qasey" && qaseyActive ? "application-nav active" : "application-nav"} onClick={() => openApplication(application)}><span className={`app-glyph ${application.id === "qasey" ? "qasey" : "generic"}`}>{application.id === "qasey" ? <TestTube2 size={16} /> : <Bot size={16} />}</span><span><strong>{application.name}</strong><small>{application.category}</small></span><ChevronRight size={15} /></button>)}
+          {qaseyActive && <div className="application-subnav">{qaseyNav.map(item => <NavButton key={item.id} item={item} active={view === item.id} onClick={() => openView(item.id)} />)}</div>}
+          {auth.session.isAdmin && <><p className="nav-label application-label">管理</p><NavButton item={{ label: "触发器", icon: Cable }} active={view === "triggers"} onClick={() => openView("triggers")} /><NavButton item={{ label: "访问与审计", icon: ShieldCheck }} active={view === "access"} onClick={() => openView("access")} /></>}
+        </nav>
+        <div className="sidebar-spacer" />
+        <div className="environment-card">
+          <span className="health-dot" />
+          <div><strong>Agent Runtime</strong><span>{applications.length} 个 Application 在线</span></div>
+        </div>
+        <div className="sidebar-user">
+          <Avatar label={auth.session.email ?? auth.session.subjectId} />
+          <div><strong>{displayName(auth.session)}</strong><span>{auth.session.tenantId}</span></div>
+          <button className="icon-button" onClick={logout} aria-label="退出登录" title="退出登录"><LogOut size={17} /></button>
+        </div>
+      </aside>
+      {menuOpen && <button className="sidebar-scrim" onClick={() => setMenuOpen(false)} aria-label="关闭导航" />}
+      <main className="main-area">
+        <header className="topbar">
+          <button className="icon-button mobile-menu" onClick={() => setMenuOpen(true)} aria-label="打开导航"><Menu size={21} /></button>
+          <div className="breadcrumbs"><span>Qasey</span><ChevronRight size={14} />{qaseyActive && <><span>QA Agent</span><ChevronRight size={14} /></>}<strong>{currentLabel}</strong></div>
+          <div className="topbar-actions">
+            <div className="search-box"><Search size={16} /><span>搜索 Agent、任务或运行</span><kbd>⌘ /</kbd></div>
+            <button className="avatar-button" aria-label="账户菜单"><Avatar label={auth.session.email ?? auth.session.subjectId} /></button>
+          </div>
+        </header>
+        <div className="page">
+          {dataError && <InlineError message={dataError} action="重新加载" onAction={loadWorkspace} />}
+          <Routes>
+            <Route path={adminPaths["platform-home"]} element={<PlatformHome applications={applications} runs={runs} loading={loadingRuns} onOpenApplication={openApplication} onOpenInbox={() => openView("inbox")} />} />
+            <Route path={adminPaths.inbox} element={<UnifiedInbox runs={runs} onOpenQaseyReview={() => openView("qasey-review")} />} />
+            <Route path={adminPaths.activity} element={<ActivityView runs={runs} loading={loadingRuns} onRefresh={loadWorkspace} />} />
+            <Route path={adminPaths["qasey-overview"]} element={<Overview catalog={catalog} runs={runs} loading={loadingRuns} onRefresh={loadWorkspace} onOpenRuns={() => openView("qasey-runs")} />} />
+            <Route path={adminPaths["qasey-runs"]} element={<RunsView runs={runs} loading={loadingRuns} onRefresh={loadWorkspace} />} />
+            <Route path={adminPaths["qasey-cases"]} element={<CaseHubView />} />
+            <Route path={adminPaths["qasey-review"]} element={<CaseHubView />} />
+            <Route path={adminPaths["qasey-cua"]} element={<CuaView subjectId={auth.session.subjectId} />} />
+            <Route path={adminPaths.triggers} element={auth.session.isAdmin ? <TriggersView /> : <Navigate to={adminPaths["platform-home"]} replace />} />
+            <Route path={adminPaths.access} element={auth.session.isAdmin ? <AccessView session={auth.session} /> : <Navigate to={adminPaths["platform-home"]} replace />} />
+            <Route path="*" element={<NotFoundView onHome={() => openView("platform-home")} />} />
+          </Routes>
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function NotFoundView({ onHome }: { onHome: () => void }) {
+  return <><PageHeading eyebrow="404" title="页面不存在" description="这个链接可能已失效，或页面已经移动。" /><section className="surface integration-empty"><span><FileSearch size={25} /></span><h2>找不到这个页面</h2><p>返回平台首页后，可以从左侧导航继续。</p><button className="secondary-button" onClick={onHome}><ArrowRight size={15} />返回平台首页</button></section></>;
+}
+
+function BootScreen() {
+  return <div className="boot-screen"><BrandMark /><LoaderCircle className="spin" size={22} /><span>正在进入 Agent Platform…</span></div>;
+}
+
+function LoginScreen({ message, redirectUri }: { message: string | undefined; redirectUri: string }) {
+  const [config, setConfig] = useState<AuthConfig | null>(null);
+  const [configError, setConfigError] = useState("");
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [displayName, setDisplayName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [passwordConfirmation, setPasswordConfirmation] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [busy, setBusy] = useState<"" | "password" | "google">("");
+  const [error, setError] = useState(message ?? "");
+
+  const loadConfig = useCallback(async () => {
+    setConfigError("");
+    try {
+      const nextConfig = await api.authConfig();
+      setConfig(nextConfig);
+      if (!nextConfig.password || !nextConfig.registration) setMode("login");
+    } catch (cause) {
+      setConfig(null);
+      setConfigError(errorMessage(cause));
+    }
+  }, []);
+
+  useEffect(() => { void loadConfig(); }, [loadConfig]);
+  useEffect(() => { if (message) setError(message); }, [message]);
+
+  const switchMode = (nextMode: "login" | "register") => {
+    setMode(nextMode);
+    setPassword("");
+    setPasswordConfirmation("");
+    setShowPassword(false);
+    setError("");
+  };
+  const googleLogin = async () => {
+    setBusy("google");
+    setError("");
+    try {
+      const { url } = await api.loginUrl(redirectUri);
+      window.location.assign(url);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally { setBusy(""); }
+  };
+  const submitCredentials = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!config?.password) return;
+    if (mode === "register" && password !== passwordConfirmation) {
+      setError("两次输入的密码不一致，请重新确认。");
+      return;
+    }
+    setBusy("password");
+    setError("");
+    try {
+      const result = mode === "register"
+        ? await api.passwordRegister({
+            displayName: displayName.trim(),
+            email: email.trim(),
+            password,
+            redirectUri,
+          })
+        : await api.passwordLogin({ email: email.trim(), password, redirectUri });
+      window.location.assign(result.redirectTo);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally { setBusy(""); }
+  };
+
+  const passwordEnabled = Boolean(config?.password);
+  const registrationEnabled = passwordEnabled && Boolean(config?.registration);
+  const googleEnabled = Boolean(config?.google);
+  const credentialBusy = busy === "password";
+  const title = mode === "register" ? "创建 Qasey 账号" : "登录 Agent Platform";
+  const note = !config
+    ? "正在确认平台为你提供的登录方式。"
+    : mode === "register"
+      ? "创建密码账户，进入当前单租户工作空间。"
+      : passwordEnabled
+        ? "输入邮箱和密码，也可以使用组织的企业账号。"
+        : googleEnabled
+          ? "使用管理员配置的 Google Workspace 账户继续。"
+          : "平台管理员尚未启用登录方式。";
+
+  return (
+    <main className="login-page">
+      <section className="login-story">
+        <div className="login-brand"><BrandMark /><strong>Qasey</strong><span>Application platform</span></div>
+        <div className="story-copy">
+          <p className="eyebrow">Agent applications, one place</p>
+          <h1>让每一个 Agent，<br />都有自己的工作方式。</h1>
+          <p>统一发现、委派和审阅不同领域的 Agent 工作，同时保留每个 Application 独有的业务体验。</p>
+        </div>
+        <div className="login-rail" aria-label="Agent Platform 工作流程">
+          {[
+            [Boxes, "发现", "找到适合当前工作的 Agent"],
+            [Sparkles, "委派", "用业务语言发起一项工作"],
+            [Inbox, "交接", "集中处理需要人工判断的事项"],
+            [ShieldCheck, "治理", "权限、运行与审计保持可追溯"],
+          ].map(([Icon, title, text], index) => {
+            const RailIcon = Icon as typeof FileSearch;
+            return <div className="login-rail-step" key={String(title)}><span><RailIcon size={17} /></span><div><strong>{String(title)}</strong><small>{String(text)}</small></div>{index < 3 && <i />}</div>;
+          })}
+        </div>
+        <div className="story-foot">Qasey Agent Platform · Protected workspace</div>
+      </section>
+      <section className="login-panel">
+        <div className="login-box">
+          <p className="eyebrow">{mode === "register" ? "开始使用" : "欢迎回来"}</p>
+          <h2>{title}</h2>
+          <p className="login-note">{note}</p>
+
+          {registrationEnabled && (
+            <div className="auth-mode-tabs" role="tablist" aria-label="账号入口">
+              <button id="auth-login-tab" type="button" role="tab" aria-selected={mode === "login"} aria-controls="credential-form" className={mode === "login" ? "active" : ""} disabled={Boolean(busy)} onClick={() => switchMode("login")}>密码登录</button>
+              <button id="auth-register-tab" type="button" role="tab" aria-selected={mode === "register"} aria-controls="credential-form" className={mode === "register" ? "active" : ""} disabled={Boolean(busy)} onClick={() => switchMode("register")}>注册账号</button>
+            </div>
+          )}
+
+          {!config && !configError && <div className="auth-method-status" role="status"><LoaderCircle className="spin" size={17} />正在读取登录方式…</div>}
+          {configError && <div className="login-error" role="alert"><CircleAlert size={18} /><span>无法读取登录方式。{configError}</span></div>}
+          {error && <div className="login-error" role="alert"><CircleAlert size={18} /><span>{error}</span></div>}
+
+          {passwordEnabled && (
+            <form
+              id="credential-form"
+              className="credential-form"
+              role={registrationEnabled ? "tabpanel" : undefined}
+              aria-labelledby={registrationEnabled ? `auth-${mode}-tab` : undefined}
+              onSubmit={submitCredentials}
+            >
+              {mode === "register" && (
+                <label htmlFor="auth-display-name">姓名
+                  <input id="auth-display-name" name="name" type="text" autoComplete="name" value={displayName} disabled={Boolean(busy)} required maxLength={100} onChange={event => setDisplayName(event.target.value)} placeholder="你的姓名" />
+                </label>
+              )}
+              <label htmlFor="auth-email">邮箱
+                <input id="auth-email" name="email" type="email" inputMode="email" autoComplete="email" value={email} disabled={Boolean(busy)} required maxLength={320} autoFocus onChange={event => setEmail(event.target.value)} placeholder="name@example.com" />
+              </label>
+              <div className="credential-field">
+                <label htmlFor="auth-password">密码</label>
+                <span className="password-field">
+                  <input id="auth-password" name="password" type={showPassword ? "text" : "password"} autoComplete={mode === "register" ? "new-password" : "current-password"} value={password} disabled={Boolean(busy)} required minLength={mode === "register" ? registrationPasswordMinLength : undefined} maxLength={128} onChange={event => setPassword(event.target.value)} placeholder={mode === "register" ? "至少 10 位，建议使用长密码短语" : "输入你的密码"} />
+                  <button type="button" className="password-toggle" aria-label={showPassword ? "隐藏密码" : "显示密码"} aria-pressed={showPassword} disabled={Boolean(busy)} onClick={() => setShowPassword(current => !current)}>{showPassword ? <EyeOff size={17} /> : <Eye size={17} />}</button>
+                </span>
+              </div>
+              {mode === "register" && (
+                <label htmlFor="auth-password-confirmation">确认密码
+                  <input id="auth-password-confirmation" name="password-confirmation" type={showPassword ? "text" : "password"} autoComplete="new-password" value={passwordConfirmation} disabled={Boolean(busy)} required minLength={registrationPasswordMinLength} maxLength={128} onChange={event => setPasswordConfirmation(event.target.value)} placeholder="再次输入密码" />
+                </label>
+              )}
+              <button className="credential-submit" type="submit" disabled={Boolean(busy)}>
+                {credentialBusy ? <LoaderCircle className="spin" size={18} /> : mode === "register" ? <UserRound size={17} /> : <KeyRound size={17} />}
+                {credentialBusy ? (mode === "register" ? "正在创建账号…" : "正在登录…") : (mode === "register" ? "创建账号并继续" : "使用密码登录")}
+                {!credentialBusy && <ArrowRight size={17} />}
+              </button>
+            </form>
+          )}
+
+          {googleEnabled && passwordEnabled && <div className="auth-divider"><span>或使用企业账号</span></div>}
+          {googleEnabled && (
+            <button type="button" className="google-button" onClick={() => void googleLogin()} disabled={Boolean(busy)}>
+              {busy === "google" ? <LoaderCircle className="spin" size={19} /> : <GoogleGlyph />}
+              {busy === "google" ? "正在前往 Google…" : "使用 Google 继续"}
+              {busy !== "google" && <ArrowRight size={18} />}
+            </button>
+          )}
+
+          {config && !passwordEnabled && !googleEnabled && <div className="login-error" role="alert"><CircleAlert size={18} /><span>当前没有可用的登录方式，请联系平台管理员。</span></div>}
+          {configError && <button type="button" className="secondary-button auth-retry" onClick={() => void loadConfig()}>重新读取</button>}
+          {config && (passwordEnabled || googleEnabled) && <div className="security-note"><ShieldCheck size={16} /><span>密码只保存带随机盐的单向哈希；登录会话保存在受保护的 HttpOnly Cookie 中。</span></div>}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function OrganizationSelectionScreen({ initialSelection }: { initialSelection: OrganizationSelection }) {
+  const [selection, setSelection] = useState(initialSelection);
+  const [submittingId, setSubmittingId] = useState("");
+  const [error, setError] = useState("");
+
+  const restartLogin = async () => {
+    setError("");
+    try {
+      const { url } = await api.loginUrl(selection.redirectTo);
+      window.location.assign(url);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    }
+  };
+  const choose = async (organizationId: string) => {
+    setSubmittingId(organizationId);
+    setError("");
+    try {
+      const result = await api.selectOrganization(organizationId);
+      window.location.assign(result.redirectTo);
+    } catch (cause) {
+      setError(errorMessage(cause));
+      try {
+        const refreshed = await api.organizationSelection();
+        if (refreshed.selection) setSelection(refreshed.selection);
+      } catch {
+        // Keep the original, tenant-safe choices visible with the retry action.
+      }
+    } finally {
+      setSubmittingId("");
+    }
+  };
+
+  return (
+    <main className="organization-selection-page">
+      <section className="organization-selection-card">
+        <div className="login-brand"><BrandMark /><strong>Qasey</strong><span>Application platform</span></div>
+        <p className="eyebrow">选择工作空间</p>
+        <h1>你要进入哪个组织？</h1>
+        <p className="login-note">你的账户属于多个组织。选择只影响本次登录，权限会在进入前再次验证。</p>
+        {error && <div className="login-error" role="alert"><CircleAlert size={18} /><span>{error}</span></div>}
+        <div className="organization-choice-list">
+          {selection.organizations.map(organization => (
+            <button
+              key={organization.id}
+              className="organization-choice"
+              disabled={Boolean(submittingId)}
+              onClick={() => void choose(organization.id)}
+            >
+              <span className="organization-choice-mark"><Boxes size={19} /></span>
+              <span><strong>{organization.displayName}</strong><small>{organization.id}</small></span>
+              {submittingId === organization.id ? <LoaderCircle className="spin" size={19} /> : <ArrowRight size={18} />}
+            </button>
+          ))}
+        </div>
+        <button className="text-button organization-login-restart" onClick={() => void restartLogin()} disabled={Boolean(submittingId)}>
+          重新开始登录
+        </button>
+        <div className="security-note"><ShieldCheck size={16} /><span>页面不会接收用户 ID；只能选择登录事务中已验证的组织成员关系。</span></div>
+      </section>
+    </main>
+  );
+}
+
+function PlatformHome({ applications, runs, loading, onOpenApplication, onOpenInbox }: { applications: AgentApplication[]; runs: QaseyRun[]; loading: boolean; onOpenApplication: (application: AgentApplication) => void; onOpenInbox: () => void }) {
+  const active = runs.filter(run => activeStatuses.includes(run.status));
+  const review = runs.filter(run => run.status === "awaiting_qa");
+  return <>
+    <PageHeading eyebrow="Qasey Agent Platform" title="工作交给 Agent，判断留给人" description="从一个入口找到合适的 Agent Application，并集中处理所有需要你介入的工作。" />
+    <section className="surface handoff-runway" aria-label="Agent 工作流概览">
+      <div className="runway-copy"><span className="platform-kicker">Live workstream</span><h2>每项工作都进入正确的 Application</h2><p>平台负责路由、身份和交接；Application 保留自己的业务流程。</p></div>
+      <div className="runway-flow">
+        <div className="runway-node source"><span><Inbox size={17} /></span><div><strong>新工作</strong><small>需求与任务入口</small></div></div>
+        <i><ArrowRight size={15} /></i>
+        <div className="runway-apps">{applications.length ? applications.slice(0,3).map(application => <span className={`mini-app ${application.accent}`} key={application.id} title={application.name}>{application.name.slice(0,1)}</span>) : <span className="mini-app neutral">—</span>}</div>
+        <i><ArrowRight size={15} /></i>
+        <button className="runway-node handoff" onClick={onOpenInbox}><span><UserRound size={17} /></span><div><strong>{review.length ? `${review.length} 项待处理` : "无需介入"}</strong><small>统一人工交接</small></div></button>
+      </div>
+    </section>
+    <div className="platform-grid">
+      <section>
+        <div className="platform-section-head"><div><h2>Applications</h2><p>已为你启用的 Agent 工作空间</p></div><span>{applications.length} online</span></div>
+        <div className="application-grid">
+          {applications.map(application => <article className={`surface application-card accent-${application.accent}`} key={application.id}>
+            <div className="application-card-head"><span className={`app-glyph ${application.id === "qasey" ? "qasey" : "generic"}`}>{application.id === "qasey" ? <TestTube2 size={19} /> : <Bot size={19} />}</span><span className="online-badge"><i />在线</span></div>
+            <p className="app-category">{application.category}</p><h3>{application.name}</h3><p className="app-description">{application.description}</p>
+            <div className="capability-list">{application.capabilities.map(capability => <span key={capability}>{capability}</span>)}</div>
+            <div className="application-metrics"><div><strong>{application.id === "qasey" ? active.length : 0}</strong><span>进行中</span></div><div><strong>{application.id === "qasey" ? review.length : 0}</strong><span>待处理</span></div><button onClick={() => onOpenApplication(application)}>打开工作空间 <ArrowRight size={15} /></button></div>
+          </article>)}
+          {!loading && applications.length === 0 && <EmptyState icon={AppWindow} title="没有可用的 Application" text="请联系平台管理员分配访问权限。" />}
+        </div>
+      </section>
+      <section className="surface handoff-panel">
+        <div className="list-heading"><div><h2>需要你的判断</h2><p>跨 Application 的统一 Inbox</p></div><button className="text-button" onClick={onOpenInbox}>全部 <ArrowRight size={15} /></button></div>
+        {review.length ? <div className="handoff-list">{review.slice(0,4).map(run => <button key={run.id} onClick={onOpenInbox}><span className="app-glyph qasey"><TestTube2 size={15} /></span><div><strong>{run.repository.owner}/{run.repository.repository}</strong><small>Qasey · 等待 QA 审阅 · {formatRelative(run.updatedAt)}</small></div><ChevronRight size={16} /></button>)}</div> : <div className="handoff-empty"><CheckCircle2 size={22} /><strong>当前没有待处理事项</strong><span>Agent 需要人工判断时会汇总到这里。</span></div>}
+      </section>
+    </div>
+    <section className="surface platform-activity-preview"><div className="list-heading"><div><h2>最近活动</h2><p>所有 Application 的运行记录</p></div><span className="live-label"><i />实时更新</span></div><RunTable runs={runs.slice(0,4)} loading={loading} /></section>
+  </>;
+}
+
+function UnifiedInbox({ runs, onOpenQaseyReview }: { runs: QaseyRun[]; onOpenQaseyReview: () => void }) {
+  const pending = runs.filter(run => run.status === "awaiting_qa");
+  return <><PageHeading eyebrow="Unified Inbox" title="需要你的判断" description="不同 Agent Application 的人工交接集中在这里，同时保留原始上下文和业务动作。" />
+    <div className="inbox-layout"><section className="surface inbox-list"><div className="inbox-toolbar"><div className="segmented"><button className="active">待处理 <span>{pending.length}</span></button><button>已完成</button></div><button className="filter-button"><ListFilter size={15} />筛选 Application</button></div>{pending.length ? pending.map(run => <button className="inbox-item" key={run.id} onClick={onOpenQaseyReview}><span className="app-glyph qasey"><TestTube2 size={17} /></span><div className="inbox-item-body"><span className="app-category">Qasey · QA approval</span><strong>{run.repository.owner}/{run.repository.repository} 等待审阅</strong><p>{run.artifacts.length} 项证据已就绪，需要决定批准或要求修改。</p><small><Clock3 size={13} />{formatRelative(run.updatedAt)} · <code>{compactId(run.id)}</code></small></div><span className="status-badge review"><ClipboardCheck size={14} />等待审阅</span><ChevronRight size={17} /></button>) : <div className="handoff-empty tall"><CheckCircle2 size={24} /><strong>Inbox 已清空</strong><span>暂时没有 Agent 需要你的判断。</span></div>}</section><aside className="inbox-guide"><span><Inbox size={20} /></span><h2>一个 Inbox，保留不同动作</h2><p>Qasey 请求 QA 结论；未来 Code Review 可以请求接受 Finding，CS Investigator 可以请求确认根因。平台只统一交接，不统一业务。</p></aside></div>
+  </>;
+}
+
+function ActivityView({ runs, loading, onRefresh }: { runs: QaseyRun[]; loading: boolean; onRefresh: () => Promise<void> }) {
+  return <><PageHeading eyebrow="Platform activity" title="所有 Agent 的工作轨迹" description="跨 Application 查看进行中、等待人工处理和已完成的工作。" action={<button className="secondary-button" onClick={() => void onRefresh()} disabled={loading}><RefreshCw className={loading ? "spin" : ""} size={16} />刷新</button>} /><section className="surface runs-surface platform-runs"><div className="filter-row"><div className="segmented"><button className="active">全部 <span>{runs.length}</span></button><button>进行中 <span>{runs.filter(run => activeStatuses.includes(run.status)).length}</span></button><button>需介入 <span>{runs.filter(run => run.status === "awaiting_qa").length}</span></button></div><button className="filter-button"><Boxes size={15} />全部 Applications</button></div><RunTable runs={runs} loading={loading} expanded /></section></>;
+}
+
+function Overview({ catalog, runs, loading, onRefresh, onOpenRuns }: { catalog: CatalogEntry[]; runs: QaseyRun[]; loading: boolean; onRefresh: () => Promise<void>; onOpenRuns: () => void }) {
+  const [prompt, setPrompt] = useState(() => localStorage.getItem("qasey:draft") ?? "");
+  const [submitting, setSubmitting] = useState(false);
+  const [result, setResult] = useState("");
+  const [error, setError] = useState("");
+  const taskAvailable = canRunQaseyTask(catalog);
+  const current = runs.find(run => activeStatuses.includes(run.status)) ?? runs[0];
+
+  useEffect(() => { localStorage.setItem("qasey:draft", prompt); }, [prompt]);
+
+  const submit = async () => {
+    const value = prompt.trim();
+    if (!value) { setError("先描述需要分析的需求或问题。"); return; }
+    if (!taskAvailable) { setError("当前账户无法运行 Qasey Task Workflow，请联系平台管理员。"); return; }
+    setSubmitting(true); setError(""); setResult("");
+    try {
+      const response = await api.runQaseyTask(value);
+      setResult(extractAgentText(response));
+      setPrompt("");
+      localStorage.removeItem("qasey:draft");
+    } catch (cause) { setError(errorMessage(cause)); }
+    finally { setSubmitting(false); }
+  };
+
+  return (
+    <>
+      <PageHeading eyebrow="QA 工作台" title="把需求变成可验证的结论" description="描述测试目标，Qasey 会读取相关上下文、识别风险并组织下一步。" />
+      <div className="overview-grid">
+        <section className="surface composer-card">
+          <div className="section-title"><div><span className="section-icon"><MessageSquareText size={18} /></span><div><h2>开始一项 QA 任务</h2><p>可以粘贴 Jira 链接、飞书文档或直接描述问题。</p></div></div><span className={taskAvailable ? "availability" : "availability availability--unavailable"}><i /> {loading ? "正在检查 Qasey" : taskAvailable ? "Qasey Workflow 就绪" : "Qasey Workflow 不可用"}</span></div>
+          <label className="sr-only" htmlFor="qa-prompt">QA 任务描述</label>
+          <textarea id="qa-prompt" value={prompt} onChange={event => { setPrompt(event.target.value); setError(""); }} placeholder="例如：请分析预约改期功能的需求，重点检查跨时区、员工冲突和通知补发…" rows={7} aria-describedby={error ? "prompt-error" : undefined} />
+          <div className="prompt-suggestions">
+            {[
+              "分析需求风险",
+              "设计测试场景",
+              "检查遗漏边界",
+            ].map(item => <button key={item} onClick={() => setPrompt(current => current ? `${current}\n${item}` : item)}>{item}</button>)}
+          </div>
+          <div className="composer-footer">
+            <span>{prompt.length > 0 ? `已输入 ${prompt.length} 字` : "草稿会自动保存在此设备"}</span>
+            <button className="primary-button" onClick={submit} disabled={submitting || !prompt.trim()}>{submitting ? <LoaderCircle className="spin" size={17} /> : <Sparkles size={17} />}{submitting ? "正在分析…" : "开始分析"}</button>
+          </div>
+          {error && <p className="field-error" id="prompt-error" role="alert"><CircleAlert size={15} />{error}</p>}
+          {result && <div className="analysis-result" aria-live="polite"><div><CheckCircle2 size={17} /><strong>分析已完成</strong></div><p>{result}</p></div>}
+        </section>
+        <section className="surface evidence-card">
+          <div className="section-title compact"><div><span className="section-icon"><Activity size={18} /></span><div><h2>{current ? "当前证据轨" : "证据轨"}</h2><p>{current ? `${current.repository.owner}/${current.repository.repository}` : "运行开始后在这里追踪"}</p></div></div>{current && <StatusBadge status={current.status} />}</div>
+          {current ? <EvidenceRail run={current} /> : <EmptyRail />}
+          {current && <button className="text-button rail-action" onClick={onOpenRuns}>查看运行详情 <ArrowRight size={15} /></button>}
+        </section>
+      </div>
+      <section className="surface recent-section">
+        <div className="list-heading"><div><h2>最近运行</h2><p>自动测试、修复与审阅进度</p></div><div><button className="icon-button bordered" onClick={() => void onRefresh()} disabled={loading} aria-label="刷新运行"><RefreshCw className={loading ? "spin" : ""} size={17} /></button><button className="text-button" onClick={onOpenRuns}>查看全部 <ArrowRight size={15} /></button></div></div>
+        <RunTable runs={runs.slice(0, 5)} loading={loading} />
+      </section>
+    </>
+  );
+}
+
+function CaseHubView() {
+  const [cases, setCases] = useState<CaseHubCase[]>([]);
+  const [changeSets, setChangeSets] = useState<CaseHubChangeSet[]>([]);
+  const [selected, setSelected] = useState<{ changeSet: CaseHubChangeSet; versions: CaseHubCaseVersion[]; results: CaseHubResult[] } | null>(null);
+  const [query, setQuery] = useState("");
+  const [feedback, setFeedback] = useState<Record<string, string>>({});
+  const [error, setError] = useState("");
+  const load = useCallback(async () => {
+    setError("");
+    try {
+      const [caseResponse, changeSetResponse] = await Promise.all([api.listCases(query), api.listChangeSets()]);
+      setCases(caseResponse.cases); setChangeSets(changeSetResponse.changeSets);
+      if (selected) setSelected(await api.getChangeSet(selected.changeSet.id));
+    } catch (cause) { setError(errorMessage(cause)); }
+  }, [query, selected?.changeSet.id]);
+  useEffect(() => { void load(); }, [load]);
+  const open = async (id: string) => { try { setSelected(await api.getChangeSet(id)); } catch (cause) { setError(errorMessage(cause)); } };
+  const review = async (result: CaseHubResult, verdict: "approve" | "request_changes" | "product_bug" | "environment_issue") => {
+    const note = feedback[result.id]?.trim();
+    if (verdict !== "approve" && !note) { setError("非批准结论需要填写反馈。"); return; }
+    try { await api.reviewCaseResult(result.id, verdict, note); await open(result.changeSetId ?? selected!.changeSet.id); }
+    catch (cause) { setError(errorMessage(cause)); }
+  };
+  const latest = selected ? latestCaseResults(selected.results) : [];
+  return <>
+    <PageHeading eyebrow="Case Hub · QASEY" title="测试用例与变更审阅" description="Case Hub 保存不可变 Case Version；Git 只保存与版本绑定的 Playwright。" action={<button className="secondary-button" onClick={() => void load()}><RefreshCw size={16} />刷新</button>} />
+    {error && <InlineError message={error} />}
+    <div className="overview-grid">
+      <section className="surface runs-surface"><div className="list-heading"><div><h2>Case repository</h2><p>{cases.length} 条 QASEY Case</p></div><label className="filter-button"><Search size={15} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索 ID、标题或 Suite" /></label></div>
+        <div className="run-table">{cases.map(testCase => <div className="run-row" key={testCase.id}><div className="run-name"><span className="run-icon"><TestTube2 size={16} /></span><div><strong>{testCase.id} · {testCase.title}</strong><span>{testCase.suitePath}</span></div></div><span>{testCase.activeVersionId ? "Active" : "Proposed"}</span></div>)}</div>
+      </section>
+      <section className="surface runs-surface"><div className="list-heading"><div><h2>Change Sets</h2><p>需求快照、PR 与逐 Case 进度</p></div></div>
+        <div className="handoff-list">{changeSets.map(changeSet => <button key={changeSet.id} onClick={() => void open(changeSet.id)}><span className="app-glyph qasey"><GitBranch size={15} /></span><div><strong>{changeSet.requirement.goal}</strong><small>{changeSet.status} · {changeSet.caseVersionIds.length} cases · {formatRelative(changeSet.updatedAt)}</small></div><ChevronRight size={16} /></button>)}</div>
+      </section>
+    </div>
+    {selected && <section className="surface recent-section"><div className="list-heading"><div><h2>{selected.changeSet.requirement.goal}</h2><p>{selected.changeSet.requirement.requirementSummary}</p></div><span className="status-badge review">{latest.filter(result => result.reviewStatus === "approved").length} / {latest.length} approved</span></div>
+      <div className="review-grid">{selected.versions.map(version => { const result = latest.find(item => item.caseVersionId === version.id); return <article className="review-card" key={version.id}><div className="review-card-head"><div><span>{version.priority} · {version.suitePath}</span><h3>{version.caseId} · {version.title}</h3><p>{version.automationPath} · v{version.version}</p></div><span className="status-badge review">{result?.reviewStatus ?? "verifying"}</span></div><ol>{version.steps.map(step => <li key={`${version.id}:${step.action}`}><strong>{step.action}</strong><span>{step.expected.join("；")}</span></li>)}</ol>{result && <><div className="artifact-links">{result.artifacts.map(artifact => <a key={artifact.id} href={`/v1/runs/${encodeURIComponent(result.runId)}/artifacts/${encodeURIComponent(artifact.id)}`} target="_blank" rel="noreferrer">{artifact.kind} · {artifact.name}</a>)}</div>{result.reviewStatus === "pending" && <><label htmlFor={`case-feedback-${result.id}`}>审阅反馈</label><textarea id={`case-feedback-${result.id}`} value={feedback[result.id] ?? ""} onChange={event => setFeedback(current => ({ ...current, [result.id]: event.target.value }))} placeholder="打回、产品缺陷或环境问题的具体反馈" /><div className="review-actions"><button className="primary-button" onClick={() => void review(result, "approve")}>批准</button><button className="secondary-button" onClick={() => void review(result, "request_changes")}>要求修改</button><button className="secondary-button" onClick={() => void review(result, "product_bug")}>产品缺陷</button><button className="secondary-button" onClick={() => void review(result, "environment_issue")}>环境问题</button></div></>}</>}</article>; })}</div>
+    </section>}
+  </>;
+}
+
+function latestCaseResults(results: CaseHubResult[]): CaseHubResult[] {
+  return [...results.reduce((map, result) => {
+    const current = map.get(result.caseVersionId);
+    if (!current || result.attempt > current.attempt) map.set(result.caseVersionId, result);
+    return map;
+  }, new Map<string, CaseHubResult>()).values()];
+}
+
+function RunsView({ runs, loading, onRefresh }: { runs: QaseyRun[]; loading: boolean; onRefresh: () => Promise<void> }) {
+  const [filter, setFilter] = useState<"all" | "active" | "review" | "done">("all");
+  const filtered = useMemo(() => runs.filter(run => filter === "all" || filter === "active" && activeStatuses.includes(run.status) || filter === "review" && run.status === "awaiting_qa" || filter === "done" && ["succeeded", "failed", "cancelled"].includes(run.status)), [filter, runs]);
+  return (
+    <>
+      <PageHeading eyebrow="测试运行" title="追踪每一次验证" description="查看执行阶段、证据产物和需要处理的异常。" action={<button className="secondary-button" onClick={() => void onRefresh()} disabled={loading}><RefreshCw className={loading ? "spin" : ""} size={16} />刷新</button>} />
+      <section className="surface runs-surface">
+        <div className="filter-row"><div className="segmented" aria-label="筛选运行">{([['all','全部'],['active','进行中'],['review','待审阅'],['done','已结束']] as const).map(([id,label]) => <button key={id} className={filter === id ? "active" : ""} onClick={() => setFilter(id)}>{label}<span>{countFor(runs,id)}</span></button>)}</div><button className="filter-button"><ListFilter size={16} />更多筛选</button></div>
+        <RunTable runs={filtered} loading={loading} expanded />
+      </section>
+    </>
+  );
+}
+
+function CuaView({ subjectId }: { subjectId: string }) {
+  const [sessionId, setSessionId] = useState(`admin-${subjectId}`);
+  const [targetUrl, setTargetUrl] = useState("https://example.com");
+  const [mode, setMode] = useState<"desktop" | "browser">("desktop");
+  const [state, setState] = useState<SandboxSessionState | null>(null);
+  const [frameUrl, setFrameUrl] = useState("");
+  const [typing, setTyping] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const frameImage = useRef<HTMLImageElement>(null);
+  const running = mode === "desktop" ? state?.desktop.running : state?.browser.running;
+
+  const loadFrame = useCallback(async () => {
+    if (!running) return;
+    try {
+      const frame = mode === "desktop" ? await api.desktopFrame(sessionId) : await api.browserFrame(sessionId);
+      setFrameUrl(await blobDataUrl(frame.blob));
+      if (mode === "browser") setState(current => current ? { ...current, browser: { ...current.browser, ...(frame.url ? { url: frame.url } : {}), ...(frame.title ? { title: frame.title } : {}) } } : current);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    }
+  }, [mode, running, sessionId]);
+
+  useEffect(() => {
+    if (!running) return;
+    void loadFrame();
+    const timer = window.setInterval(() => void loadFrame(), 900);
+    return () => window.clearInterval(timer);
+  }, [loadFrame, running]);
+
+  const start = async () => {
+    setBusy(true); setError("");
+    try {
+      setState(mode === "desktop"
+        ? await api.desktopStart(sessionId.trim(), { application: "browser", ...(targetUrl.trim() ? { url: targetUrl.trim() } : {}), recordVideo: true })
+        : await api.browserStart(sessionId.trim(), targetUrl.trim() || undefined));
+    }
+    catch (cause) { setError(errorMessage(cause)); }
+    finally { setBusy(false); }
+  };
+  const act = async (action: Record<string, unknown>) => {
+    setError("");
+    try {
+      setState(mode === "desktop"
+        ? await api.desktopAction(sessionId.trim(), action)
+        : await api.browserAction(sessionId.trim(), action));
+      await loadFrame();
+    }
+    catch (cause) { setError(errorMessage(cause)); }
+  };
+  const stop = async () => {
+    setBusy(true); setError("");
+    try {
+      if (mode === "desktop") setState(await api.desktopStop(sessionId.trim()));
+      else { await api.sandboxStop(sessionId.trim()); setState(null); }
+      setFrameUrl("");
+    }
+    catch (cause) { setError(errorMessage(cause)); }
+    finally { setBusy(false); }
+  };
+  const launch = async (application: "browser" | "terminal" | "editor" | "files") => {
+    setBusy(true); setError("");
+    try {
+      setState(await api.desktopApplication(sessionId.trim(), application, application === "browser" ? targetUrl.trim() || undefined : undefined));
+      await loadFrame();
+    } catch (cause) { setError(errorMessage(cause)); }
+    finally { setBusy(false); }
+  };
+  const clickFrame = (event: React.MouseEvent<HTMLButtonElement>) => {
+    const image = frameImage.current;
+    if (!image) return;
+    const bounds = image.getBoundingClientRect();
+    const x = (event.clientX - bounds.left) * (image.naturalWidth / bounds.width);
+    const y = (event.clientY - bounds.top) * (image.naturalHeight / bounds.height);
+    void act({ action: "click", x, y });
+  };
+  const clickFrameCenter = () => {
+    const image = frameImage.current;
+    if (image) void act({ action: "click", x: image.naturalWidth / 2, y: image.naturalHeight / 2 });
+  };
+
+  return <>
+    <PageHeading eyebrow="Computer use" title="Ubuntu 工作台" description="每个远程 sandbox 实例都是长期运行的 Ubuntu 环境；会话独占 GUI 桌面，并使用自己的持久 workspace 与 home。" />
+    {error && <InlineError message={error} />}
+    <div className="segmented cua-mode" role="tablist" aria-label="控制模式">
+      <button role="tab" aria-selected={mode === "desktop"} className={mode === "desktop" ? "active" : ""} disabled={Boolean(running)} onClick={() => { setMode("desktop"); setFrameUrl(""); }}>完整桌面</button>
+      <button role="tab" aria-selected={mode === "browser"} className={mode === "browser" ? "active" : ""} disabled={Boolean(running)} onClick={() => { setMode("browser"); setFrameUrl(""); }}>Playwright 浏览器</button>
+    </div>
+    <section className="surface cua-toolbar">
+      <label>会话 ID<input value={sessionId} disabled={Boolean(running)} onChange={event => setSessionId(event.target.value)} /></label>
+      <label>浏览器地址<input value={targetUrl} onChange={event => setTargetUrl(event.target.value)} onKeyDown={event => { if (event.key === "Enter") void (!running ? start() : mode === "browser" ? act({ action: "navigate", url: targetUrl }) : launch("browser")); }} /></label>
+      {!running ? <button className="primary-button" disabled={busy || !sessionId.trim()} onClick={() => void start()}>{busy ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}启动</button>
+        : <button className="secondary-button danger-text" disabled={busy} onClick={() => void stop()}><Square size={15} />停止</button>}
+    </section>
+    <section className="surface cua-stage">
+      <div className="cua-stage-head"><div><span className={running ? "health-dot" : "health-dot offline"} /><strong>{mode === "desktop" ? "Ubuntu Desktop" : state?.browser.title || "Sandbox browser"}</strong><small>{mode === "desktop" ? (state?.desktop.applications?.join(" · ") || "等待租用桌面") : state?.browser.url || "尚未启动"}</small></div>{state && <span>实例 {state.ordinal} · generation {state.generation}{mode === "desktop" && state.desktop.recording ? " · 正在录制" : ""}</span>}</div>
+      {mode === "desktop" && running && <div className="cua-appbar" aria-label="Ubuntu 应用"><button onClick={() => void launch("browser")} disabled={busy}><MonitorPlay size={15} />浏览器</button><button onClick={() => void launch("terminal")} disabled={busy}><Terminal size={15} />终端</button><button onClick={() => void launch("editor")} disabled={busy}><FileText size={15} />编辑器</button><button onClick={() => void launch("files")} disabled={busy}><FolderOpen size={15} />文件</button></div>}
+      <div className="cua-screen">{frameUrl ? <button className="cua-frame-button" onClick={clickFrame} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); clickFrameCenter(); } }} aria-label={`操作 Qasey sandbox ${mode === "desktop" ? "Ubuntu 桌面" : "浏览器"}画面`}><img ref={frameImage} src={frameUrl} alt={mode === "desktop" ? "Qasey Ubuntu desktop live view" : "Qasey sandbox browser live view"} /></button> : <div><MonitorPlay size={34} /><strong>启动后，实时画面会显示在这里</strong><span>{mode === "desktop" ? "可以操作浏览器、终端、编辑器和文件管理器。" : "点击画面可直接发送鼠标操作。"}</span></div>}</div>
+      {running && <div className={`cua-controls ${mode === "desktop" ? "desktop" : ""}`}>{mode === "browser" && <><button className="icon-button bordered" onClick={() => void act({ action: "back" })} aria-label="后退">←</button><button className="icon-button bordered" onClick={() => void act({ action: "forward" })} aria-label="前进">→</button><button className="icon-button bordered" onClick={() => void act({ action: "reload" })} aria-label="刷新"><RefreshCw size={15} /></button></>}<label className="cua-type-field"><span>键盘输入</span><input value={typing} onChange={event => setTyping(event.target.value)} placeholder="输入发送到当前焦点…" onKeyDown={event => { if (event.key === "Enter" && typing) { void act({ action: "type", text: typing }); setTyping(""); } }} /></label><button className="secondary-button" disabled={!typing} onClick={() => { void act({ action: "type", text: typing }); setTyping(""); }}>发送</button></div>}
+    </section>
+  </>;
+}
+
+const triggerStatusMeta: Record<TriggerConnectionStatus, { label: string; tone: string }> = {
+  awaiting_webhook: { label: "等待验证", tone: "warning" },
+  active: { label: "已启用", tone: "success" },
+  disabled: { label: "已停用", tone: "neutral" },
+  error: { label: "需要处理", tone: "danger" },
+};
+
+function TriggersView() {
+  const [providers, setProviders] = useState<TriggerProvider[]>([]);
+  const [connections, setConnections] = useState<TriggerConnection[]>([]);
+  const [targets, setTargets] = useState<Record<string, TriggerTarget[]>>({});
+  const [dialog, setDialog] = useState<{ mode: "create" } | { mode: "configuration"; connection: TriggerConnection }>();
+  const [busyId, setBusyId] = useState("");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const [providerResponse, connectionResponse] = await Promise.all([api.triggerProviders(), api.triggerConnections()]);
+      const targetEntries = await Promise.all(providerResponse.providers.map(async provider => [
+        provider.id,
+        (await api.triggerTargets(provider.id)).targets,
+      ] as const));
+      setProviders(providerResponse.providers);
+      setConnections(connectionResponse.connections);
+      setTargets(Object.fromEntries(targetEntries));
+      setError("");
+    } catch (cause) { setError(errorMessage(cause)); }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (!connections.some(connection => connection.status === "awaiting_webhook")) return;
+    const timer = window.setInterval(() => void load(), 5000);
+    return () => window.clearInterval(timer);
+  }, [connections, load]);
+
+  const replace = (connection: TriggerConnection) => setConnections(current =>
+    current.some(item => item.id === connection.id && item.providerId === connection.providerId)
+      ? current.map(item => item.id === connection.id && item.providerId === connection.providerId ? connection : item)
+      : [connection, ...current]);
+
+  const act = async (connection: TriggerConnection, action: "toggle" | "delete", targetId?: string) => {
+    const key = `${connection.providerId}:${connection.id}`;
+    setBusyId(key); setError(""); setNotice("");
+    try {
+      if (action === "delete") {
+        if (!window.confirm(`删除 ${connection.displayName}？外部 Provider 中的资源不会被删除。`)) return;
+        await api.deleteTriggerConnection(connection.providerId, connection.id, connection.revision);
+        setConnections(current => current.filter(item => item.id !== connection.id || item.providerId !== connection.providerId));
+        setNotice("Trigger 已删除；外部 Provider 中的资源没有被修改。");
+      } else if (targetId) {
+        replace((await api.rebindTriggerConnection(connection.providerId, connection.id, connection.revision, targetId)).connection);
+        setNotice("绑定目标已更新，Trigger 入口保持不变。");
+      } else {
+        replace((await api.setTriggerConnectionEnabled(connection.providerId, connection.id, connection.revision, connection.status === "disabled")).connection);
+      }
+    } catch (cause) { setError(errorMessage(cause)); }
+    finally { setBusyId(""); }
+  };
+
+  const copyEndpoint = async (connection: TriggerConnection) => {
+    if (!connection.endpoint) return;
+    await navigator.clipboard.writeText(connection.endpoint.url);
+    setNotice(`${connection.displayName} 的 Trigger 入口已复制。`);
+  };
+  const copySetupValue = async (connection: TriggerConnection, label: string, value: string) => {
+    await navigator.clipboard.writeText(value);
+    setNotice(`${connection.displayName} 的 ${label} 已复制。`);
+  };
+
+  return <>
+    <PageHeading eyebrow="Automation ingress" title="Triggers" description="集中管理事件从哪里来，以及它们要启动哪个 Agent 或 Workflow。" action={<button className="primary-button" disabled={!providers.length} onClick={() => setDialog({ mode: "create" })}><Plus size={16} />新增 Trigger</button>} />
+    {error && <InlineError message={error} action="重新加载" onAction={load} />}
+    {notice && <div className="success-notice"><CheckCircle2 size={17} />{notice}</div>}
+    <section className="integration-thesis" aria-label="Trigger 路由模型">
+      <div><span className="integration-node slack"><MessageSquareText size={18} /></span><small>事件来源</small></div>
+      <span className="integration-link"><i /><ChevronRight size={15} /></span>
+      <div><span className="integration-node route"><Cable size={18} /></span><small>Trigger Provider</small></div>
+      <span className="integration-link"><i /><ChevronRight size={15} /></span>
+      <div><span className="integration-node agent"><Bot size={18} /></span><small>Agent / Workflow</small></div>
+    </section>
+    <div className="trigger-provider-strip" aria-label="可用 Trigger Providers">{providers.map(provider => <div key={provider.id}><span className="integration-app-mark"><ProviderIcon providerId={provider.id} /></span><span><strong>{provider.name}</strong><small>{provider.description}</small></span><em>{connections.filter(connection => connection.providerId === provider.id).length} 个连接</em></div>)}</div>
+    {connections.length === 0
+      ? <section className="surface integration-empty"><span><Cable size={25} /></span><h2>还没有 Trigger</h2><p>选择一个 Provider，配置事件来源，再把它绑定到 Agent 或 Workflow。</p><button className="secondary-button" disabled={!providers.length} onClick={() => setDialog({ mode: "create" })}><Plus size={15} />创建第一个 Trigger</button></section>
+      : <div className="integration-grid">{connections.map(connection => {
+        const status = triggerStatusMeta[connection.status];
+        const provider = providers.find(item => item.id === connection.providerId);
+        const busy = busyId === `${connection.providerId}:${connection.id}`;
+        return <section className="surface integration-card" key={`${connection.providerId}:${connection.id}`}>
+          <header><div className="integration-app-mark"><ProviderIcon providerId={connection.providerId} /></div><div><h2>{connection.displayName}</h2><p>{connection.providerName}{connection.identity?.context ? ` · ${connection.identity.context}` : ""}</p></div><span className={`integration-status ${status.tone}`}><i />{status.label}</span></header>
+          <p className="integration-status-detail">{connection.statusDetail}</p>
+          <div className="binding-lane"><div><small>{connection.identity?.label ?? "Provider"}</small><strong>{connection.identity?.value ?? connection.providerName}</strong></div><ChevronRight size={15} /><label><span>绑定目标</span><select value={connection.target.id} disabled={busy || !provider?.capabilities.rebind} onChange={event => void act(connection, "toggle", event.target.value)}>{(targets[connection.providerId] ?? []).map(target => <option key={target.id} value={target.id}>{target.name} · {target.kind}</option>)}</select></label></div>
+          {connection.endpoint && <div className="webhook-field"><label htmlFor={`endpoint-${connection.providerId}-${connection.id}`}>{connection.endpoint.label}</label><div><input id={`endpoint-${connection.providerId}-${connection.id}`} readOnly value={connection.endpoint.url} /><button className="icon-button bordered" onClick={() => void copyEndpoint(connection)} aria-label="复制 Trigger 入口"><Copy size={15} /></button></div></div>}
+          {connection.setupFields && connection.setupFields.length > 0 && <div className="setup-fields"><strong>Slash Command 配置</strong><div>{connection.setupFields.map(field => <label key={field.key}><span>{field.label}</span><div><input readOnly value={field.value} />{field.copyable && <button className="icon-button bordered" onClick={() => void copySetupValue(connection, field.label, field.value)} aria-label={`复制 ${field.label}`}><Copy size={14} /></button>}</div></label>)}</div></div>}
+          {connection.guidance && <div className="webhook-guide"><strong>{connection.guidance.title}</strong><span>{connection.guidance.body}{connection.guidance.codes?.map(code => <code key={code}>{code}</code>)}</span></div>}
+          <footer><span>{connection.lastVerifiedAt ? `最近验证于 ${formatRelative(connection.lastVerifiedAt)}` : `更新于 ${formatRelative(connection.updatedAt)}`}</span><div>{provider?.capabilities.configurationUpdate && <button className="text-button" onClick={() => setDialog({ mode: "configuration", connection })}>更新配置</button>}{provider?.capabilities.enableDisable && <button className="icon-button bordered" disabled={busy} onClick={() => void act(connection, "toggle")} aria-label={connection.status === "disabled" ? "启用 Trigger" : "停用 Trigger"} title={connection.status === "disabled" ? "启用 Trigger" : "停用 Trigger"}>{busy ? <LoaderCircle className="spin" size={15} /> : <Power size={15} />}</button>}{provider?.capabilities.delete && <button className="icon-button bordered danger-text" disabled={busy} onClick={() => void act(connection, "delete")} aria-label="删除 Trigger" title="删除 Trigger"><Trash2 size={15} /></button>}</div></footer>
+        </section>;
+      })}</div>}
+    {dialog && <TriggerConfigurationDialog mode={dialog.mode} {...(dialog.mode === "configuration" ? { connection: dialog.connection } : {})} providers={providers} targets={targets} onClose={() => setDialog(undefined)} onSaved={connection => { replace(connection); setDialog(undefined); setNotice(dialog.mode === "create" ? "Trigger 已保存；按 Provider 指引完成入口验证。" : "Trigger 配置已更新。"); }} />}
+  </>;
+}
+
+function ProviderIcon({ providerId }: { providerId: string }) {
+  return providerId === "slack" ? <MessageSquareText size={19} /> : <Cable size={19} />;
+}
+
+function TriggerConfigurationDialog({ mode, connection, providers, targets, onClose, onSaved }: {
+  mode: "create" | "configuration";
+  connection?: TriggerConnection;
+  providers: TriggerProvider[];
+  targets: Record<string, TriggerTarget[]>;
+  onClose: () => void;
+  onSaved: (connection: TriggerConnection) => void;
+}) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const initialProviderId = connection?.providerId ?? providers[0]?.id ?? "";
+  const [providerId, setProviderId] = useState(initialProviderId);
+  const [displayName, setDisplayName] = useState("");
+  const [targetId, setTargetId] = useState(connection?.target.id ?? targets[initialProviderId]?.[0]?.id ?? "");
+  const [configuration, setConfiguration] = useState<Record<string, string>>({
+    ...(connection?.configurationValues ?? {}),
+  });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const provider = providers.find(item => item.id === providerId);
+  const availableTargets = targets[providerId] ?? [];
+  useEffect(() => {
+    const element = dialogRef.current;
+    if (!element) return;
+    element.showModal();
+    return () => element.close();
+  }, []);
+  const save = async () => {
+    if (!provider) { setError("请选择 Trigger Provider。"); return; }
+    if (mode === "create" && (!displayName.trim() || !targetId)) { setError("请填写名称并选择绑定目标。"); return; }
+    if (mode === "create" && provider.fields.some(field => field.required && !configuration[field.key]?.trim())) { setError("请填写所有必填配置。"); return; }
+    setBusy(true); setError("");
+    try {
+      const response = mode === "create"
+        ? await api.createTriggerConnection({ providerId, displayName: displayName.trim(), targetId, configuration })
+        : await api.updateTriggerConfiguration(providerId, connection!.id, connection!.revision, configuration);
+      setConfiguration({}); onSaved(response.connection);
+    } catch (cause) { setError(errorMessage(cause)); }
+    finally { setBusy(false); }
+  };
+  return <dialog ref={dialogRef} className="integration-dialog" aria-labelledby="trigger-dialog-title" onCancel={event => { event.preventDefault(); onClose(); }}><div className="dialog-head"><div><p className="eyebrow">Trigger Provider · {provider?.name ?? "Select"}</p><h2 id="trigger-dialog-title">{mode === "create" ? "新增 Trigger" : `更新 ${connection?.displayName}`}</h2><p>{provider?.configurationDescription ?? "选择事件来源和它要启动的目标。"}</p></div><button className="icon-button bordered" onClick={onClose} aria-label="关闭"><X size={18} /></button></div>{mode === "create" && <><label>Provider<select autoFocus value={providerId} onChange={event => { const nextProviderId = event.target.value; setProviderId(nextProviderId); setTargetId(targets[nextProviderId]?.[0]?.id ?? ""); setConfiguration({}); }}>{providers.map(item => <option key={item.id} value={item.id}>{item.name} · {item.category}</option>)}</select></label><div className="integration-form-row"><label>Trigger 名称<input value={displayName} onChange={event => setDisplayName(event.target.value)} placeholder="例如 QA Team mentions" /></label><label>绑定目标<select value={targetId} onChange={event => setTargetId(event.target.value)}>{availableTargets.map(target => <option key={target.id} value={target.id}>{target.name} · {target.kind}</option>)}</select></label></div></>}{provider?.fields.map(field => field.type === "boolean" ? <label className="trigger-checkbox" key={field.key}><input type="checkbox" checked={configuration[field.key] === "true"} onChange={event => setConfiguration(current => ({ ...current, [field.key]: String(event.target.checked) }))} /><span><strong>{field.label}</strong>{field.help && <small>{field.help}</small>}</span></label> : <label key={field.key}>{field.label}<input type={field.type === "secret" ? "password" : "text"} autoComplete={field.type === "secret" ? "new-password" : "off"} value={configuration[field.key] ?? ""} onChange={event => setConfiguration(current => ({ ...current, [field.key]: event.target.value }))} placeholder={field.placeholder} />{field.help && <small>{field.help}</small>}</label>)}<div className="credential-note"><ShieldCheck size={17} /><span>敏感字段会在服务端加密保存，之后不会回传到浏览器。{mode === "configuration" ? "仅切换非敏感选项时，无需重新填写 Token 或 Signing Secret。" : "每个 Provider 独立验证和运行自己的配置。"}</span></div>{error && <p className="field-error" role="alert"><CircleAlert size={15} />{error}</p>}<div className="dialog-actions"><button className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={busy} onClick={() => void save()}>{busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}{mode === "create" ? "保存 Trigger" : "保存配置"}</button></div></dialog>;
+}
+
+function ApiTokenVault({ onAuditChanged, onError }: { onAuditChanged: () => void; onError: (message: string) => void }) {
+  const [tokens, setTokens] = useState<ApiTokenRecord[]>([]);
+  const [availableScopes, setAvailableScopes] = useState<string[]>([]);
+  const [name, setName] = useState("");
+  const [scopes, setScopes] = useState<string[]>([]);
+  const [expiry, setExpiry] = useState("90");
+  const [createdToken, setCreatedToken] = useState<{ token: string; record: ApiTokenRecord }>();
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const selectedScopes = useMemo(() => new Set(scopes), [scopes]);
+  const load = useCallback(async () => {
+    try {
+      const response = await api.apiTokens();
+      setTokens(response.tokens);
+      setAvailableScopes(response.availableScopes);
+    } catch (cause) { onError(errorMessage(cause)); }
+  }, [onError]);
+  useEffect(() => { void load(); }, [load]);
+  const toggleScope = (scope: string) => setScopes(current => current.includes(scope)
+    ? current.filter(item => item !== scope)
+    : [...current, scope]);
+  const create = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!name.trim()) { onError("请填写 Token 名称。"); return; }
+    if (scopes.length === 0) { onError("请至少选择一项 API 权限。"); return; }
+    setBusy(true); onError(""); setCreatedToken(undefined); setCopied(false);
+    try {
+      const expiresAt = expiry === "never" ? undefined : new Date(Date.now() + Number(expiry) * 86_400_000).toISOString();
+      const created = await api.createApiToken({ name: name.trim(), scopes, ...(expiresAt ? { expiresAt } : {}) });
+      setCreatedToken(created);
+      setName(""); setScopes([]);
+      await load(); onAuditChanged();
+    } catch (cause) { onError(errorMessage(cause)); }
+    finally { setBusy(false); }
+  };
+  const copyToken = async () => {
+    if (!createdToken) return;
+    await navigator.clipboard.writeText(createdToken.token);
+    setCopied(true);
+  };
+  const revoke = async (token: ApiTokenRecord) => {
+    if (!window.confirm(`确认吊销 ${token.name}？所有使用该 Token 的请求会立即失效。`)) return;
+    setBusy(true); onError("");
+    try { await api.revokeApiToken(token.id); await load(); onAuditChanged(); }
+    catch (cause) { onError(errorMessage(cause)); }
+    finally { setBusy(false); }
+  };
+  return <section className="surface token-vault"><div className="list-heading"><div><h2>API Token</h2><p>为自动化和外部客户端签发最小权限凭证</p></div><span className="vault-mark"><KeyRound size={16} />Bearer</span></div><div className="token-vault-layout"><form className="token-issuer" onSubmit={event => void create(event)}><div className="token-step"><span>1</span><div><strong>标记用途</strong><small>名称会显示在审计和吊销确认中。</small></div></div><label>Token 名称<input value={name} onChange={event => setName(event.target.value)} placeholder="例如 nightly-e2e-runner" maxLength={80} /></label><label>有效期<select value={expiry} onChange={event => setExpiry(event.target.value)}><option value="30">30 天</option><option value="90">90 天</option><option value="365">1 年</option><option value="never">永不过期</option></select></label><div className="token-step scope-step"><span>2</span><div><strong>限定权限</strong><small>Token 只会获得勾选的 API 权限。</small></div></div><div className="scope-grid">{availableScopes.map(scope => { const presentation = presentScope(scope); const selected = selectedScopes.has(scope); return <label className={`scope-option${selected ? " scope-option--selected" : ""}`} key={scope}><input type="checkbox" checked={selected} onChange={() => toggleScope(scope)} /><span className="scope-copy"><span className="scope-heading"><strong>{presentation.label}</strong><small className={`scope-access scope-access--${presentation.accessLevel === "只读" ? "read" : presentation.accessLevel === "执行" ? "execute" : "write"}`}>{presentation.accessLevel}</small></span><span className="scope-code">{scope}</span><span className="scope-description">{presentation.description}</span></span></label>; })}</div>{availableScopes.length === 0 && <p className="token-empty">当前没有可签发的 API 权限。</p>}<button className="primary-button token-create" disabled={busy || availableScopes.length === 0} type="submit">{busy ? <LoaderCircle className="spin" size={16} /> : <KeyRound size={16} />}创建 Token</button></form><div className="token-registry">{createdToken && <div className="token-reveal" role="status"><div><span>仅显示一次</span><strong>{createdToken.record.name}</strong><p>请现在复制并保存。关闭或刷新页面后无法再次查看。</p></div><div className="secret-strip"><code>{createdToken.token}</code><button className="icon-button" onClick={() => void copyToken()} aria-label="复制新 Token" title="复制新 Token">{copied ? <Check size={16} /> : <Copy size={16} />}</button></div></div>}<div className="token-registry-head"><strong>已签发</strong><span>{tokens.filter(token => tokenStatus(token) === "active").length} 个有效</span></div>{tokens.length === 0 ? <div className="token-empty-state"><KeyRound size={19} /><span>还没有 API Token</span><small>创建后，凭证指纹会出现在这里。</small></div> : <div className="token-list">{tokens.map(token => { const status = tokenStatus(token); return <article key={token.id} className={`token-row token-row--${status}`}><span className="token-fingerprint"><i /><code>{token.prefix}…</code></span><div className="token-row-body"><div><strong>{token.name}</strong><span className={`token-status token-status--${status}`}>{status === "active" ? "有效" : status === "expired" ? "已过期" : "已吊销"}</span></div><p>{token.scopes.join(" · ")}</p><small>{token.lastUsedAt ? `最近使用 ${formatRelative(token.lastUsedAt)}` : "尚未使用"} · {token.expiresAt ? `${tokenDateFormatter.format(new Date(token.expiresAt))} 到期` : "永不过期"}</small></div>{status === "active" && <button className="icon-button bordered danger-text" disabled={busy} onClick={() => void revoke(token)} aria-label={`吊销 ${token.name}`} title="吊销 Token"><Trash2 size={15} /></button>}</article>; })}</div>}</div></div></section>;
+}
+
+function tokenStatus(token: ApiTokenRecord): "active" | "expired" | "revoked" {
+  if (token.revokedAt) return "revoked";
+  if (token.expiresAt && Date.parse(token.expiresAt) <= Date.now()) return "expired";
+  return "active";
+}
+
+function AccessView({ session }: { session: Session }) {
+  const [records, setRecords] = useState<AuditRecord[]>([]);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [role, setRole] = useState("");
+  const [permission, setPermission] = useState("");
+  const [subject, setSubject] = useState("");
+  const [bindingRole, setBindingRole] = useState("");
+  const load = useCallback(() => api.audit().then(response => setRecords(response.records)).catch(cause => setError(errorMessage(cause))), []);
+  useEffect(() => { void load(); }, [load]);
+  const grant = async () => {
+    if (!role.trim() || !permission.trim()) { setError("角色和权限都不能为空。"); return; }
+    if (!window.confirm(`确认在租户 ${session.tenantId} 中授予 ${role}：${permission}？`)) return;
+    try { await api.grant(role.trim(), permission.trim()); setNotice("权限已授予，并已写入审计记录。"); setError(""); await load(); } catch (cause) { setError(errorMessage(cause)); }
+  };
+  const bind = async () => {
+    if (!subject.trim() || !bindingRole.trim()) { setError("成员标识和角色都不能为空。"); return; }
+    if (!window.confirm(`确认在租户 ${session.tenantId} 中为 ${subject} 绑定 ${bindingRole}？`)) return;
+    try { await api.bind(subject.trim(), bindingRole.trim()); setNotice("成员角色已绑定，并已写入审计记录。"); setError(""); await load(); } catch (cause) { setError(errorMessage(cause)); }
+  };
+  return <><PageHeading eyebrow="平台管理" title="访问与审计" description={`所有变更仅作用于 ${session.tenantId}，并记录操作人与请求 ID。`} />{error && <InlineError message={error} />}{notice && <div className="success-notice"><CheckCircle2 size={17} />{notice}</div>}<ApiTokenVault onAuditChanged={() => void load()} onError={setError} /><div className="access-grid"><section className="surface access-card"><div className="section-title"><div><span className="section-icon"><KeyRound size={18} /></span><div><h2>角色权限</h2><p>为已有或新的角色授予一项权限。</p></div></div></div><label>角色<input value={role} onChange={event => setRole(event.target.value)} placeholder="例如 qa-lead" /></label><label>权限<input value={permission} onChange={event => setPermission(event.target.value)} placeholder="例如 qasey.results.approve" /></label><button className="secondary-button" onClick={() => void grant()}>预览并授予</button></section><section className="surface access-card"><div className="section-title"><div><span className="section-icon"><UserRound size={18} /></span><div><h2>成员角色</h2><p>将组织成员绑定到一个角色。</p></div></div></div><label>成员标识<input value={subject} onChange={event => setSubject(event.target.value)} placeholder="平台用户 ID" /></label><label>角色<input value={bindingRole} onChange={event => setBindingRole(event.target.value)} placeholder="例如 qa-lead" /></label><button className="secondary-button" onClick={() => void bind()}>预览并绑定</button></section></div><section className="surface audit-section"><div className="list-heading"><div><h2>最近审计</h2><p>访问判定与权限变更</p></div><button className="icon-button bordered" onClick={() => void load()} aria-label="刷新审计"><RefreshCw size={17} /></button></div>{records.length === 0 ? <p className="empty-row">暂无审计记录</p> : <div className="audit-list">{records.slice(0,50).map(record => <div key={`${record.requestId}-${record.resourceType}-${record.resourceId}-${record.action}`}><span className={`decision ${record.decision}`}>{record.decision === "allow" ? "允许" : "拒绝"}</span><div><strong>{record.action} · {record.resourceId}</strong><span>{record.subjectId ?? "匿名请求"} · {record.reason}</span></div><code>{compactId(record.requestId)}</code></div>)}</div>}</section></>;
+}
+
+function EvidenceRail({ run, compact = false }: { run: QaseyRun; compact?: boolean }) {
+  const step = statusMeta[run.status].step;
+  return <div className={compact ? "evidence-rail evidence-rail--compact" : "evidence-rail"}>{evidenceStages.map(([Icon,label],index) => { const done = index < step || run.status === "succeeded"; const active = index === Math.min(step,5) && !["succeeded","failed","cancelled"].includes(run.status); return <div className={`rail-step ${done ? "done" : ""} ${active ? "active" : ""}`} key={label}><span className="rail-node">{done ? <Check size={14} /> : <Icon size={15} />}</span><strong>{label}</strong>{!compact && <small>{railDetail(run,index)}</small>}{index < evidenceStages.length - 1 && <i />}</div>; })}</div>;
+}
+
+function EmptyRail() { return <div className="empty-rail"><div className="empty-rail-line" /><div><span><FileSearch size={17} /></span><span><Bot size={17} /></span><span><Play size={17} /></span><span><ClipboardCheck size={17} /></span></div><h3>证据会随运行逐步汇集</h3><p>从需求来源到最终结论，每个阶段都可以追溯。</p></div>; }
+
+function RunTable({ runs, loading, expanded = false }: { runs: QaseyRun[]; loading: boolean; expanded?: boolean }) {
+  const [busyId, setBusyId] = useState("");
+  const [localRuns, setLocalRuns] = useState(runs);
+  const [selectedRun, setSelectedRun] = useState<QaseyRun | null>(null);
+  useEffect(() => setLocalRuns(runs), [runs]);
+  const act = async (run: QaseyRun) => {
+    setBusyId(run.id);
+    try { const next = activeStatuses.includes(run.status) ? await api.cancelRun(run.id) : await api.rerun(run.id); setLocalRuns(current => current.map(item => item.id === run.id ? next : item)); }
+    finally { setBusyId(""); }
+  };
+  if (loading && runs.length === 0) return <div className="table-loading"><LoaderCircle className="spin" size={20} />正在读取运行…</div>;
+  if (runs.length === 0) return <div className="table-empty"><TestTube2 size={22} /><div><strong>还没有运行</strong><span>从一项 QA 任务开始，运行记录会出现在这里。</span></div></div>;
+  return <><div className="run-table"><div className="run-row run-row--head"><span>运行</span><span>状态</span><span>证据</span><span>更新时间</span><span /></div>{localRuns.map(run => { const canCancel = activeStatuses.includes(run.status); const canRerun = ["succeeded", "failed", "cancelled"].includes(run.status); return <div className="run-row" key={run.id}><div className="run-name"><span className="run-icon">{run.framework === "playwright" ? <TestTube2 size={17} /> : <Gauge size={17} />}</span><div><strong>{run.repository.owner}/{run.repository.repository}</strong><span><code>{compactId(run.id)}</code> · {run.framework}</span></div></div><StatusBadge status={run.status} /><div className="artifact-count"><FileSearch size={15} />{run.artifacts.length} 项</div><span className="updated">{formatRelative(run.updatedAt)}</span><div className="row-actions">{expanded && run.pullRequestUrl && <a className="icon-button" href={run.pullRequestUrl} target="_blank" rel="noreferrer" aria-label="打开 Pull Request"><GitBranch size={16} /></a>}{(canCancel || canRerun) && <button className="icon-button" onClick={() => void act(run)} disabled={busyId === run.id} aria-label={canCancel ? "取消运行" : "重新运行"}>{busyId === run.id ? <LoaderCircle className="spin" size={16} /> : canCancel ? <Square size={15} /> : <RotateCcw size={16} />}</button>}<button className="icon-button" onClick={() => setSelectedRun(run)} aria-label="查看运行"><ChevronRight size={17} /></button></div></div>; })}</div>{selectedRun && <RunDetailDialog run={selectedRun} onClose={() => setSelectedRun(null)} />}</>;
+}
+
+function RunDetailDialog({ run, onClose }: { run: QaseyRun; onClose: () => void }) {
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [onClose]);
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={event => { if (event.currentTarget === event.target) onClose(); }}><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="run-dialog-title"><div className="dialog-head"><div><p className="eyebrow">运行详情 · <span className="mono">{compactId(run.id)}</span></p><h2 id="run-dialog-title">{run.repository.owner}/{run.repository.repository}</h2><p>{run.framework === "playwright" ? "Web · Playwright" : "App · Maestro"} · 基于 {run.repository.baseRef}</p></div><button className="icon-button bordered" onClick={onClose} aria-label="关闭运行详情"><X size={18} /></button></div><div className="dialog-status"><StatusBadge status={run.status} /><span>更新于 {formatRelative(run.updatedAt)}</span>{run.pullRequestUrl && <a href={run.pullRequestUrl} target="_blank" rel="noreferrer"><GitBranch size={14} />打开 Pull Request</a>}</div><div className="dialog-section"><h3>证据轨</h3><EvidenceRail run={run} compact /></div><div className="dialog-section"><h3>证据产物 <span>{run.artifacts.length}</span></h3>{run.artifacts.length ? <div className="dialog-artifacts">{run.artifacts.map(artifact => <a key={artifact.id} href={`/v1/runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(artifact.id)}`} target="_blank" rel="noreferrer"><span><FileSearch size={17} /></span><div><strong>{artifact.name}</strong><small>{artifact.kind}</small></div><ArrowRight size={15} /></a>)}</div> : <p className="dialog-empty">当前还没有证据产物。</p>}</div>{run.error && <div className="dialog-error"><CircleAlert size={17} /><div><strong>运行未完成</strong><p>{run.error}</p></div></div>}</section></div>;
+}
+
+function StatusBadge({ status }: { status: RunStatus }) { const meta = statusMeta[status]; const Icon = status === "succeeded" ? CheckCircle2 : status === "failed" ? XCircle : status === "awaiting_qa" ? ClipboardCheck : activeStatuses.includes(status) ? LoaderCircle : Clock3; return <span className={`status-badge ${meta.tone}`}><Icon className={activeStatuses.includes(status) ? "spin-slow" : ""} size={14} />{meta.label}</span>; }
+
+function PageHeading({ eyebrow, title, description, action }: { eyebrow: string; title: string; description: string; action?: React.ReactNode }) { return <div className="page-heading"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p>{description}</p></div>{action}</div>; }
+
+function EmptyState({ icon: Icon, title, text }: { icon: typeof ClipboardCheck; title: string; text: string }) { return <section className="surface empty-state"><span><Icon size={24} /></span><h2>{title}</h2><p>{text}</p></section>; }
+
+function InlineError({ message, action, onAction }: { message: string; action?: string; onAction?: () => void | Promise<void> }) { return <div className="inline-error" role="alert"><CircleAlert size={18} /><span>{message}</span>{action && onAction && <button onClick={() => void onAction()}>{action}</button>}</div>; }
+
+function NavButton({ item, active, onClick }: { item: { label: string; icon: typeof Gauge; badge?: number }; active: boolean; onClick: () => void }) { const Icon = item.icon; return <button className={active ? "nav-button active" : "nav-button"} onClick={onClick}><Icon size={18} /><span>{item.label}</span>{Boolean(item.badge) && <i>{item.badge}</i>}</button>; }
+
+function BrandMark() { return <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>; }
+function Avatar({ label }: { label: string }) { return <span className="avatar">{label.slice(0,1).toUpperCase()}</span>; }
+function GoogleGlyph() { return <svg width="19" height="19" viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.6 12.2c0-.7-.1-1.5-.2-2.2H12v4h5.4a4.6 4.6 0 0 1-2 3v2.6h3.2c1.9-1.7 3-4.3 3-7.4Z"/><path fill="#34A853" d="M12 22c2.7 0 5-.9 6.6-2.4L15.4 17c-.9.6-2 1-3.4 1a5.8 5.8 0 0 1-5.5-4H3.2v2.7A10 10 0 0 0 12 22Z"/><path fill="#FBBC05" d="M6.5 14a6 6 0 0 1 0-3.9V7.4H3.2a10 10 0 0 0 0 9.2L6.5 14Z"/><path fill="#EA4335" d="M12 6c1.5 0 2.8.5 3.8 1.5l2.9-2.8A9.7 9.7 0 0 0 3.2 7.4l3.3 2.7A5.8 5.8 0 0 1 12 6Z"/></svg>; }
+
+function displayName(session: Session): string { return session.displayName ?? session.email?.split("@")[0] ?? "QA Member"; }
+function compactId(value: string): string { return value.length > 12 ? `${value.slice(0,8)}…${value.slice(-4)}` : value; }
+function formatRelative(value: string): string { const seconds = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000)); if (seconds < 60) return "刚刚"; if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`; if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`; return shortDateFormatter.format(new Date(value)); }
+function blobDataUrl(blob: Blob): Promise<string> { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("浏览器画面格式无效。")); reader.onerror = () => reject(reader.error ?? new Error("无法读取浏览器画面。")); reader.readAsDataURL(blob); }); }
+function friendlySsoError(error: string): string { let decoded = error; try { decoded = decodeURIComponent(error); } catch { /* malformed OAuth errors remain safe to display generically */ } if (/domain|hosted/iu.test(decoded)) return "此 Google 账户不属于允许的组织，请切换工作账户。"; if (/expired|state/iu.test(decoded)) return "登录链接已失效，请重新开始登录。"; return "登录未完成，请重试；如果问题持续出现，请联系平台管理员。"; }
+function extractAgentText(response: Record<string, unknown>): string { if (typeof response.text === "string") return response.text; const message = response.message; if (message && typeof message === "object" && "content" in message && typeof message.content === "string") return message.content; return "Qasey 已完成处理。打开运行记录查看后续进度与证据。"; }
+function railDetail(run: QaseyRun, index: number): string { if (index === 0) return `Change Set ${run.changeSetId.slice(0, 8)}`; if (index === 3) return "Playwright"; if (index === 4) return `${run.artifacts.length} 项证据`; return index < statusMeta[run.status].step ? "已完成" : index === statusMeta[run.status].step ? statusMeta[run.status].label : "等待中"; }
+function countFor(runs: QaseyRun[], id: "all" | "active" | "review" | "done"): number { if (id === "all") return runs.length; if (id === "active") return runs.filter(run => activeStatuses.includes(run.status)).length; if (id === "review") return runs.filter(run => run.status === "awaiting_qa").length; return runs.filter(run => ["succeeded","failed","cancelled"].includes(run.status)).length; }

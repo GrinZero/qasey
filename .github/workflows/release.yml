@@ -1,0 +1,793 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check protected release source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      release_ref: ${{ steps.remote_ref.outputs.release_ref }}
+      direct_sha: ${{ steps.remote_ref.outputs.direct_sha }}
+      peeled_sha: ${{ steps.remote_ref.outputs.peeled_sha }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify default-branch or protected-history tag source
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git check-ref-format --branch "$DEFAULT_BRANCH" >/dev/null
+          git fetch --no-tags --prune origin \
+            "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+
+          case "$GITHUB_REF" in
+            "refs/heads/${DEFAULT_BRANCH}")
+              if [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
+                echo "Only manual releases may run directly from the protected default branch" >&2
+                exit 1
+              fi
+              ;;
+            refs/tags/v*)
+              tag_commit="$(git rev-parse "${GITHUB_REF}^{commit}")"
+              if [ "$tag_commit" != "$GITHUB_SHA" ]; then
+                echo "Release tag does not resolve to GITHUB_SHA" >&2
+                exit 1
+              fi
+              if ! git merge-base --is-ancestor "$tag_commit" "refs/remotes/origin/${DEFAULT_BRANCH}"; then
+                echo "Release tag is not contained in protected default-branch history" >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "workflow_dispatch is restricted to the default branch or a v* tag" >&2
+              exit 1
+              ;;
+          esac
+      - name: Record immutable remote release ref identity
+        id: remote_ref
+        shell: bash
+        run: sh ci/verify-release-ref.sh origin --record-github-output
+      - name: Require successful exact-commit CI and security gates
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          require_workflow() {
+            workflow=$1
+            response="$(mktemp)"
+            curl --fail --silent --show-error --retry 3 \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?head_sha=${GITHUB_SHA}&status=completed&per_page=100" \
+              > "$response"
+            jq --exit-status --arg sha "$GITHUB_SHA" --arg branch "$DEFAULT_BRANCH" '
+              any(.workflow_runs[];
+                .head_sha == $sha and
+                .conclusion == "success" and
+                .event == "push" and
+                .head_branch == $branch)
+            ' "$response" >/dev/null || {
+              echo "No successful ${workflow} default-branch push run exists for GITHUB_SHA" >&2
+              exit 1
+            }
+          }
+          require_workflow ci.yml
+          require_workflow security.yml
+      - name: Set up pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
+        with:
+          version: 11.21.0
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install dependencies
+        run: sh ci/install.sh
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Run project checks
+        run: pnpm check
+      - name: Run Admin UI browser gate
+        run: pnpm test:browser
+
+  release:
+    needs: check
+    name: Build, scan, and publish split image set
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+        env:
+          POSTGRES_DB: qasey
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d qasey"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      registry:
+        image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+        ports:
+          - 5005:5000
+    steps:
+      - name: Check out verified source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js for release evidence helpers
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: 24
+
+      - name: Resolve repository-owned GHCR images
+        id: images
+        shell: bash
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          printf 'service=ghcr.io/%s\n' "${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          printf 'sandbox=ghcr.io/%s-sandbox\n' "${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build service immutable OCI layout
+        id: build_service
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          target: service-runtime
+          pull: true
+          provenance: false
+          sbom: false
+          outputs: type=oci,dest=${{ runner.temp }}/service.oci.tar
+
+      - name: Record service candidate evidence
+        shell: bash
+        env:
+          IMAGE: ${{ steps.images.outputs.service }}
+          DIGEST: ${{ steps.build_service.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Buildx returned an invalid service image digest" >&2
+            exit 1
+          fi
+          mkdir -p release-evidence/service
+          printf '%s@%s\n' "$IMAGE" "$DIGEST" > release-evidence/service/image-reference.txt
+          printf '%s\n' "$GITHUB_SHA" > release-evidence/service/source-commit.txt
+          printf '%s\n' service-runtime > release-evidence/service/target.txt
+
+      - name: Verify service OCI layout and prepare scan archive
+        shell: bash
+        env:
+          DIGEST: ${{ steps.build_service.outputs.digest }}
+          OCI_LAYOUT: ${{ runner.temp }}/service.oci-layout
+          OCI_ARCHIVE: ${{ runner.temp }}/service.oci.tar
+          ORAS_IMAGE: ghcr.io/oras-project/oras:v1.3.0@sha256:6ce045ce069a89934d6666b8b49f9c4c0145201bd6de6dbe2aee267814c55468
+        run: |
+          set -euo pipefail
+          sh ci/extract-oci-layout.sh "$OCI_ARCHIVE" "$OCI_LAYOUT"
+          docker run --rm \
+            --volume "${OCI_LAYOUT}:/release:ro" \
+            "$ORAS_IMAGE" \
+            manifest fetch --oci-layout --output /dev/null "/release@${DIGEST}"
+
+      - name: Build sandbox immutable OCI layout
+        id: build_sandbox
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          target: sandbox-runtime
+          pull: true
+          provenance: false
+          sbom: false
+          outputs: type=oci,dest=${{ runner.temp }}/sandbox.oci.tar
+
+      - name: Record sandbox candidate evidence
+        shell: bash
+        env:
+          IMAGE: ${{ steps.images.outputs.sandbox }}
+          DIGEST: ${{ steps.build_sandbox.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Buildx returned an invalid sandbox image digest" >&2
+            exit 1
+          fi
+          mkdir -p release-evidence/sandbox
+          printf '%s@%s\n' "$IMAGE" "$DIGEST" > release-evidence/sandbox/image-reference.txt
+          printf '%s\n' "$GITHUB_SHA" > release-evidence/sandbox/source-commit.txt
+          printf '%s\n' sandbox-runtime > release-evidence/sandbox/target.txt
+
+      - name: Verify sandbox OCI layout and prepare scan archive
+        shell: bash
+        env:
+          DIGEST: ${{ steps.build_sandbox.outputs.digest }}
+          OCI_LAYOUT: ${{ runner.temp }}/sandbox.oci-layout
+          OCI_ARCHIVE: ${{ runner.temp }}/sandbox.oci.tar
+          ORAS_IMAGE: ghcr.io/oras-project/oras:v1.3.0@sha256:6ce045ce069a89934d6666b8b49f9c4c0145201bd6de6dbe2aee267814c55468
+        run: |
+          set -euo pipefail
+          sh ci/extract-oci-layout.sh "$OCI_ARCHIVE" "$OCI_LAYOUT"
+          docker run --rm \
+            --volume "${OCI_LAYOUT}:/release:ro" \
+            "$ORAS_IMAGE" \
+            manifest fetch --oci-layout --output /dev/null "/release@${DIGEST}"
+
+      - name: Smoke exact service candidate from its OCI digest
+        shell: bash
+        env:
+          DIGEST: ${{ steps.build_service.outputs.digest }}
+          OCI_LAYOUT: ${{ runner.temp }}/service.oci-layout
+          ORAS_IMAGE: ghcr.io/oras-project/oras:v1.3.0@sha256:6ce045ce069a89934d6666b8b49f9c4c0145201bd6de6dbe2aee267814c55468
+        run: |
+          set -euo pipefail
+          node ci/publish-oci-layout-by-digest.mjs \
+            "$OCI_LAYOUT" host.docker.internal:5005/qasey-service-candidate "$DIGEST" \
+            --plain-http
+          candidate="localhost:5005/qasey-service-candidate@${DIGEST}"
+          docker pull "$candidate"
+          docker run --rm --entrypoint sh "$candidate" -c '
+            set -eu
+            for binary in bwrap git gh ssh python3 make gcc g++ Xvfb playwright; do
+              if command -v "$binary" >/dev/null 2>&1; then exit 1; fi
+            done
+            test ! -e /ms-playwright
+            test ! -e /app/dist/sandbox-runtime.mjs
+            test -e /app/dist/worker-supervisor.mjs
+            test -e /app/.mastra/output/index.mjs
+            test -e /app/.mastra/worker/index.mjs
+          '
+          container_id="$(docker run --detach --network host \
+            --env NODE_ENV=production \
+            --env QASEY_DEPLOYMENT_MODE=standalone \
+            --env QASEY_DEPLOYMENT_ID=release-candidate \
+            --env QASEY_INSTANCE_ID=release-candidate-api-0 \
+            --env QASEY_SINGLE_TENANT_ID=release-candidate-tenant \
+            --env DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/qasey \
+            --env QASEY_PUBLIC_BASE_URL=https://qasey.example.com \
+            --env GOOGLE_CLIENT_ID=synthetic-client-id \
+            --env GOOGLE_CLIENT_SECRET=synthetic-client-secret \
+            --env GOOGLE_COOKIE_PASSWORD=synthetic-cookie-password-for-release-smoke-only \
+            --env GOOGLE_ALLOWED_DOMAINS=example.com \
+            --env QASEY_CREDENTIAL_ENCRYPTION_KEY=synthetic-credential-key-for-release-smoke-only \
+            --env DD_VERSION="${DIGEST}" \
+            --env OPENAI_API_KEY=synthetic-model-key-for-release-smoke-only \
+            --env QASEY_ENABLE_STUDIO_EDITOR=false \
+            --env QASEY_ENABLE_STUDIO_MCP_PREVIEW=false \
+            --env QASEY_ENABLE_CODE_MODE=false \
+            "$candidate")"
+          cleanup() { docker logs "$container_id" || true; docker rm --force "$container_id" || true; }
+          trap cleanup EXIT
+          for attempt in $(seq 1 90); do
+            if curl --fail --silent http://127.0.0.1:8080/readyz >/dev/null; then break; fi
+            if [ "$attempt" -eq 90 ]; then exit 1; fi
+            sleep 2
+          done
+          curl --fail --silent --show-error http://127.0.0.1:8080/healthz
+          curl --fail --silent --show-error http://127.0.0.1:8080/readyz
+
+      - name: Smoke exact sandbox candidate and bwrap browser boundary
+        shell: bash
+        env:
+          DIGEST: ${{ steps.build_sandbox.outputs.digest }}
+          OCI_LAYOUT: ${{ runner.temp }}/sandbox.oci-layout
+          ORAS_IMAGE: ghcr.io/oras-project/oras:v1.3.0@sha256:6ce045ce069a89934d6666b8b49f9c4c0145201bd6de6dbe2aee267814c55468
+        run: |
+          set -euo pipefail
+          node ci/publish-oci-layout-by-digest.mjs \
+            "$OCI_LAYOUT" host.docker.internal:5005/qasey-sandbox-candidate "$DIGEST" \
+            --plain-http
+          candidate="localhost:5005/qasey-sandbox-candidate@${DIGEST}"
+          docker pull "$candidate"
+          docker run --rm --entrypoint sh "$candidate" -c '
+            set -eu
+            for binary in bwrap git gh ssh python3 make gcc g++ Xvfb playwright pnpm tini; do
+              command -v "$binary" >/dev/null
+            done
+            test "$(pnpm --version)" = 11.21.0
+            test -e /ms-playwright
+            test -e /app/dist/sandbox-runtime.mjs
+            test ! -e /app/dist/worker-supervisor.mjs
+            test ! -e /app/.mastra/output/index.mjs
+            test ! -e /app/.mastra/worker/index.mjs
+            test ! -e /app/prisma
+            test ! -e /app/config
+            test ! -e /app/node_modules/@prisma
+            test ! -e /app/node_modules/prisma
+            test ! -e /app/node_modules/pg
+            test ! -e /app/node_modules/ioredis
+            test ! -e /app/node_modules/@slack
+            test ! -e /app/node_modules/@aws-sdk
+            test ! -e /app/node_modules/@octokit
+            test ! -e /app/node_modules/dd-trace
+          '
+          if docker run --rm "$candidate" api; then exit 1; fi
+          container_id="$(docker run --detach --network host \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --security-opt seccomp=unconfined \
+            --security-opt systempaths=unconfined \
+            --security-opt apparmor=unconfined \
+            --env NODE_ENV=production \
+            --env OPENAI_API_KEY=synthetic-model-key-for-release-smoke-only \
+            --env QASEY_SANDBOX_CONTROL_KEY=synthetic-sandbox-control-key-for-release-smoke-only-000000 \
+            --env QASEY_SANDBOX_ISOLATION=bwrap \
+            --env QASEY_SANDBOX_EGRESS_PROXY_URL=http://egress-proxy.example:3128 \
+            --env QASEY_SANDBOX_BROWSER_ALLOWED_ORIGINS=https://app.example.com \
+            --env QASEY_SANDBOX_DESKTOP_ENABLED=false \
+            --env "QASEY_IMAGE_DIGEST=${DIGEST}" \
+            --env QASEY_DATA_ROOT=/tmp/qasey-data \
+            "$candidate")"
+          cleanup() { docker logs "$container_id" || true; docker rm --force "$container_id" || true; }
+          trap cleanup EXIT
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:4120/readyz >/dev/null; then break; fi
+            if [ "$attempt" -eq 60 ]; then exit 1; fi
+            sleep 2
+          done
+          curl --fail --silent --show-error http://127.0.0.1:4120/healthz
+          curl --fail --silent --show-error http://127.0.0.1:4120/readyz
+          docker exec --user 0 "$container_id" sh -c '
+            set -eu
+            printf host-device > /dev/qasey-host-device-sentinel
+          '
+          browser_workspace_id="$(node -e '
+            const { createHash } = require("node:crypto");
+            const scope = { applicationId: "ci-smoke", tenantId: "tenant-a", sessionId: "session-a" };
+            process.stdout.write(createHash("sha256")
+              .update(scope.applicationId).update("\0")
+              .update(scope.tenantId).update("\0")
+              .update(scope.sessionId).digest("hex"));
+          ')"
+          [[ "$browser_workspace_id" =~ ^[0-9a-f]{64}$ ]]
+          docker exec --env BROWSER_WORKSPACE_ID="$browser_workspace_id" "$container_id" sh -c '
+            set -eu
+            printf host-secret > /tmp/qasey-host-sentinel
+            sibling=/tmp/qasey-data/workspaces/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/repo
+            mkdir -p "$sibling"
+            printf sibling-secret > "$sibling/sibling-secret"
+            browser="/tmp/qasey-data/browser/${BROWSER_WORKSPACE_ID}"
+            mkdir -p -m 700 "$browser"
+            ln -s /tmp/qasey-host-sentinel "$browser/latest.jpg"
+          '
+          docker cp tests/fixtures/sandbox-isolation-smoke.spec.js \
+            "$container_id:/tmp/sandbox-isolation-smoke.spec.js"
+          base_sha="$(docker exec "$container_id" sh -c '
+            set -eu
+            source="$(mktemp -d)"
+            cp /tmp/sandbox-isolation-smoke.spec.js "$source/isolation.spec.js"
+            printf '%s\n' '{"private":true,"packageManager":"pnpm@11.21.0"}' > "$source/package.json"
+            cd "$source"
+            pnpm install --lockfile-only --ignore-scripts
+            git init --quiet --initial-branch=main
+            git config user.name "Qasey Release"
+            git config user.email "release@example.invalid"
+            git add isolation.spec.js package.json pnpm-lock.yaml
+            git commit --quiet -m "isolation smoke"
+            git clone --quiet --bare . /tmp/qasey-smoke-origin.git
+            git rev-parse HEAD
+          ')"
+          [[ "$base_sha" =~ ^[0-9a-f]{40,64}$ ]]
+          docker exec --user 0 "$container_id" git config --system \
+            url."file:///tmp/qasey-smoke-origin.git".insteadOf \
+            https://github.com/example/smoke.git
+          node ci/smoke-sandbox-runtime.mjs \
+            http://127.0.0.1:4120 \
+            synthetic-sandbox-control-key-for-release-smoke-only-000000 \
+            "$base_sha" \
+            "$DIGEST"
+          docker exec --env BROWSER_WORKSPACE_ID="$browser_workspace_id" "$container_id" sh -c '
+            set -eu
+            latest="/tmp/qasey-data/browser/${BROWSER_WORKSPACE_ID}/latest.jpg"
+            test "$(cat /tmp/qasey-host-sentinel)" = host-secret
+            test -f "$latest"
+            test ! -L "$latest"
+            test "$(wc -c < "$latest")" -gt 100
+          '
+          docker exec --user 0 "$container_id" sh -c '
+            test "$(cat /dev/qasey-host-device-sentinel)" = host-device
+          '
+          docker exec "$container_id" sh -c '
+            processes="$(ps -eo stat=,ppid=,pid=,comm=,args=)"
+            zombies="$(printf "%s\n" "$processes" | awk '\''$1 ~ /^Z/ { print }'\'')"
+            if [ -n "$zombies" ]; then
+              printf "%s\n" "$zombies" >&2
+              exit 1
+            fi
+            leaks="$(printf "%s\n" "$processes" | awk '\''$4 == "bwrap" || $4 ~ /^(chrome|chromium)/ || ($4 ~ /^node/ && $0 ~ /\/app\/dist\/code-task-worker\.mjs/) { print }'\'')"
+            if [ -n "$leaks" ]; then
+              printf "live sandbox descendants remain after stop:\n%s\n" "$leaks" >&2
+              exit 1
+            fi
+          '
+
+      - name: Generate service SPDX JSON SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          input: ${{ runner.temp }}/service.oci.tar
+          format: spdx-json
+          output: release-evidence/service/service.spdx.json
+          exit-code: "0"
+
+      - name: Generate service CycloneDX JSON SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          input: ${{ runner.temp }}/service.oci.tar
+          format: cyclonedx
+          output: release-evidence/service/service.cyclonedx.json
+          exit-code: "0"
+          skip-setup-trivy: true
+
+      - name: Gate service HIGH and CRITICAL vulnerabilities
+        id: scan_service
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          input: ${{ runner.temp }}/service.oci.tar
+          scanners: vuln
+          vuln-type: os,library
+          format: json
+          output: release-evidence/service/service.trivy-vulnerabilities.json
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+          skip-setup-trivy: true
+
+      - name: Generate sandbox SPDX JSON SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          input: ${{ runner.temp }}/sandbox.oci.tar
+          format: spdx-json
+          output: release-evidence/sandbox/sandbox.spdx.json
+          exit-code: "0"
+          skip-setup-trivy: true
+
+      - name: Generate sandbox CycloneDX JSON SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          input: ${{ runner.temp }}/sandbox.oci.tar
+          format: cyclonedx
+          output: release-evidence/sandbox/sandbox.cyclonedx.json
+          exit-code: "0"
+          skip-setup-trivy: true
+
+      - name: Gate sandbox HIGH and CRITICAL vulnerabilities
+        id: scan_sandbox
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          input: ${{ runner.temp }}/sandbox.oci.tar
+          scanners: vuln
+          vuln-type: os,library
+          format: json
+          output: release-evidence/sandbox/sandbox.trivy-vulnerabilities.json
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+          skip-setup-trivy: true
+
+      - name: Assert both vulnerability gates passed before publication
+        shell: bash
+        env:
+          SERVICE_GATE: ${{ steps.scan_service.outcome }}
+          SANDBOX_GATE: ${{ steps.scan_sandbox.outcome }}
+        run: |
+          set -euo pipefail
+          test "$SERVICE_GATE" = success
+          test "$SANDBOX_GATE" = success
+
+      - name: Reverify remote release ref before registry authentication
+        shell: bash
+        env:
+          QASEY_RELEASE_REF_BASELINE: ${{ needs.check.outputs.release_ref }}
+          QASEY_RELEASE_DIRECT_SHA_BASELINE: ${{ needs.check.outputs.direct_sha }}
+          QASEY_RELEASE_PEELED_SHA_BASELINE: ${{ needs.check.outputs.peeled_sha }}
+        run: sh ci/verify-release-ref.sh origin --verify-baseline
+
+      - name: Log in to GHCR after both vulnerability gates
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish scanned service OCI layout by digest
+        shell: bash
+        env:
+          IMAGE: ${{ steps.images.outputs.service }}
+          DIGEST: ${{ steps.build_service.outputs.digest }}
+          OCI_LAYOUT: ${{ runner.temp }}/service.oci-layout
+          ORAS_IMAGE: ghcr.io/oras-project/oras:v1.3.0@sha256:6ce045ce069a89934d6666b8b49f9c4c0145201bd6de6dbe2aee267814c55468
+        run: |
+          set -euo pipefail
+          test -d "$OCI_LAYOUT"
+          registry_config="${DOCKER_CONFIG:-$HOME/.docker}/config.json"
+          test -f "$registry_config"
+          node ci/publish-oci-layout-by-digest.mjs \
+            "$OCI_LAYOUT" "$IMAGE" "$DIGEST" \
+            --registry-config "$registry_config"
+          docker buildx imagetools inspect "${IMAGE}@${DIGEST}" >/dev/null
+
+      - name: Reverify remote release ref after service digest publication
+        shell: bash
+        env:
+          QASEY_RELEASE_REF_BASELINE: ${{ needs.check.outputs.release_ref }}
+          QASEY_RELEASE_DIRECT_SHA_BASELINE: ${{ needs.check.outputs.direct_sha }}
+          QASEY_RELEASE_PEELED_SHA_BASELINE: ${{ needs.check.outputs.peeled_sha }}
+        run: sh ci/verify-release-ref.sh origin --verify-baseline
+
+      - name: Publish scanned sandbox OCI layout by digest
+        shell: bash
+        env:
+          IMAGE: ${{ steps.images.outputs.sandbox }}
+          DIGEST: ${{ steps.build_sandbox.outputs.digest }}
+          OCI_LAYOUT: ${{ runner.temp }}/sandbox.oci-layout
+          ORAS_IMAGE: ghcr.io/oras-project/oras:v1.3.0@sha256:6ce045ce069a89934d6666b8b49f9c4c0145201bd6de6dbe2aee267814c55468
+        run: |
+          set -euo pipefail
+          test -d "$OCI_LAYOUT"
+          registry_config="${DOCKER_CONFIG:-$HOME/.docker}/config.json"
+          test -f "$registry_config"
+          node ci/publish-oci-layout-by-digest.mjs \
+            "$OCI_LAYOUT" "$IMAGE" "$DIGEST" \
+            --registry-config "$registry_config"
+          docker buildx imagetools inspect "${IMAGE}@${DIGEST}" >/dev/null
+
+      - name: Reverify remote release ref after sandbox digest publication
+        shell: bash
+        env:
+          QASEY_RELEASE_REF_BASELINE: ${{ needs.check.outputs.release_ref }}
+          QASEY_RELEASE_DIRECT_SHA_BASELINE: ${{ needs.check.outputs.direct_sha }}
+          QASEY_RELEASE_PEELED_SHA_BASELINE: ${{ needs.check.outputs.peeled_sha }}
+        run: sh ci/verify-release-ref.sh origin --verify-baseline
+
+      - name: Record immutable release summary
+        shell: bash
+        env:
+          SERVICE_IMAGE: ${{ steps.images.outputs.service }}
+          SERVICE_DIGEST: ${{ steps.build_service.outputs.digest }}
+          SANDBOX_IMAGE: ${{ steps.images.outputs.sandbox }}
+          SANDBOX_DIGEST: ${{ steps.build_sandbox.outputs.digest }}
+        run: |
+          printf '### service image\n\n`%s@%s`\n' "$SERVICE_IMAGE" "$SERVICE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          printf '### sandbox image\n\n`%s@%s`\n' "$SANDBOX_IMAGE" "$SANDBOX_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload scanned service evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-evidence-service
+          path: release-evidence/service/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload scanned sandbox evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-evidence-sandbox
+          path: release-evidence/sandbox/
+          if-no-files-found: error
+          retention-days: 90
+
+  manifest:
+    needs: release
+    name: Bind immutable release digests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out manifest generator
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: 24
+      - name: Download service evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-evidence-service
+          path: release-input/service
+      - name: Download sandbox evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-evidence-sandbox
+          path: release-input/sandbox
+      - name: Generate commit-bound release manifest
+        run: >-
+          node ci/create-release-manifest.mjs
+          release-manifest/release-manifest.json
+          release-input/service
+          release-input/sandbox
+      - name: Upload release manifest evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-manifest
+          path: release-manifest/
+          if-no-files-found: error
+          retention-days: 90
+
+  attest:
+    needs: [release, manifest]
+    name: Attest and sign ${{ matrix.role }} digest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        role: [service, sandbox]
+    steps:
+      - name: Download scanned role evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-evidence-${{ matrix.role }}
+          path: release-evidence/
+      - name: Download release manifest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-manifest
+          path: release-manifest/
+      - name: Resolve scanned subject and verify release manifest evidence
+        id: subject
+        shell: bash
+        env:
+          ROLE: ${{ matrix.role }}
+        run: |
+          set -euo pipefail
+          reference="$(cat release-evidence/image-reference.txt)"
+          image="${reference%@*}"
+          digest="${reference##*@}"
+          case "$ROLE" in
+            service)
+              expected_image="ghcr.io/${GITHUB_REPOSITORY,,}"
+              expected_target=service-runtime
+              ;;
+            sandbox)
+              expected_image="ghcr.io/${GITHUB_REPOSITORY,,}-sandbox"
+              expected_target=sandbox-runtime
+              ;;
+            *) exit 64 ;;
+          esac
+          if [[ ! "$reference" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]] || \
+             [ "$image" != "$expected_image" ]; then
+            echo "Release evidence contains an invalid ${ROLE} reference" >&2
+            exit 1
+          fi
+          manifest=release-manifest/release-manifest.json
+          jq --exit-status \
+            --arg role "$ROLE" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg commit "$GITHUB_SHA" \
+            --arg ref "$GITHUB_REF" \
+            --arg reference "$reference" \
+            --arg image "$image" \
+            --arg digest "$digest" \
+            --arg target "$expected_target" '
+              .schemaVersion == 2 and
+              .mediaType == "application/vnd.qasey.release-manifest.v2+json" and
+              .source.repository == $repository and
+              .source.commit == $commit and
+              .source.ref == $ref and
+              .images[$role].reference == $reference and
+              .images[$role].image == $image and
+              .images[$role].digest == $digest and
+              .images[$role].target == $target
+            ' "$manifest" >/dev/null
+          read -r recorded_manifest_sha recorded_manifest_name < "${manifest}.sha256"
+          test "$recorded_manifest_name" = release-manifest.json
+          test "$recorded_manifest_sha" = "$(sha256sum "$manifest" | cut -d ' ' -f 1)"
+          verify_evidence() {
+            key=$1
+            file=$2
+            manifest_file="$(jq --exit-status --raw-output --arg role "$ROLE" --arg key "$key" \
+              '.images[$role].evidence[$key].file | select(type == "string")' "$manifest")"
+            manifest_sha="$(jq --exit-status --raw-output --arg role "$ROLE" --arg key "$key" \
+              '.images[$role].evidence[$key].sha256 | select(type == "string")' "$manifest")"
+            test "$manifest_file" = "$file"
+            test "$manifest_sha" = "sha256:$(sha256sum "release-evidence/$file" | cut -d ' ' -f 1)"
+          }
+          verify_evidence spdxSbom "${ROLE}.spdx.json"
+          verify_evidence cyclonedxSbom "${ROLE}.cyclonedx.json"
+          verify_evidence trivyVulnerabilityReport "${ROLE}.trivy-vulnerabilities.json"
+          printf 'image=%s\n' "$image" >> "$GITHUB_OUTPUT"
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Attest image provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4
+        with:
+          subject-name: ${{ steps.subject.outputs.image }}
+          subject-digest: ${{ steps.subject.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Attest SPDX SBOM
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4
+        with:
+          subject-name: ${{ steps.subject.outputs.image }}
+          subject-digest: ${{ steps.subject.outputs.digest }}
+          sbom-path: release-evidence/${{ matrix.role }}.spdx.json
+          push-to-registry: true
+          create-storage-record: false
+      - name: Attest CycloneDX SBOM
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4
+        with:
+          subject-name: ${{ steps.subject.outputs.image }}
+          subject-digest: ${{ steps.subject.outputs.digest }}
+          sbom-path: release-evidence/${{ matrix.role }}.cyclonedx.json
+          push-to-registry: true
+          create-storage-record: false
+      - name: Attest release manifest
+        if: ${{ matrix.role == 'service' }}
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4
+        with:
+          subject-path: release-manifest/release-manifest.json
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign image by digest
+        shell: bash
+        env:
+          IMAGE: ${{ steps.subject.outputs.image }}
+          DIGEST: ${{ steps.subject.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+      - name: Sign release manifest
+        if: ${{ matrix.role == 'service' }}
+        run: >-
+          cosign sign-blob --yes
+          --bundle release-manifest/release-manifest.cosign.bundle
+          release-manifest/release-manifest.json
+      - name: Upload signed release manifest
+        if: ${{ matrix.role == 'service' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signed-release-manifest
+          path: release-manifest/
+          if-no-files-found: error
+          retention-days: 90
