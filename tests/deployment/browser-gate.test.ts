@@ -36,7 +36,7 @@ describe("Admin UI browser gate", () => {
       "/admin/api/session",
       "/admin/api/catalog",
       "/admin/api/applications",
-      "/v1/runs",
+      "/v1/case-hub/runs",
     ]) {
       expect(browserSuite).toContain(endpoint);
     }

@@ -192,9 +192,22 @@ export class GitHubPublisher {
     const parsed = /^https:\/\/[^/]+\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/.exec(url);
     if (!parsed) throw new GitHubPublisherError("github_pull_request_url_invalid");
     try {
-      await this.requireClient().request("POST /repos/{owner}/{repo}/pulls/{pull_number}/ready_for_review", {
+      const octokit = this.requireClient();
+      const pullRequest = await octokit.pulls.get({
         owner: parsed[1]!, repo: parsed[2]!, pull_number: Number(parsed[3]),
       });
+      if (pullRequest.data.draft === false) return;
+      const result = await octokit.graphql<{
+        markPullRequestReadyForReview: { pullRequest: { isDraft: boolean; url: string } | null };
+      }>(`mutation MarkQaseyPullRequestReady($pullRequestId: ID!) {
+        markPullRequestReadyForReview(input: { pullRequestId: $pullRequestId }) {
+          pullRequest { isDraft url }
+        }
+      }`, { pullRequestId: pullRequest.data.node_id });
+      if (!result.markPullRequestReadyForReview.pullRequest
+        || result.markPullRequestReadyForReview.pullRequest.isDraft) {
+        throw new Error("GitHub did not mark the pull request ready for review");
+      }
     } catch (error) {
       throw safePublisherError(error, "github_pull_request_ready_failed");
     }

@@ -33,6 +33,7 @@ export interface CaseExecutionObservation {
   caseId: string;
   executionStatus: CaseHubResult["executionStatus"];
   durationMs?: number;
+  artifactNames?: string[];
 }
 
 export type CaseHubChangeSetPatch = Partial<Pick<CaseHubChangeSet,
@@ -163,7 +164,7 @@ export class InMemoryCaseHubRepository implements CaseHubRepository {
       const observation = observations.find(item => item.caseId === version.caseId);
       const result = CaseHubResultSchema.parse({
         ...owner, id: randomUUID(), changeSetId, runId, caseVersionId: version.id, caseId: version.caseId,
-        attempt, executionStatus: observation?.executionStatus ?? "passed", reviewStatus: "pending", artifacts: artifactsForCase(artifacts, version.caseId),
+        attempt, executionStatus: observation?.executionStatus ?? "passed", reviewStatus: "pending", artifacts: artifactsForCase(artifacts, version.caseId, observation?.artifactNames),
         ...(observation?.durationMs !== undefined ? { durationMs: observation.durationMs } : {}),
         ...(artifacts.find(artifact => artifact.kind === "patch")?.sha256 ? { testCodeHash: artifacts.find(artifact => artifact.kind === "patch")!.sha256 } : {}),
         createdAt: this.now().toISOString(),
@@ -415,7 +416,7 @@ export class PrismaCaseHubRepository implements CaseHubRepository {
         const observation = observations.find(item => item.caseId === version.caseId);
         const result = CaseHubResultSchema.parse({
           ...owner, id: randomUUID(), changeSetId, runId, caseVersionId: version.id, caseId: version.caseId,
-          attempt: (previous?.attempt ?? 0) + 1, executionStatus: observation?.executionStatus ?? "passed", reviewStatus: "pending", artifacts: artifactsForCase(artifacts, version.caseId),
+          attempt: (previous?.attempt ?? 0) + 1, executionStatus: observation?.executionStatus ?? "passed", reviewStatus: "pending", artifacts: artifactsForCase(artifacts, version.caseId, observation?.artifactNames),
           ...(observation?.durationMs !== undefined ? { durationMs: observation.durationMs } : {}),
           ...(artifacts.find(artifact => artifact.kind === "patch")?.sha256 ? { testCodeHash: artifacts.find(artifact => artifact.kind === "patch")!.sha256 } : {}),
           createdAt: this.now().toISOString(),
@@ -514,10 +515,13 @@ export function assertChangeSetTransition(from: CaseHubChangeSetStatus, to?: Cas
 }
 
 function boundedLimit(limit: number): number { return Math.min(Math.max(Number.isFinite(limit) ? Math.trunc(limit) : 100, 1), 500); }
-function artifactsForCase(artifacts: ArtifactRef[], caseId: string): ArtifactRef[] {
+function artifactsForCase(artifacts: ArtifactRef[], caseId: string, observedArtifactNames: string[] = []): ArtifactRef[] {
   const normalizedCaseId = caseId.toLowerCase().replace(/[^a-z0-9]/gu, "");
+  const observed = observedArtifactNames.map(name => name.replaceAll("\\", "/"));
   return artifacts.filter(artifact => {
     if (artifact.kind === "log" || artifact.kind === "report" || artifact.kind === "patch") return true;
+    const artifactName = artifact.name.replaceAll("\\", "/");
+    if (observed.some(name => artifactName.endsWith(name))) return true;
     return artifact.name.toLowerCase().replace(/[^a-z0-9]/gu, "").includes(normalizedCaseId);
   });
 }

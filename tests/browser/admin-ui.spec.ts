@@ -98,7 +98,7 @@ async function installAuthenticatedApiMocks(page: Page, diagnostics: BrowserDiag
       await json(route, applications);
       return;
     }
-    if (request.method() === "GET" && url.pathname === "/v1/runs") {
+    if (request.method() === "GET" && url.pathname === "/v1/case-hub/runs") {
       await json(route, { runs });
       return;
     }

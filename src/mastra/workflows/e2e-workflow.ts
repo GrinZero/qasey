@@ -296,9 +296,13 @@ export async function resumeE2EWithVerdict(mastra: Mastra, owner: OwnerScope, ru
   if (!await runRepository.get(owner, runId)) throw new Error(`Run ${runId} not found`);
   const workflow = mastra.getWorkflow("qasey-e2e-lifecycle");
   const run = await workflow.createRun({ runId });
-  await run.resume({ step: awaitQaVerdictStep, resumeData: verdict, requestContext });
+  const workflowResult = await run.resume({ step: awaitQaVerdictStep, resumeData: verdict, requestContext });
   const updated = await runRepository.get(owner, runId);
   if (!updated) throw new Error(`Run ${runId} not found after workflow resume`);
+  const expectedStatus = verdict.verdict === "approve" ? "succeeded" : "awaiting_qa";
+  if (workflowResult.status === "failed" || updated.status !== expectedStatus) {
+    throw new Error(updated.error ?? `E2E workflow resume stopped in ${updated.status}; expected ${expectedStatus}`);
+  }
   return updated;
 }
 
@@ -369,9 +373,27 @@ function collectPlaywrightTest(test: unknown, fallbackTitle: string, observed: M
     ? "failed"
     : statuses.length > 0 && statuses.every(status => status === "skipped") ? "skipped" : "passed";
   const durationMs = results.reduce((total, result) => total + (typeof result.duration === "number" ? result.duration : 0), 0);
+  const artifactNames = results.flatMap(result => {
+    const attachments = Array.isArray(result.attachments) ? result.attachments : [];
+    return attachments.flatMap(attachment => {
+      if (!attachment || typeof attachment !== "object") return [];
+      const path = (attachment as Record<string, unknown>).path;
+      if (typeof path !== "string") return [];
+      const normalized = path.replaceAll("\\", "/");
+      const marker = "/test-results/";
+      const markerIndex = normalized.lastIndexOf(marker);
+      return markerIndex >= 0 ? [normalized.slice(markerIndex + marker.length)] : [];
+    });
+  });
   const previous = observed.get(caseId);
   if (!previous || executionRank(executionStatus) > executionRank(previous.executionStatus)) {
-    observed.set(caseId, { caseId, executionStatus, durationMs });
+    observed.set(caseId, { caseId, executionStatus, durationMs, artifactNames: [...new Set(artifactNames)] });
+  } else if (executionRank(executionStatus) === executionRank(previous.executionStatus)) {
+    observed.set(caseId, {
+      ...previous,
+      durationMs: (previous.durationMs ?? 0) + durationMs,
+      artifactNames: [...new Set([...(previous.artifactNames ?? []), ...artifactNames])],
+    });
   }
 }
 

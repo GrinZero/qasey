@@ -122,6 +122,40 @@ describe("GitHub PAT authentication", () => {
     expect(octokit.pulls.list).toHaveBeenCalledTimes(2);
   });
 
+  it("marks a Draft PR ready through GitHub's GraphQL mutation", async () => {
+    const graphql = vi.fn(async () => ({
+      markPullRequestReadyForReview: {
+        pullRequest: { isDraft: false, url: "https://github.com/example-org/web-e2e/pull/8" },
+      },
+    }));
+    const octokit = {
+      pulls: { get: vi.fn(async () => ({ data: { draft: true, node_id: "PR_kwDOExample" } })) },
+      graphql,
+    };
+
+    await expect(new GitHubPublisher(octokit as never)
+      .markPullRequestReady("https://github.com/example-org/web-e2e/pull/8"))
+      .resolves.toBeUndefined();
+
+    expect(octokit.pulls.get).toHaveBeenCalledWith({ owner: "example-org", repo: "web-e2e", pull_number: 8 });
+    expect(graphql).toHaveBeenCalledWith(expect.stringContaining("markPullRequestReadyForReview"), {
+      pullRequestId: "PR_kwDOExample",
+    });
+  });
+
+  it("keeps an already-ready PR idempotent without issuing a mutation", async () => {
+    const graphql = vi.fn();
+    const octokit = {
+      pulls: { get: vi.fn(async () => ({ data: { draft: false, node_id: "PR_kwDOExample" } })) },
+      graphql,
+    };
+
+    await expect(new GitHubPublisher(octokit as never)
+      .markPullRequestReady("https://github.com/example-org/web-e2e/pull/8"))
+      .resolves.toBeUndefined();
+    expect(graphql).not.toHaveBeenCalled();
+  });
+
   it("reports an ambiguous create outcome with a safe typed error", async () => {
     const leakedToken = "synthetic-auth-material-that-must-not-escape";
     const octokit = {
