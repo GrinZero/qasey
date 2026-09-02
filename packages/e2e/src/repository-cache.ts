@@ -212,10 +212,28 @@ async function prepareMirror(
   const fetchArgs = options.ref
     ? ["fetch", "--prune", "origin", `+refs/heads/${options.ref}:refs/heads/${options.ref}`]
     : ["remote", "update", "--prune"];
-  const refresh = await git(mirrorPath, fetchArgs, options);
+  const refresh = await gitWithTransientRetry(mirrorPath, fetchArgs, options);
   assertGit(refresh, "git mirror refresh");
   const resolvedSha = options.ref ? await resolveCommit(mirrorPath, options.ref, options) : undefined;
   return { cacheHit, ...(resolvedSha ? { resolvedSha } : {}) };
+}
+
+async function gitWithTransientRetry(
+  cwd: string,
+  args: string[],
+  options: MaterializeRepositoryOptions,
+): Promise<CommandResult> {
+  let result = await git(cwd, args, options);
+  for (let attempt = 1; attempt < 3 && result.exitCode !== 0 && isTransientGitNetworkFailure(result); attempt += 1) {
+    await new Promise(resolveWait => setTimeout(resolveWait, attempt * 500));
+    result = await git(cwd, args, options);
+  }
+  return result;
+}
+
+function isTransientGitNetworkFailure(result: CommandResult): boolean {
+  return /Could not resolve host|Failed to connect|Connection reset|gnutls_handshake|remote end hung up|TLS connection|HTTP (?:5\d\d|429)/iu
+    .test(`${result.stdout}\n${result.stderr}`);
 }
 
 async function resolveCommit(

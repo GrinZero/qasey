@@ -226,6 +226,7 @@ async function fixedCheckSandbox(): Promise<LocalSandbox> {
   ];
   const checkReadWritePaths = [
     manifest.checkRoot,
+    ...(manifest.packageStoreRoot ? [manifest.packageStoreRoot] : []),
     ...manifest.repositoryMounts.filter(mount => mount !== primary && mount.mode === "write").map(mount => mount.root),
   ];
   const checkBwrapArgs = buildFreshDeviceBwrapArgs({
@@ -717,6 +718,7 @@ function fixedCheckEnvironment(checkRoot: string): Record<string, string> {
     XDG_CONFIG_HOME: join(home, ".config"),
     XDG_CACHE_HOME: join(home, ".cache"),
     XDG_DATA_HOME: join(home, ".local", "share"),
+    ...(manifest.packageStoreRoot ? { PNPM_STORE_DIR: manifest.packageStoreRoot } : {}),
   };
 }
 

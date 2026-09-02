@@ -586,6 +586,7 @@ export class QaseySandboxRuntime {
     const artifactRoot = join(taskRoot, "artifacts");
     const checkRoot = join(taskRoot, "check-output");
     const home = join(taskRoot, "home");
+    const packageStoreRoot = join(this.options.dataRoot, "package-cache", "pnpm");
     await Promise.all([
       mkdir(controlRoot, { recursive: true, mode: 0o700 }),
       mkdir(artifactRoot, { recursive: true, mode: 0o700 }),
@@ -593,6 +594,7 @@ export class QaseySandboxRuntime {
       mkdir(join(home, ".config"), { recursive: true, mode: 0o700 }),
       mkdir(join(home, ".cache"), { recursive: true, mode: 0o700 }),
       mkdir(join(home, ".local", "share"), { recursive: true, mode: 0o700 }),
+      mkdir(packageStoreRoot, { recursive: true, mode: 0o700 }),
     ]);
     const prepared = this.options.codeTaskRepositoryPreparer
       ? await this.prepareCustomCodeTaskRepository(session, spec, taskRoot)
@@ -621,6 +623,7 @@ export class QaseySandboxRuntime {
       artifactRoot,
       artifactUriPrefix: `sandbox://${CODE_TASK_ARTIFACT_PREFIX}/${taskSegment}/${attemptSegment}`,
       checkRoot,
+      packageStoreRoot,
       isolation: this.options.isolation,
       checkRuntimeReadOnlyPaths,
       statePath,
@@ -649,7 +652,7 @@ export class QaseySandboxRuntime {
       workerEnvironment.QASEY_E2E_STORAGE_STATE_PATH = storageStatePath;
     }
     const taskReadOnlyPaths = [...checkRuntimeReadOnlyPaths, ...prepared.readOnlyRoots];
-    const taskReadWritePaths = [controlRoot, artifactRoot, checkRoot, home, ...prepared.readWriteRoots];
+    const taskReadWritePaths = [controlRoot, artifactRoot, checkRoot, home, packageStoreRoot, ...prepared.readWriteRoots];
     const taskBwrapArgs = buildFreshDeviceBwrapArgs({
       isolation: this.options.isolation,
       workspacePath: prepared.primaryRoot,
@@ -728,11 +731,16 @@ export class QaseySandboxRuntime {
     active.hardDeadline.unref();
     session.activeCodeTask = active;
     active.finalization = workerCompletion
-      .then(result => this.finishCodeTaskProcess(
-        session,
-        active,
-        result.exitCode === 0 ? undefined : new Error(`Code task worker exited with code ${result.exitCode}`),
-      ), error => this.finishCodeTaskProcess(
+      .then(result => {
+        const diagnostic = safeProcessDiagnostic(result.stderr || result.stdout, 2_000).trim();
+        return this.finishCodeTaskProcess(
+          session,
+          active,
+          result.exitCode === 0
+            ? undefined
+            : new Error(`Code task worker exited with code ${result.exitCode}${diagnostic ? `: ${diagnostic}` : ""}`),
+        );
+      }, error => this.finishCodeTaskProcess(
         session,
         active,
         error instanceof Error ? error : new Error(String(error)),
@@ -964,10 +972,10 @@ export class QaseySandboxRuntime {
       NO_BROWSER: "1",
       GH_PROMPT_DISABLED: "1",
       GIT_TERMINAL_PROMPT: "0",
-      QASEY_IMAGE_DIGEST: this.options.imageDigest ?? "unverified-image",
       QASEY_MASTRA_VERSION: "1.59.0",
       QASEY_CODE_AGENT_MODEL: process.env.QASEY_CODE_AGENT_MODEL?.trim() || "gpt-5.6-sol",
       QASEY_CODE_AGENT_MAX_STEPS: process.env.QASEY_CODE_AGENT_MAX_STEPS?.trim() || "80",
+      ...(this.options.imageDigest ? { QASEY_IMAGE_DIGEST: this.options.imageDigest } : {}),
     };
     for (const key of allowed) {
       const value = process.env[key];
@@ -2024,6 +2032,13 @@ function assertNoDesktopFileArguments(value: unknown, path = "arguments"): void 
 function positiveInteger(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function safeProcessDiagnostic(value: string, maxCharacters: number): string {
+  return value
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}\b/giu, "$1[REDACTED]")
+    .replace(/\b((?:token|secret|password|cookie|authorization|api[_-]?key)\s*[:=]\s*)[^\s,;]+/giu, "$1[REDACTED]")
+    .slice(-maxCharacters);
 }
 
 async function fileExists(path: string): Promise<boolean> {

@@ -11,6 +11,7 @@ export const CodeTaskWorkerManifestSchema = z.object({
   artifactRoot: z.string().min(1),
   artifactUriPrefix: z.string().regex(/^sandbox:\/\/code-task-artifacts\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/u),
   checkRoot: z.string().min(1),
+  packageStoreRoot: z.string().min(1).optional(),
   isolation: z.enum(["bwrap", "none"]),
   checkRuntimeReadOnlyPaths: z.array(z.string().min(1)).max(32),
   statePath: z.string().min(1),
