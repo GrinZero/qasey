@@ -169,7 +169,7 @@ async function runRepositoryInstall(): Promise<CheckResult> {
 
 async function detectInstallCommand(): Promise<{ executable: string; args: string[] } | undefined> {
   if (await exists(join(manifest.workspaceRoot, "pnpm-lock.yaml"))) {
-    return { executable: "pnpm", args: ["install", "--frozen-lockfile", "--ignore-scripts"] };
+    return { executable: "pnpm", args: ["install", "--frozen-lockfile", "--ignore-scripts", "--prefer-offline"] };
   }
   if (await exists(join(manifest.workspaceRoot, "yarn.lock"))) {
     return { executable: "corepack", args: ["yarn", "install", "--immutable", "--mode=skip-builds"] };
@@ -712,13 +712,17 @@ function fixedCheckEnvironment(checkRoot: string): Record<string, string> {
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
   ];
   const home = join(checkRoot, "home");
+  const packageCacheRoot = manifest.packageStoreRoot;
   return {
     ...Object.fromEntries(inheritedKeys.flatMap(key => process.env[key] === undefined ? [] : [[key, process.env[key]!]])),
     HOME: home,
     XDG_CONFIG_HOME: join(home, ".config"),
-    XDG_CACHE_HOME: join(home, ".cache"),
+    XDG_CACHE_HOME: packageCacheRoot ? join(packageCacheRoot, "metadata-cache") : join(home, ".cache"),
     XDG_DATA_HOME: join(home, ".local", "share"),
-    ...(manifest.packageStoreRoot ? { npm_config_store_dir: manifest.packageStoreRoot } : {}),
+    ...(packageCacheRoot ? {
+      COREPACK_HOME: join(packageCacheRoot, "corepack"),
+      PNPM_CONFIG_STORE_DIR: packageCacheRoot,
+    } : {}),
   };
 }
 
