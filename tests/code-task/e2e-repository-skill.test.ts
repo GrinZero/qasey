@@ -23,6 +23,7 @@ describe("fixed Web E2E repository execution configuration", () => {
   it("loads the repository target and verification policy from one trusted snapshot", () => {
     const snapshot = webE2EConfigurationFromSkill(configFile);
     expect(snapshot.target.repository).toBe("web-e2e");
+    expect(snapshot.environment).toEqual({ id: "web-e2e", baseUrl: "https://e2e.example.test" });
     expect(snapshot.verification.projects[0]).toMatchObject({
       root: "web",
       config: "web/playwright.config.ts",

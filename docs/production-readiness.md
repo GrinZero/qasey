@@ -45,7 +45,7 @@ execution entry point.
    and Sandbox SHALL require a dedicated control-plane signing key of at least
    32 random bytes and SHALL reject an insecure remote HTTP endpoint.
 4. WHEN arbitrary repository commands execute THEN their environment SHALL NOT
-   contain GitHub installation tokens or Git authorization headers.
+   contain GitHub personal access tokens or Git authorization headers.
 5. IF the Sandbox is in production THEN it SHALL reject `isolation=none` and
    SHALL require a tested process-isolation boundary. An external VM/container
    boundary MAY be added as defence in depth, but it does not disable the
@@ -163,7 +163,7 @@ add mTLS or workload identity and network policy as a second boundary.
 
 ### AD-2: credentials stay in trusted preparation, not task environments
 
-GitHub installation credentials are used only by the trusted Sandbox runtime to
+GitHub personal access tokens are used only by the trusted Sandbox runtime to
 authorize and refresh its preparation mirror and create an independent checkout.
 There is no task-reachable repository broker. The generic shell, code Agent,
 worker environment, detached checkout, and fixed-check descendants never receive

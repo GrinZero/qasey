@@ -1,4 +1,3 @@
-import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -6,14 +5,11 @@ import { lstat, readFile, readlink } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { RepositoryProfile } from "../../contracts/src/index.ts";
-import { normalizeGitHubPrivateKey, type QaseyConfig } from "./config.ts";
+import type { QaseyConfig } from "./config.ts";
 
 const execFileAsync = promisify(execFile);
 
-type GitHubAppConfig = Pick<
-  QaseyConfig,
-  "GITHUB_APP_ID" | "GITHUB_APP_INSTALLATION_ID" | "GITHUB_APP_PRIVATE_KEY"
->;
+export type GitHubTokenConfig = Pick<QaseyConfig, "GITHUB_TOKEN">;
 
 export type GitHubPublisherErrorCode =
   | "github_not_configured"
@@ -24,7 +20,7 @@ export type GitHubPublisherErrorCode =
   | "github_pull_request_ready_failed";
 
 const GITHUB_PUBLISHER_ERROR_MESSAGES: Record<GitHubPublisherErrorCode, string> = {
-  github_not_configured: "GitHub App authentication is not configured",
+  github_not_configured: "GitHub personal access token authentication is not configured",
   github_publication_failed: "GitHub change publication failed",
   github_pull_request_lookup_failed: "GitHub pull request lookup failed",
   github_pull_request_create_rejected: "GitHub rejected pull request creation",
@@ -68,53 +64,9 @@ interface GitHubPublishChangesInput extends GitHubPullRequestInput {
 
 const PULL_REQUEST_KEY_MARKER = /(?:\r?\n)*<!-- qasey-pr-key:[a-f0-9]{64} -->/gu;
 
-export function createGitHubClient(config: GitHubAppConfig): Octokit | undefined {
-  if (!config.GITHUB_APP_ID || !config.GITHUB_APP_INSTALLATION_ID || !config.GITHUB_APP_PRIVATE_KEY) return undefined;
-  const privateKey = normalizeGitHubPrivateKey(config.GITHUB_APP_PRIVATE_KEY);
-  return new Octokit({
-    authStrategy: createAppAuth,
-    auth: {
-      appId: config.GITHUB_APP_ID,
-      installationId: config.GITHUB_APP_INSTALLATION_ID,
-      privateKey,
-    },
-  });
-}
-
-export class GitHubInstallationTokenProvider {
-  private readonly authenticate: ReturnType<typeof createAppAuth>;
-  private cached?: { token: string; expiresAt: number };
-
-  constructor(config: GitHubAppConfig, authenticate?: ReturnType<typeof createAppAuth>) {
-    if (!config.GITHUB_APP_ID || !config.GITHUB_APP_INSTALLATION_ID || !config.GITHUB_APP_PRIVATE_KEY) {
-      throw new Error("GitHub App authentication is not configured");
-    }
-    const privateKey = normalizeGitHubPrivateKey(config.GITHUB_APP_PRIVATE_KEY);
-    this.authenticate = authenticate ?? createAppAuth({
-      appId: config.GITHUB_APP_ID,
-      installationId: config.GITHUB_APP_INSTALLATION_ID,
-      privateKey,
-    });
-  }
-
-  async readToken(): Promise<string> {
-    if (this.cached && this.cached.expiresAt > Date.now() + 5 * 60_000) return this.cached.token;
-    const authentication = await this.authenticate({
-      type: "installation",
-      permissions: {
-        contents: "read",
-        pull_requests: "read",
-      },
-    });
-    if (!("token" in authentication) || typeof authentication.token !== "string") {
-      throw new Error("GitHub App did not return an installation token");
-    }
-    const expiresAt = "expiresAt" in authentication && typeof authentication.expiresAt === "string"
-      ? Date.parse(authentication.expiresAt)
-      : Date.now() + 50 * 60_000;
-    this.cached = { token: authentication.token, expiresAt };
-    return authentication.token;
-  }
+export function createGitHubClient(config: GitHubTokenConfig): Octokit | undefined {
+  if (!config.GITHUB_TOKEN) return undefined;
+  return new Octokit({ auth: config.GITHUB_TOKEN });
 }
 
 export class GitHubPublisher {

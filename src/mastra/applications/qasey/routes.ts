@@ -3,7 +3,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { CaseHubResultReviewInputSchema, CreateCaseHubChangeSetSchema, CreateE2ERunRequestSchema, type CaseHubChangeSet, type CaseHubResult, type OwnerScope } from "../../../../packages/contracts/src/index.ts";
 import { freezeE2EContext, normalizeJiraWebhook } from "../../../../packages/domain/src/index.ts";
-import { artifactStore, caseHubRepository, channelDeliveryInbox, config, e2eFixtureLeaseService, githubClient, jiraClient, runRepository, sandboxPoolClient } from "../../runtime.ts";
+import { artifactStore, caseHubRepository, channelDeliveryInbox, config, e2eFixtureLeaseService, e2ePreflight, githubClient, jiraClient, runRepository, sandboxPoolClient } from "../../runtime.ts";
 import { ArtifactNotFoundError, ArtifactOwnershipError } from "../../../../packages/e2e/src/index.ts";
 import { cancelE2ERun, createAndStartE2ERun, rerunE2E, resumeE2EWithVerdict } from "../../workflows/e2e-workflow.ts";
 import { ownerScopeFromRequestContext } from "../../../platform/context/owner-scope.ts";
@@ -393,6 +393,13 @@ export const apiRoutes = [
     method: "GET",
     handler: async c => c.json({ changeSets: await caseHubRepository.listChangeSets(owner(c), Number(c.req.query("limit") ?? 100)) }),
   }),
+  registerApiRoute("/v1/case-hub/preflight", {
+    method: "GET",
+    handler: async c => {
+      const snapshot = await e2ePreflight.inspect(owner(c), webE2EConfigurationFromSkill());
+      return c.json(snapshot, snapshot.ready ? 200 : 503);
+    },
+  }),
   registerApiRoute("/v1/case-hub/change-sets", {
     method: "POST",
     handler: async c => {
@@ -414,11 +421,13 @@ export const apiRoutes = [
         resourceId: String(requestContext.get(MASTRA_RESOURCE_ID_KEY) ?? principal.subjectId),
       });
       try {
+        const preflight = await e2ePreflight.assertReady(owner(c), webE2EConfiguration);
         const changeSet = await caseHubRepository.createChangeSet(owner(c), {
           requirement,
           proposals: parsed.data.proposals,
           repository: webE2EConfiguration.target,
           createdBy: principal.subjectId,
+          baseSha: preflight.baseSha,
           environmentSourceSha: e2eFixtureLeaseService.version().sourceSha,
         });
         const run = await createAndStartE2ERun(c.get("mastra"), owner(c), {
@@ -426,6 +435,7 @@ export const apiRoutes = [
           changeSetId: changeSet.id,
           handoff: parsed.data.requirement,
           repository: webE2EConfiguration.target,
+          testEnvironment: webE2EConfiguration.environment,
           playwrightVerification: webE2EConfiguration.verification,
           platform: "web",
           framework: "playwright",
@@ -495,10 +505,12 @@ export const apiRoutes = [
       const requestContext = c.get("requestContext");
       try {
         const webE2EConfiguration = webE2EConfigurationFromSkill();
+        await e2ePreflight.assertReady(owner(c), webE2EConfiguration);
         const trustedInput = {
           ...parsed.data,
           sourceSessionId: String(requestContext.get("sessionId")),
           repository: webE2EConfiguration.target,
+          testEnvironment: webE2EConfiguration.environment,
           playwrightVerification: webE2EConfiguration.verification,
         };
         return c.json(await createAndStartE2ERun(c.get("mastra"), owner(c), trustedInput, requestContext, authenticatedUser(c)?.id), 202);
@@ -743,6 +755,7 @@ const routePolicies: Record<string, { id: string; access: PrimitiveAccessPolicy;
   "GET /v1/case-hub/cases": { id: "case-list", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/case-hub/cases/:caseId": { id: "case-read", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/case-hub/change-sets": { id: "change-set-list", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
+  "GET /v1/case-hub/preflight": { id: "e2e-preflight", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
   "POST /v1/case-hub/change-sets": { id: "change-set-create", access: { permission: "qasey.cases.write", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/case-hub/change-sets/:changeSetId": { id: "change-set-read", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
   "POST /v1/case-hub/results/:resultId/review": { id: "case-result-review", access: { permission: "qasey.results.approve", audiences: ["admin-ui", "api"] } },

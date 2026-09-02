@@ -297,6 +297,7 @@ export class QaseySandboxRuntime {
         status: this.ready ? "ready" : "not_ready",
         isolation: this.options.isolation,
         capabilities: ["native-mastra"],
+        codeAgent: { configured: Boolean(process.env.OPENAI_API_KEY) },
         ...(this.readinessError ? { error: this.readinessError } : {}),
       });
     }

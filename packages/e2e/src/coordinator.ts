@@ -36,7 +36,7 @@ export interface E2EFixtureLease {
 }
 
 export interface E2EFixtureLeaseProvider {
-  acquire(input: { owner: OwnerScope; runId: string; expectedSourceSha: string }): Promise<E2EFixtureLease>;
+  acquire(input: { owner: OwnerScope; runId: string; expectedSourceSha: string; baseUrl: string }): Promise<E2EFixtureLease>;
   release(lease: E2EFixtureLease): Promise<void>;
 }
 
@@ -80,6 +80,7 @@ export class E2ECoordinator {
       id: randomUUID(), requestId, sourceSessionId: source.sessionId,
       changeSetId: trustedInput.changeSetId, contextSnapshot, caseSnapshot: [], amendments: [], codeTaskIds: [],
       repository: trustedInput.repository, platform: trustedInput.platform,
+      testEnvironment: trustedInput.testEnvironment,
       playwrightVerification: trustedInput.playwrightVerification,
       framework: trustedInput.framework, status: "queued", revision: 1, createdAt: now, updatedAt: now, artifacts: [],
     };
@@ -103,8 +104,12 @@ export class E2ECoordinator {
     if (!run.playwrightVerification) {
       throw new Error("This legacy E2E run has no frozen Playwright verification mapping; create a new run");
     }
+    if (!run.testEnvironment) {
+      throw new Error("This legacy E2E run has no frozen test environment; create a new run");
+    }
     const trustedRepositoryExecution: E2ERepositoryExecution = {
       ...repositoryExecution,
+      testEnvironment: run.testEnvironment,
       verification: run.playwrightVerification,
     };
     const executionBrief = freezeE2EExecutionBrief({ context: run.contextSnapshot, cases, repository: trustedRepositoryExecution });
@@ -201,6 +206,8 @@ export class E2ECoordinator {
   private async verifyWithCodeTask(owner: OwnerScope, runId: string, requirePassing: boolean): Promise<void> {
     let run = await this.requireRun(owner, runId);
     if (!run.executionBrief || !run.briefHash || !run.baseSha) throw new Error("E2E execution brief and pinned base SHA must be frozen before verification");
+    if (!run.testEnvironment) throw new Error("This legacy E2E run has no frozen test environment; create a new run");
+    const testEnvironment = run.testEnvironment;
     const patchRef = run.artifacts.find(item => item.kind === "patch" && item.id === `${run.id}:patch`);
     if (!patchRef) throw new Error("Clean verifier requires the persisted author patch");
     const runner = await this.options.codeTasks!.forScope({ ...owner, sessionId: run.sourceSessionId });
@@ -219,7 +226,12 @@ export class E2ECoordinator {
     await this.repository.addEvent(owner, run.id, "code_task.submitted", "Sandbox verifier CodeTask submitted", codeTaskMetadata(spec));
     const startedAt = Date.now();
     const fixtureLease = this.options.fixtureLeases
-      ? await this.options.fixtureLeases.acquire({ owner, runId: run.id, expectedSourceSha: run.baseSha! })
+      ? await this.options.fixtureLeases.acquire({
+          owner,
+          runId: run.id,
+          expectedSourceSha: run.baseSha!,
+          baseUrl: testEnvironment.baseUrl,
+        })
       : undefined;
     let executed;
     try {

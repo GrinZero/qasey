@@ -64,6 +64,27 @@ export class SandboxPoolClient {
     if (failed.length > 0) throw new Error(`Sandbox replicas are not ready: ${failed.join(",")}`);
   }
 
+  async codeAgentHealthCheck(): Promise<void> {
+    const results = await Promise.allSettled(this.endpoints().map(async (endpoint, ordinal) => {
+      const response = await fetch(`${endpoint}/readyz`, {
+        signal: AbortSignal.timeout(Math.min(this.requestTimeoutMs, 2_000)),
+      });
+      if (!response.ok) throw new Error(`Sandbox replica ${ordinal} is not ready`);
+      const readiness = await response.json() as { codeAgent?: { configured?: unknown } };
+      if (readiness.codeAgent?.configured !== true) throw new Error(`Sandbox replica ${ordinal} has no code agent credentials`);
+    }));
+    const failed = results.flatMap((result, ordinal) => result.status === "rejected" ? [ordinal] : []);
+    if (failed.length > 0) throw new Error(`Sandbox code agents are not ready: ${failed.join(",")}`);
+  }
+
+  assertTestEnvironmentAddress(baseUrl: string): void {
+    const environmentHost = new URL(baseUrl).hostname;
+    const sandboxHosts = this.endpoints().map(endpoint => new URL(endpoint).hostname);
+    if (isLoopbackHost(environmentHost) && sandboxHosts.some(host => !isLoopbackHost(host))) {
+      throw new Error(`Test environment ${environmentHost} is loopback-only and cannot be reached from the Sandbox network`);
+    }
+  }
+
   async capacity(): Promise<SandboxPoolCapacity> {
     const results = await Promise.allSettled(this.endpoints().map(async endpoint => {
       const response = await fetch(`${endpoint}/capacity`, {
@@ -159,6 +180,10 @@ export class SandboxPoolClient {
   private endpoints(): string[] {
     return Array.from({ length: this.options.replicas ?? 1 }, (_value, ordinal) => this.endpoint(ordinal));
   }
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
 }
 
 function finiteNonNegativeInteger(value: unknown): number {

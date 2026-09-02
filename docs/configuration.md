@@ -158,10 +158,31 @@ outer boundary.
 | --- | --- |
 | Slack | `SLACK_CHANNEL_MODE`, `SLACK_BOT_TOKEN`, `SLACK_USER_TOKEN`, `SLACK_SIGNING_SECRET`, `SLACK_SOCKET_MODE_APP_TOKEN`, `SLACK_BOT_USER_ID`; `SLACK_BASE_URL` is only for compatible/test endpoints. Managed installations can instead be added in Admin UI. |
 | Jira | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_WEBHOOK_TOKEN`, `JIRA_QASEY_ACCOUNT_ID`. |
-| GitHub App | `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, and `GITHUB_APP_PRIVATE_KEY` must be provided together; `GITHUB_ORG` is optional. |
+| GitHub | `GITHUB_TOKEN` accepts a personal access token (PAT); `GITHUB_ORG` is optional. Fine-grained PATs need Contents and Pull requests read/write access to repositories where Qasey publishes Draft PRs. `GITHUB_WEBHOOK_SECRET`, when used, remains a separate webhook signing secret. |
 | MCP | In `single` mode, copy `config/mcp.example.json` to ignored `config/mcp.json`; override with `QASEY_MCP_CONFIG_FILE`. In `multi` mode this static file may contain only subject-bound OAuth servers; static `none` and process-environment bearer authentication fail closed. Tenant bearer servers must use an encrypted `provider=mcp` external connection as described below. OAuth token files use `QASEY_MCP_OAUTH_DIR` (default `.qasey/oauth`). |
-| E2E repository | Copy `config/e2e-repository.example.json` to ignored `config/e2e-repository.json`; override with `QASEY_E2E_REPOSITORY_CONFIG_FILE`. The Service reads and validates target + verification once per new run and freezes them into the run/brief/task spec; Sandbox images never contain or mount this file. |
-| E2E fixture deployment | The build stamps the checked-out Git commit into an internal build artifact; there is no manually supplied Qasey source-SHA setting. A verifier refuses a different frozen base SHA, leases an isolated organization/user/session through the in-process fixture service, injects a temporary Playwright storage-state file, and always requests cleanup. `PLATFORM_SERVICE_TOKEN` is needed only by an external service caller using the Fixture HTTP API, not by Qasey's own Workflow. |
+| E2E repository | Copy `config/e2e-repository.example.json` to ignored `config/e2e-repository.json`; override with `QASEY_E2E_REPOSITORY_CONFIG_FILE`. The Service reads and validates target + Sandbox-reachable test environment + verification once per new run and freezes them into the run/brief/task spec; Sandbox images never contain or mount this file. |
+| E2E fixture deployment | The build stamps the checked-out Git commit into an internal build artifact; there is no manually supplied Qasey source-SHA setting. Preflight compares that artifact to the repository base ref before creating state. A verifier leases an isolated organization/user/browser session with a dedicated least-privilege fixture role, injects a temporary Playwright storage-state file, and always requests cleanup. `PLATFORM_SERVICE_TOKEN` is needed only by an external service caller using the Fixture HTTP API, not by Qasey's own Workflow. |
+
+In multi-tenant mode, do not set a process-global `GITHUB_TOKEN`. Store each
+PAT as an encrypted `provider=github` external connection instead:
+
+```json
+{
+  "provider": "github",
+  "name": "tenant-github",
+  "configuration": {
+    "repositoryOwner": "example-org"
+  },
+  "credentials": {
+    "token": "<PAT supplied through the admin credential input>"
+  }
+}
+```
+
+`repositoryOwner` is optional and acts as a selector when a tenant has multiple
+GitHub connections. A tenant-wide sandbox credential requires exactly one
+active GitHub connection. Tokens remain encrypted at rest and are never
+returned by the Admin API.
 
 ### Tenant-owned MCP connections
 

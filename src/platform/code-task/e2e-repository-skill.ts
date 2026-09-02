@@ -3,8 +3,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   ChangedProjectPlaywrightVerificationSchema,
+  E2ETestEnvironmentSchema,
   RepositoryProfileSchema,
   type ChangedProjectPlaywrightVerification,
+  type E2ETestEnvironment,
   type RepositoryProfile,
 } from "../../../packages/contracts/src/index.ts";
 
@@ -12,6 +14,7 @@ const RepositorySkillReferenceSchema = z.object({
   version: z.literal(1),
   web: z.object({
     target: RepositoryProfileSchema,
+    environment: E2ETestEnvironmentSchema,
     verification: ChangedProjectPlaywrightVerificationSchema,
     contextRepositories: z.array(z.unknown()).default([]),
   }).strict(),
@@ -51,12 +54,13 @@ function repositoryReference(configFile?: string) {
 
 export interface WebE2EConfiguration {
   target: RepositoryProfile;
+  environment: E2ETestEnvironment;
   verification: ChangedProjectPlaywrightVerification;
 }
 
 export function webE2EConfigurationFromSkill(configFile?: string): WebE2EConfiguration {
   const snapshot = repositoryReference(configFile).web;
-  return { target: snapshot.target, verification: snapshot.verification };
+  return { target: snapshot.target, environment: snapshot.environment, verification: snapshot.verification };
 }
 
 export function webE2ERepositoryFromSkill(configFile?: string): RepositoryProfile {

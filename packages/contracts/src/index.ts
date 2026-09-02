@@ -110,6 +110,12 @@ export const RepositoryProfileSchema = z.object({
 });
 export type RepositoryProfile = z.infer<typeof RepositoryProfileSchema>;
 
+export const E2ETestEnvironmentSchema = z.object({
+  id: z.string().min(1).max(100),
+  baseUrl: z.url(),
+}).strict();
+export type E2ETestEnvironment = z.infer<typeof E2ETestEnvironmentSchema>;
+
 export const ArtifactRefSchema = z.object({
   id: z.string().min(1),
   kind: z.enum(["log", "trace", "video", "screenshot", "report", "patch", "trajectory"]),
@@ -493,6 +499,7 @@ export const E2ERepositoryExecutionSchema = z.object({
   testCommand: z.array(z.string()).optional(),
   specGlobs: z.array(z.string()).default([]),
   artifactGlobs: z.array(z.string()).default([]),
+  testEnvironment: E2ETestEnvironmentSchema.optional(),
   verification: ChangedProjectPlaywrightVerificationSchema,
 }).strict();
 export type E2ERepositoryExecution = z.infer<typeof E2ERepositoryExecutionSchema>;
@@ -537,6 +544,9 @@ export const E2ERunSchema = z.object({
   amendments: z.array(E2EAmendmentSchema).default([]),
   codeTaskIds: z.array(z.string()).default([]),
   repository: RepositoryProfileSchema,
+  // Optional only while decoding historical runs created before the test
+  // environment address became part of the frozen run contract.
+  testEnvironment: E2ETestEnvironmentSchema.optional(),
   platform: E2EPlatformSchema,
   framework: E2EFrameworkSchema,
   status: RunStatusSchema,
@@ -560,6 +570,7 @@ export const CreateE2ERunSchema = z.object({
   handoff: E2EContextDraftSchema,
   // Execution commands are server-owned and can never be submitted by a browser/API client.
   repository: SubmittedRepositoryProfileSchema,
+  testEnvironment: E2ETestEnvironmentSchema,
   playwrightVerification: ChangedProjectPlaywrightVerificationSchema,
   platform: E2EPlatformSchema,
   framework: E2EFrameworkSchema,
@@ -569,6 +580,7 @@ export const CreateE2ERunRequestSchema = CreateE2ERunSchema.omit({
   requestId: true,
   sourceSessionId: true,
   repository: true,
+  testEnvironment: true,
   playwrightVerification: true,
 }).strict();
 export type CreateE2ERunRequest = z.infer<typeof CreateE2ERunRequestSchema>;

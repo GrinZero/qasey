@@ -18,7 +18,7 @@ import type { ToolsInput } from "@mastra/core/agent";
 import {
   InMemoryCaseHubRepository, InMemoryRunRepository, PrismaCaseHubRepository, PrismaRunRepository,
 } from "../../packages/domain/src/index.ts";
-import { assertOpenAICompatibleToolSchemas, createGitHubClient, GitHubInstallationTokenProvider, GitHubPublisher, loadConfig, QaseyMcpCatalog, JiraClient, ReadConnectorCatalog, resolveCredentialKeyring } from "../../packages/adapters/src/index.ts";
+import { assertOpenAICompatibleToolSchemas, createGitHubClient, GitHubPublisher, loadConfig, QaseyMcpCatalog, JiraClient, ReadConnectorCatalog, resolveCredentialKeyring } from "../../packages/adapters/src/index.ts";
 import {
   E2ECoordinator, LocalArtifactStore, NoopDraftPrBroker, S3ArtifactStore,
 } from "../../packages/e2e/src/index.ts";
@@ -32,6 +32,7 @@ import { PooledSandboxCodeTaskRunnerProvider } from "../platform/code-task/poole
 import { webE2EConfigurationFromSkill } from "../platform/code-task/e2e-repository-skill.ts";
 import { resolveBuildMetadata } from "../platform/e2e/build-metadata.ts";
 import { E2EFixtureLeaseService } from "../platform/e2e/fixture-service.ts";
+import { E2EPreflightService } from "../platform/e2e/preflight.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "../platform/context/schema.ts";
 import { applyDevRuntimeApprovalGate } from "./applications/qasey/dev-runtime-approval-gate.ts";
 import { createApplicationDatabase } from "../platform/storage/prisma.ts";
@@ -94,13 +95,10 @@ export const externalConnectionStore = config.NODE_ENV === "production" && appli
   ? new PrismaExternalConnectionStore(applicationDatabase.client, credentialKeyring)
   : new InMemoryExternalConnectionStore(credentialKeyring);
 export const tenantGitHubConnections = new TenantGitHubConnectionResolver(externalConnectionStore);
-export const githubReadTokens = config.GITHUB_APP_ID && config.GITHUB_APP_INSTALLATION_ID && config.GITHUB_APP_PRIVATE_KEY
-  ? new GitHubInstallationTokenProvider(config)
-  : undefined;
 const githubTokenForScope = config.QASEY_TENANCY_MODE === "multi"
-  ? (scope: { tenantId: string }) => tenantGitHubConnections.installationToken(scope.tenantId)
-  : githubReadTokens
-    ? () => githubReadTokens.readToken()
+  ? (scope: { tenantId: string }) => tenantGitHubConnections.token(scope.tenantId)
+  : config.GITHUB_TOKEN
+    ? async () => config.GITHUB_TOKEN!
     : undefined;
 const sandboxEndpointTemplate = config.QASEY_SANDBOX_ENDPOINT_TEMPLATE;
 const sandboxLeaseOptions = config.QASEY_SANDBOX_LEASE_KEY
@@ -196,9 +194,14 @@ const draftPrBroker = githubPublisher.configured || config.QASEY_TENANCY_MODE ==
   : new NoopDraftPrBroker();
 export const e2eFixtureLeaseService = new E2EFixtureLeaseService(
   buildMetadata,
-  config.QASEY_PUBLIC_BASE_URL,
   applicationDatabase?.client,
 );
+export const e2ePreflight = new E2EPreflightService({
+  buildMetadata,
+  fixture: e2eFixtureLeaseService,
+  ...(sandboxPoolClient ? { sandbox: sandboxPoolClient } : {}),
+  ...(githubClient ? { github: githubClient } : {}),
+});
 export const e2eCoordinator = new E2ECoordinator(
   runRepository,
   artifactStore,
@@ -417,6 +420,7 @@ function e2eTools() {
         const threadId = String(requestContext.get(MASTRA_THREAD_ID_KEY) ?? sessionId);
         const taskRunId = String(requestContext.get("taskId") ?? requestContext.get("executionId") ?? requestId);
         const webE2EConfiguration = webE2EConfigurationFromSkill();
+        const preflight = await e2ePreflight.assertReady(owner, webE2EConfiguration);
         const actorId = getRuntimeContext(requestContext)["qasey-context"].actor.id;
         const requirement = freezeE2EContext(input.requirement, { sessionId, threadId, taskRunId, requestId, resourceId });
         const changeSet = await caseHubRepository.createChangeSet(owner, {
@@ -424,6 +428,7 @@ function e2eTools() {
           proposals: input.proposals,
           repository: webE2EConfiguration.target,
           createdBy: actorId,
+          baseSha: preflight.baseSha,
           environmentSourceSha: buildMetadata.sourceSha,
         });
         const created = await e2eCoordinator.create(owner, {
@@ -434,6 +439,7 @@ function e2eTools() {
           requestId,
           sourceSessionId: sessionId,
           repository: webE2EConfiguration.target,
+          testEnvironment: webE2EConfiguration.environment,
           playwrightVerification: webE2EConfiguration.verification,
         }, { sessionId, threadId, taskRunId, requestId, resourceId });
         if (!mastra) throw new Error("Mastra runtime is required to start the E2E workflow");

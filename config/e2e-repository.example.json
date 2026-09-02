@@ -9,6 +9,10 @@
       "allowedPaths": ["web/tests/e2e", "web/pages"],
       "skillsPaths": [".agents/skills", "skills"]
     },
+    "environment": {
+      "id": "web-e2e",
+      "baseUrl": "https://e2e.example.test"
+    },
     "verification": {
       "strategy": "changed-project-playwright",
       "projects": [

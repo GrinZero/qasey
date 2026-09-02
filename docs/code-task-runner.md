@@ -90,11 +90,12 @@ The deployment-owned repository configuration is selected by
 It owns:
 
 - the target repository and base ref;
+- the test deployment id and Sandbox-reachable base URL;
 - writable paths for tests, page objects, and helpers;
 - the Playwright config and project name for each product project.
 
 Neither an API caller nor the coding Agent can provide a command or replace the
-verification mapping. The Service strictly parses the target and mapping in one
+verification mapping. The Service strictly parses the target, environment, and mapping in one
 read when it creates a run, persists that server-owned snapshot, includes it in
 the hashed execution brief, and copies it into every Code Task spec. The
 Sandbox image does not contain or mount the ignored deployment file, and the
@@ -123,7 +124,9 @@ artifact directory rather than the repository checkout.
 
 ## Execution environment mapping
 
-Qasey's Sandbox deployment uses a namespaced setting so repository-specific
+The deployment-owned `web.environment.baseUrl` is frozen on every new run. In
+Compose it must use the service DNS name (for example `http://qasey:4111`), not
+the host-only `localhost` address. Qasey's Sandbox deployment uses a namespaced setting so repository-specific
 names do not become part of the generic Runner contract. The Web E2E execution
 profile derives the target repository environment:
 
@@ -137,6 +140,12 @@ remains active. Request payloads cannot provide either value. Model credentials
 and the matching `OPENAI_BASE_URL`, when configured, are available only to
 Agent-backed author, repair, and read-only review profiles. They are absent
 from the deterministic verifier profile.
+
+Before a Change Set is created, `GET /v1/case-hub/preflight` and the same
+server-side gate verify Sandbox Native Mastra readiness, Sandbox model
+credentials, GitHub read/write access, exact deployment/base-ref SHA equality,
+test-environment reachability, and persistent fixture storage. A blocked check
+returns its concrete reason and no Change Set or Run is created.
 
 ## Local verification
 
@@ -156,7 +165,7 @@ capability is structural: a configured Sandbox endpoint creates the
 `CodeTaskRunner`; without one, E2E submission fails before a queued run is
 persisted. `pnpm dev` injects its loopback endpoint automatically. Production
 must configure the pool endpoint explicitly. Draft PR publication occurs after
-the clean verifier whenever GitHub App publishing credentials are available.
+the clean verifier whenever GitHub PAT publishing credentials are available.
 
 The deterministic storage, lifecycle, path, and check-planning tests run with:
 

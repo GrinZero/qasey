@@ -1,17 +1,11 @@
 import { Octokit } from "@octokit/rest";
-import { createPrivateKey, generateKeyPairSync } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
   createGitHubClient,
-  GitHubInstallationTokenProvider,
   GitHubPublisher,
   loadConfig,
-  normalizeGitHubPrivateKey,
   stableGitHubPullRequestKey,
 } from "../../packages/adapters/src/index.ts";
-
-const testPrivateKey = generateKeyPairSync("rsa", { modulusLength: 2048 })
-  .privateKey.export({ type: "pkcs1", format: "pem" }).toString();
 
 const repository = {
   owner: "example-org",
@@ -33,56 +27,16 @@ function openPullRequest(number = 1) {
   };
 }
 
-describe("GitHub App authentication", () => {
-  it("creates an installation-authenticated Octokit only from complete app configuration", () => {
+describe("GitHub PAT authentication", () => {
+  it("creates a token-authenticated Octokit only when a PAT is configured", async () => {
     expect(createGitHubClient(loadConfig({} as NodeJS.ProcessEnv))).toBeUndefined();
-    expect(createGitHubClient(loadConfig({
-      GITHUB_APP_ID: "123",
-      GITHUB_APP_INSTALLATION_ID: "456",
-      GITHUB_APP_PRIVATE_KEY: "private-key",
-    } as NodeJS.ProcessEnv))).toBeInstanceOf(Octokit);
-  });
-
-  it("normalizes flattened and escaped-newline GitHub App PEM secrets", () => {
-    const flattened = testPrivateKey.replace(/\r?\n/gu, "");
-    const escaped = testPrivateKey.replace(/\r?\n/gu, "\\n");
-    for (const privateKey of [testPrivateKey, flattened, escaped, `"${escaped}"`]) {
-      const normalized = normalizeGitHubPrivateKey(privateKey);
-      expect(() => createPrivateKey(normalized)).not.toThrow();
-      expect(normalized.startsWith(["-----BEGIN RSA ", "PRIVATE KEY-----\n"].join(""))).toBe(true);
-      expect(normalized.endsWith(["\n-----END RSA ", "PRIVATE KEY-----\n"].join(""))).toBe(true);
-    }
-    expect(loadConfig({
-      GITHUB_APP_ID: "123",
-      GITHUB_APP_INSTALLATION_ID: "456",
-      GITHUB_APP_PRIVATE_KEY: flattened,
-    } as NodeJS.ProcessEnv).GITHUB_APP_PRIVATE_KEY)
-      .toBe(normalizeGitHubPrivateKey(testPrivateKey));
-  });
-
-  it("mints and caches an explicitly read-only installation token", async () => {
-    const authenticate = vi.fn(async () => ({
+    const client = createGitHubClient(loadConfig({
+      GITHUB_TOKEN: "synthetic-personal-access-token-at-least-32-bytes",
+    } as NodeJS.ProcessEnv));
+    expect(client).toBeInstanceOf(Octokit);
+    await expect(client!.auth()).resolves.toMatchObject({
       type: "token",
-      tokenType: "installation",
-      token: "synthetic-installation-token-0000000000",
-      installationId: 456,
-      createdAt: new Date().toISOString(),
-      expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
-      repositorySelection: "all",
-      permissions: { contents: "read", pull_requests: "read" },
-    }));
-    const provider = new GitHubInstallationTokenProvider({
-      GITHUB_APP_ID: "123",
-      GITHUB_APP_INSTALLATION_ID: 456,
-      GITHUB_APP_PRIVATE_KEY: "private-key",
-    }, authenticate as never);
-
-    await expect(provider.readToken()).resolves.toBe("synthetic-installation-token-0000000000");
-    await expect(provider.readToken()).resolves.toBe("synthetic-installation-token-0000000000");
-    expect(authenticate).toHaveBeenCalledTimes(1);
-    expect(authenticate).toHaveBeenCalledWith({
-      type: "installation",
-      permissions: { contents: "read", pull_requests: "read" },
+      token: "synthetic-personal-access-token-at-least-32-bytes",
     });
   });
 

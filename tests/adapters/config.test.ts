@@ -135,6 +135,13 @@ describe("shared runtime configuration", () => {
       QASEY_SINGLE_TENANT_ID: undefined,
       SLACK_BOT_TOKEN: "redacted-global-slack-credential",
     } as NodeJS.ProcessEnv)).toThrow(/not allowed in multi-tenant mode/);
+    expect(() => loadConfig({
+      NODE_ENV: "production",
+      ...productionAuth,
+      QASEY_TENANCY_MODE: "multi",
+      QASEY_SINGLE_TENANT_ID: undefined,
+      GITHUB_TOKEN: "synthetic-personal-access-token-at-least-32-bytes",
+    } as NodeJS.ProcessEnv)).toThrow(/GITHUB_TOKEN is a process-global connection/u);
     expect(loadConfig({
       NODE_ENV: "production",
       ...productionAuth,
@@ -442,15 +449,12 @@ describe("shared runtime configuration", () => {
     expect(config.OBSERVABILITY_DATABASE_URL).toContain("qasey_observability");
   });
 
-  it("requires complete GitHub App installation authentication", () => {
-    expect(() => loadConfig({ GITHUB_APP_ID: "123" } as NodeJS.ProcessEnv)).toThrow(/GITHUB_APP_INSTALLATION_ID/);
+  it("accepts a GitHub personal access token and rejects short credentials", () => {
+    expect(() => loadConfig({ GITHUB_TOKEN: "too-short" } as NodeJS.ProcessEnv)).toThrow(/GitHub token/u);
     const config = loadConfig({
-      GITHUB_APP_ID: "123",
-      GITHUB_APP_INSTALLATION_ID: "456",
-      GITHUB_APP_PRIVATE_KEY: "private-key",
+      GITHUB_TOKEN: "synthetic-personal-access-token-at-least-32-bytes",
     } as NodeJS.ProcessEnv);
-    expect(config.GITHUB_APP_ID).toBe("123");
-    expect(config.GITHUB_APP_INSTALLATION_ID).toBe(456);
+    expect(config.GITHUB_TOKEN).toBe("synthetic-personal-access-token-at-least-32-bytes");
   });
 
   it("enables single-tenant password login and registration by default in production", () => {

@@ -600,6 +600,7 @@ describe("sandbox runtime protocol", () => {
 
   it("persists contained files and executes commands for an authenticated session", async () => {
     vi.stubEnv("PLAYWRIGHT_BROWSERS_PATH", "/ms-playwright");
+    vi.stubEnv("OPENAI_API_KEY", "public-test-placeholder");
     const dataRoot = await mkdtemp(join(tmpdir(), "qasey-sandbox-runtime-"));
     const runtime = new QaseySandboxRuntime({
       dataRoot, port: 0, host: "127.0.0.1", maxSessions: 2, idleTtlMs: 60_000, isolation: "none",
@@ -619,6 +620,8 @@ describe("sandbox runtime protocol", () => {
       githubTokenForScope: async () => "synthetic-installation-token-0000000000",
     });
     await expect(pool.healthCheck()).resolves.toBeUndefined();
+    await expect(pool.codeAgentHealthCheck()).resolves.toBeUndefined();
+    expect(() => pool.assertTestEnvironmentAddress("http://127.0.0.1:4111")).not.toThrow();
     await expect(pool.capacity()).resolves.toEqual({
       replicas: 1,
       active: 0,
@@ -664,6 +667,19 @@ describe("sandbox runtime protocol", () => {
       body: JSON.stringify({ operation: "exists", path: "hello.txt" }),
     });
     expect(unauthorized.status).toBe(401);
+  });
+
+  it("rejects a loopback test URL for a remotely-networked Sandbox", async () => {
+    const leases = new InMemorySandboxLeaseStore({ replicas: 1, maxSessionsPerReplica: 1, idleTtlMs: 60_000, encryptionKey: "test-key" });
+    await leases.init();
+    const pool = new SandboxPoolClient(leases, {
+      endpointTemplate: "http://sandbox-0:4120",
+      replicas: 1,
+      requestTimeoutMs: 10_000,
+      controlKey: TEST_CONTROL_KEY,
+    });
+    expect(() => pool.assertTestEnvironmentAddress("http://localhost:4111")).toThrow(/loopback-only/u);
+    expect(() => pool.assertTestEnvironmentAddress("http://qasey:4111")).not.toThrow();
   });
 
   it("aborts and drains an execute request before stop destroys its sandbox", async () => {

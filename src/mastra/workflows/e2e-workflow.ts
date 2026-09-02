@@ -13,7 +13,8 @@ import {
   type QaVerdict,
 } from "../../../packages/contracts/src/index.ts";
 import { caseHubVersionToTestCase, type CaseExecutionObservation } from "../../../packages/domain/src/index.ts";
-import { artifactStore, caseHubRepository, config, e2eCoordinator, getRuntimeContext, githubClient, runRepository } from "../runtime.ts";
+import { artifactStore, caseHubRepository, config, e2eCoordinator, e2ePreflight, getRuntimeContext, githubClient, runRepository } from "../runtime.ts";
+import { webE2EConfigurationFromSkill } from "../../platform/code-task/e2e-repository-skill.ts";
 import { ownerScopeFromRequestContext } from "../../platform/context/owner-scope.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY, PlatformRequestContextSchema } from "../../platform/context/schema.ts";
 import { startQaseyCorrelatedSpan } from "../applications/qasey/observability.ts";
@@ -277,6 +278,7 @@ export async function createAndStartE2ERun(
 }
 
 export async function rerunE2E(mastra: Mastra, owner: OwnerScope, runId: string, requestContext: RequestContext, resourceId?: string): Promise<E2ERun> {
+  await e2ePreflight.assertReady(owner, webE2EConfigurationFromSkill());
   const created = await e2eCoordinator.rerun(owner, runId);
   const workflow = mastra.getWorkflow("qasey-e2e-lifecycle");
   const run = await workflow.createRun({ runId: created.id, ...(resourceId ? { resourceId } : {}) });

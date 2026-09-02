@@ -44,6 +44,10 @@ describe("E2E coordinator", () => {
       changeSetId: "97bb25db-18df-428e-af86-be305ad8b2ff", handoff: handoff(), platform: "web", framework: "playwright",
       playwrightVerification,
     }).success).toBe(false);
+    expect(CreateE2ERunRequestSchema.safeParse({
+      changeSetId: "97bb25db-18df-428e-af86-be305ad8b2ff", handoff: handoff(), platform: "web", framework: "playwright",
+      testEnvironment: { id: "attacker", baseUrl: "https://attacker.example" },
+    }).success).toBe(false);
   });
 
   it("requires trusted verification when a server creates a new run", () => {
@@ -140,16 +144,21 @@ describe("E2E coordinator", () => {
     await expect(repository.get(owner, original.id)).resolves.toMatchObject({ status: "failed", revision: 2 });
   });
 
-  it("requires a Sandbox author pass and an independent verifier pass before a Draft PR", async () => {
+  it("completes the one-Case happy path from Sandbox author through approval and Ready PR", async () => {
     const owner = { applicationId: "qasey", tenantId: "tenant-1" };
     const repository = new InMemoryRunRepository();
     const submitted: CodeTaskSpec[] = [];
     const runner = fakeRunner(submitted);
     const draftPr = broker();
+    const fixtureLease = {
+      acquire: vi.fn(async () => ({ id: "lease-1", baseUrl: "https://e2e.example.test", sourceSha: baseSha, sessionToken: "s".repeat(32) })),
+      release: vi.fn(async () => undefined),
+    };
     const coordinator = new E2ECoordinator(repository, artifacts(), draftPr, {
       maxRepairs: 2,
       reviewBaseUrl: "https://qasey.test",
       codeTasks: { forScope: vi.fn(async () => runner) } satisfies CodeTaskRunnerProvider,
+      fixtureLeases: fixtureLease,
     });
     const run = await coordinator.create(owner, createInput());
     expect(run.playwrightVerification).toEqual(playwrightVerification);
@@ -182,6 +191,7 @@ describe("E2E coordinator", () => {
 
     expect(submitted.map(spec => spec.executionProfileId)).toEqual(["web-e2e-author", "web-e2e-verifier"]);
     expect(submitted[0]?.playwrightVerification).toEqual(frozen?.executionBrief?.repository.verification);
+    expect(frozen?.executionBrief?.repository.testEnvironment).toEqual({ id: "qasey-test", baseUrl: "https://e2e.example.test" });
     expect(submitted[1]?.playwrightVerification).toEqual(frozen?.executionBrief?.repository.verification);
     expect(submitted.map(spec => spec.playwrightVerification)).toEqual([
       playwrightVerification,
@@ -189,6 +199,13 @@ describe("E2E coordinator", () => {
     ]);
     expect(submitted[1]?.attemptId).not.toBe(submitted[0]?.attemptId);
     expect(draftPr.publishChanges).toHaveBeenCalledTimes(1);
+    expect(fixtureLease.acquire).toHaveBeenCalledWith({
+      owner,
+      runId: run.id,
+      expectedSourceSha: baseSha,
+      baseUrl: "https://e2e.example.test",
+    });
+    expect(fixtureLease.release).toHaveBeenCalledTimes(1);
     expect(await repository.get(owner, run.id)).toMatchObject({
       status: "awaiting_qa",
       pullRequestUrl: "https://github.com/o/r/pull/1",
@@ -214,6 +231,7 @@ function createInput() {
       allowedPaths: ["e2e"],
       skillsPaths: [],
     },
+    testEnvironment: { id: "qasey-test", baseUrl: "https://e2e.example.test" },
     playwrightVerification,
   };
 }
