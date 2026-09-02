@@ -718,7 +718,7 @@ function fixedCheckEnvironment(checkRoot: string): Record<string, string> {
     XDG_CONFIG_HOME: join(home, ".config"),
     XDG_CACHE_HOME: join(home, ".cache"),
     XDG_DATA_HOME: join(home, ".local", "share"),
-    ...(manifest.packageStoreRoot ? { PNPM_STORE_DIR: manifest.packageStoreRoot } : {}),
+    ...(manifest.packageStoreRoot ? { npm_config_store_dir: manifest.packageStoreRoot } : {}),
   };
 }
 
