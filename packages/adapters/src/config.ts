@@ -10,9 +10,12 @@ const optionalBearerToken = z.preprocess(
   value => value === "" ? undefined : value,
   z.string().refine(value => Buffer.byteLength(value, "utf8") >= 32, "Bearer token must contain at least 32 UTF-8 bytes").optional(),
 );
-const optionalGitHubPrivateKey = z.preprocess(
-  value => typeof value === "string" && value ? normalizeGitHubPrivateKey(value) : value === "" ? undefined : value,
-  z.string().min(1).optional(),
+const optionalGitHubToken = z.preprocess(
+  value => value === "" ? undefined : value,
+  z.string().refine(
+    value => Buffer.byteLength(value, "utf8") >= 32 && Buffer.byteLength(value, "utf8") <= 4_096,
+    "GitHub token must contain between 32 and 4096 UTF-8 bytes",
+  ).optional(),
 );
 const optionalPositiveInteger = z.preprocess(
   value => value === "" || value === undefined ? undefined : value,
@@ -117,9 +120,7 @@ export const ConfigSchema = z.object({
   JIRA_API_TOKEN: optionalString,
   JIRA_WEBHOOK_TOKEN: optionalBearerToken,
   JIRA_QASEY_ACCOUNT_ID: z.string().min(1).default("qasey"),
-  GITHUB_APP_ID: optionalString,
-  GITHUB_APP_INSTALLATION_ID: optionalPositiveInteger,
-  GITHUB_APP_PRIVATE_KEY: optionalGitHubPrivateKey,
+  GITHUB_TOKEN: optionalGitHubToken,
   GITHUB_ORG: optionalString,
   GITHUB_WEBHOOK_SECRET: optionalString,
   QASEY_PUBLIC_BASE_URL: z.url().default("http://localhost:4111"),
@@ -316,7 +317,7 @@ export const ConfigSchema = z.object({
     const globalConnectionKeys = [
       "SLACK_BOT_TOKEN", "SLACK_USER_TOKEN", "SLACK_SIGNING_SECRET", "SLACK_SOCKET_MODE_APP_TOKEN",
       "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN", "JIRA_WEBHOOK_TOKEN",
-      "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY", "GITHUB_ORG", "GITHUB_WEBHOOK_SECRET",
+      "GITHUB_TOKEN", "GITHUB_ORG", "GITHUB_WEBHOOK_SECRET",
     ] as const;
     for (const key of globalConnectionKeys) {
       if (value[key] !== undefined) context.addIssue({
@@ -584,37 +585,7 @@ export const ConfigSchema = z.object({
       message: "Production Sandbox leases require DATABASE_URL",
     });
   }
-  const githubAppKeys = ["GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY"] as const;
-  const configuredGitHubAppKeys = githubAppKeys.filter(key => value[key] !== undefined);
-  if (configuredGitHubAppKeys.length > 0 && configuredGitHubAppKeys.length < githubAppKeys.length) {
-    for (const key of githubAppKeys.filter(key => value[key] === undefined)) {
-      context.addIssue({ code: "custom", path: [key], message: `${key} is required when GitHub App authentication is configured` });
-    }
-  }
 });
-
-/**
- * Secret managers commonly flatten multiline PEM values or preserve `\n` as
- * two literal characters. Rebuild a canonical PEM without ever logging its
- * contents. Non-PEM values are left alone so schema/auth validation can report
- * a safe configuration error at the normal boundary.
- */
-export function normalizeGitHubPrivateKey(value: string): string {
-  let candidate = value.trim();
-  if ((candidate.startsWith('"') && candidate.endsWith('"')) || (candidate.startsWith("'") && candidate.endsWith("'"))) {
-    candidate = candidate.slice(1, -1).trim();
-  }
-  candidate = candidate
-    .replace(/\\r\\n|\\n|\\r/gu, "\n")
-    .replace(/\r\n?/gu, "\n")
-    .trim();
-  const envelope = /^-----BEGIN ([A-Z0-9 ]+)-----(.*?)-----END \1-----$/su.exec(candidate);
-  if (!envelope) return candidate;
-  const body = envelope[2]!.replace(/\s+/gu, "");
-  if (!body || !/^[A-Za-z0-9+/]+={0,2}$/u.test(body) || body.length % 4 !== 0) return candidate;
-  const lines = body.match(/.{1,64}/gu) ?? [];
-  return `-----BEGIN ${envelope[1]}-----\n${lines.join("\n")}\n-----END ${envelope[1]}-----\n`;
-}
 
 export type QaseyConfig = z.infer<typeof ConfigSchema>;
 

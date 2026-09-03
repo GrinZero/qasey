@@ -52,9 +52,7 @@ jobs:
             /manifests
       - run: pnpm check
         env:
-          GITHUB_APP_ID: ''
-          GITHUB_APP_INSTALLATION_ID: ''
-          GITHUB_APP_PRIVATE_KEY: ''
+          GITHUB_TOKEN: ''
       - name: Run Admin UI browser gate
         run: pnpm test:browser
       - name: Upload Admin UI browser failure evidence

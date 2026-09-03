@@ -17,17 +17,26 @@ export interface CreatedFixtureLease extends FixtureLeaseRecord {
   sessionToken: string;
 }
 
+export const E2E_FIXTURE_ROLE = "qasey-e2e-fixture-user";
+export const E2E_FIXTURE_PERMISSIONS = [
+  "platform.admin-ui.access",
+  "qasey.agent.execute",
+  "qasey.e2e.execute",
+  "qasey.runs.read",
+  "qasey.runs.write",
+  "qasey.cases.read",
+  "qasey.cases.write",
+  "qasey.results.read",
+  "qasey.sandbox.use",
+] as const;
+
 export class E2EFixtureLeaseService implements E2EFixtureLeaseProvider {
   private readonly memoryLeases = new Map<string, FixtureLeaseRecord>();
-  private readonly baseUrl: string;
 
   constructor(
     private readonly metadata: BuildMetadata,
-    baseUrl: string,
     private readonly database?: PrismaClient,
-  ) {
-    this.baseUrl = baseUrl.replace(/\/$/u, "");
-  }
+  ) {}
 
   version() {
     return {
@@ -37,7 +46,12 @@ export class E2EFixtureLeaseService implements E2EFixtureLeaseProvider {
     };
   }
 
-  async acquire(input: { owner: OwnerScope; runId: string; expectedSourceSha: string }): Promise<E2EFixtureLease> {
+  async healthCheck(): Promise<void> {
+    if (!this.database) throw new Error("Persistent database-backed fixture leases are required for real E2E");
+    await this.database.$queryRaw`SELECT 1`;
+  }
+
+  async acquire(input: { owner: OwnerScope; runId: string; expectedSourceSha: string; baseUrl: string }): Promise<E2EFixtureLease> {
     if (this.metadata.sourceSha !== input.expectedSourceSha) {
       throw new Error(`environment_version_mismatch: expected ${input.expectedSourceSha}, received ${this.metadata.sourceSha}`);
     }
@@ -45,7 +59,7 @@ export class E2EFixtureLeaseService implements E2EFixtureLeaseProvider {
     const lease = await this.create(owner, 1_800);
     return {
       id: lease.id,
-      baseUrl: this.baseUrl,
+      baseUrl: input.baseUrl.replace(/\/$/u, ""),
       sourceSha: this.metadata.sourceSha,
       sessionToken: lease.sessionToken,
     };
@@ -70,7 +84,7 @@ export class E2EFixtureLeaseService implements E2EFixtureLeaseProvider {
     const userId = randomUUID();
     const sessionId = randomUUID();
     const organizationId = `e2e-${id}`;
-    const sessionToken = randomBytes(32).toString("base64url");
+    const sessionToken = `qsy_session_${sessionId}_${randomBytes(32).toString("base64url")}`;
     const expiresAt = new Date(Date.now() + ttlSeconds * 1_000);
     const lease: FixtureLeaseRecord = {
       id,
@@ -84,10 +98,24 @@ export class E2EFixtureLeaseService implements E2EFixtureLeaseProvider {
       await this.database.$transaction(async transaction => {
         await transaction.platformOrganization.create({ data: { id: organizationId, slug: organizationId, displayName: `E2E ${id}` } });
         await transaction.platformUser.create({ data: { id: userId, displayName: "Qasey E2E User" } });
+        await transaction.platformUserIdentity.create({
+          data: {
+            provider: "password",
+            providerSubject: `qasey-e2e-${id}`,
+            userId,
+            email: `e2e-${id}@example.test`,
+            emailVerified: true,
+          },
+        });
         await transaction.platformOrganizationMembership.create({ data: { organizationId, userId, status: "active" } });
         await transaction.platformBrowserSession.create({
           data: { id: sessionId, organizationId, userId, tokenHash: createHash("sha256").update(sessionToken).digest(), expiresAt },
         });
+        await transaction.platformRole.create({ data: { tenantId: organizationId, roleId: E2E_FIXTURE_ROLE } });
+        await transaction.platformRolePermission.createMany({
+          data: E2E_FIXTURE_PERMISSIONS.map(permission => ({ tenantId: organizationId, roleId: E2E_FIXTURE_ROLE, permission })),
+        });
+        await transaction.platformSubjectRole.create({ data: { tenantId: organizationId, subjectId: userId, roleId: E2E_FIXTURE_ROLE } });
         await transaction.qaseyE2EFixtureLease.create({ data: { id, owner, organizationId, userId, sessionId, expiresAt } });
       });
     } else {
@@ -104,15 +132,27 @@ export class E2EFixtureLeaseService implements E2EFixtureLeaseProvider {
     return "deleted";
   }
 
-  private async cleanupExpired(owner: string): Promise<void> {
+  async isActiveFixtureUser(organizationId: string, userId: string): Promise<boolean> {
+    const now = new Date();
+    if (!this.database) {
+      return [...this.memoryLeases.values()].some(lease => lease.organizationId === organizationId
+        && lease.userId === userId && new Date(lease.expiresAt) > now);
+    }
+    return Boolean(await this.database.qaseyE2EFixtureLease.findFirst({
+      where: { organizationId, userId, expiresAt: { gt: now } },
+      select: { id: true },
+    }));
+  }
+
+  private async cleanupExpired(_owner: string): Promise<void> {
     const now = new Date();
     if (!this.database) {
       for (const [id, lease] of this.memoryLeases) {
-        if (lease.owner === owner && new Date(lease.expiresAt) <= now) this.memoryLeases.delete(id);
+        if (new Date(lease.expiresAt) <= now) this.memoryLeases.delete(id);
       }
       return;
     }
-    const expired = await this.database.qaseyE2EFixtureLease.findMany({ where: { owner, expiresAt: { lte: now } } });
+    const expired = await this.database.qaseyE2EFixtureLease.findMany({ where: { expiresAt: { lte: now } } });
     for (const lease of expired) await this.deleteById(lease.id);
   }
 
@@ -131,6 +171,7 @@ export class E2EFixtureLeaseService implements E2EFixtureLeaseProvider {
     }
     await this.database.$transaction(async transaction => {
       await transaction.qaseyE2EFixtureLease.delete({ where: { id: lease.id } });
+      await transaction.platformRole.deleteMany({ where: { tenantId: lease.organizationId } });
       await transaction.platformOrganization.delete({ where: { id: lease.organizationId } });
       await transaction.platformUser.delete({ where: { id: lease.userId } });
     });

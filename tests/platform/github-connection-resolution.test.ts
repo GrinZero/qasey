@@ -14,15 +14,15 @@ const keyring = {
 describe("tenant GitHub connection resolution", () => {
   it("selects an explicit repository owner without crossing tenant boundaries", async () => {
     const store = new InMemoryExternalConnectionStore(keyring);
-    await createConnection(store, "tenant-a", "octo", "app-octo");
-    await createConnection(store, "tenant-a", "other", "app-other");
-    await createConnection(store, "tenant-b", "octo", "app-wrong-tenant");
+    await createConnection(store, "tenant-a", "octo", "octo");
+    await createConnection(store, "tenant-a", "other", "other");
+    await createConnection(store, "tenant-b", "octo", "wrong-tenant");
     const createPublisher = vi.fn(() => new GitHubPublisher());
     const resolver = new TenantGitHubConnectionResolver(store, { createPublisher });
 
     await expect(resolver.publisher("tenant-a", "OCTO")).resolves.toBeInstanceOf(GitHubPublisher);
     expect(createPublisher).toHaveBeenCalledTimes(1);
-    expect(createPublisher).toHaveBeenCalledWith(expect.objectContaining({ GITHUB_APP_ID: "app-octo" }));
+    expect(createPublisher).toHaveBeenCalledWith({ GITHUB_TOKEN: tokenFor("octo") });
   });
 
   it("fails closed when repository selection is ambiguous or missing", async () => {
@@ -39,29 +39,21 @@ describe("tenant GitHub connection resolution", () => {
       .rejects.toMatchObject({ code: "github_connection_not_found" });
   });
 
-  it("issues a tenant-bound short-lived installation token only with one active connection", async () => {
+  it("returns a tenant-bound PAT only with one active connection and observes rotation", async () => {
     const store = new InMemoryExternalConnectionStore(keyring);
-    const connection = await createConnection(store, "tenant-a", "octo", "app-octo");
-    const readToken = vi.fn(async () => "synthetic-installation-token-at-least-32-bytes");
-    const createTokenProvider = vi.fn(() => ({ readToken }));
-    const resolver = new TenantGitHubConnectionResolver(store, { createTokenProvider });
+    const connection = await createConnection(store, "tenant-a", "octo", "octo");
+    const resolver = new TenantGitHubConnectionResolver(store);
 
-    await expect(resolver.installationToken("tenant-a"))
-      .resolves.toBe("synthetic-installation-token-at-least-32-bytes");
-    await expect(resolver.installationToken("tenant-a"))
-      .resolves.toBe("synthetic-installation-token-at-least-32-bytes");
-    expect(createTokenProvider).toHaveBeenCalledTimes(1);
+    await expect(resolver.token("tenant-a")).resolves.toBe(tokenFor("octo"));
 
     await store.update({
       tenantId: "tenant-a",
       id: connection.id,
       expectedRevision: connection.revision,
-      credentials: appCredentials("app-octo-next"),
+      credentials: tokenCredentials("octo-next"),
       actorId: "security-admin",
     });
-    await resolver.installationToken("tenant-a");
-    expect(createTokenProvider).toHaveBeenCalledTimes(2);
-    expect(createTokenProvider).toHaveBeenLastCalledWith(expect.objectContaining({ GITHUB_APP_ID: "app-octo-next" }));
+    await expect(resolver.token("tenant-a")).resolves.toBe(tokenFor("octo-next"));
   });
 
   it("returns only stable errors for malformed credentials", async () => {
@@ -70,15 +62,14 @@ describe("tenant GitHub connection resolution", () => {
       tenantId: "tenant-a",
       provider: "github",
       name: "broken",
-      credentials: { appId: "secret-app-id", installationId: "not-a-number", privateKey: "secret-private-key" },
+      credentials: { token: "short-secret-token" },
       actorId: "admin",
     });
     const resolver = new TenantGitHubConnectionResolver(store);
 
-    const error = await resolver.installationToken("tenant-a").catch(value => value) as TenantGitHubConnectionError;
+    const error = await resolver.token("tenant-a").catch(value => value) as TenantGitHubConnectionError;
     expect(error).toMatchObject({ code: "github_connection_invalid" });
-    expect(error.message).not.toContain("secret-app-id");
-    expect(error.message).not.toContain("secret-private-key");
+    expect(error.message).not.toContain("short-secret-token");
   });
 });
 
@@ -86,23 +77,23 @@ async function createConnection(
   store: InMemoryExternalConnectionStore,
   tenantId: string,
   repositoryOwner: string | undefined,
-  appId: string,
-  suffix = appId,
+  tokenSuffix: string,
+  suffix = tokenSuffix,
 ) {
   return store.create({
     tenantId,
     provider: "github",
     name: `github-${suffix}`,
     ...(repositoryOwner ? { configuration: { repositoryOwner } } : {}),
-    credentials: appCredentials(appId),
+    credentials: tokenCredentials(tokenSuffix),
     actorId: "admin",
   });
 }
 
-function appCredentials(appId: string): Readonly<Record<string, string>> {
-  return {
-    appId,
-    installationId: "12345",
-    privateKey: "synthetic-private-key-value-for-tests",
-  };
+function tokenCredentials(suffix: string): Readonly<Record<string, string>> {
+  return { token: tokenFor(suffix) };
+}
+
+function tokenFor(suffix: string): string {
+  return `synthetic-personal-access-token-${suffix}-at-least-32-bytes`;
 }

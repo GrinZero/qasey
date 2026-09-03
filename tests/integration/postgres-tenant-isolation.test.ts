@@ -10,7 +10,9 @@ import {
 import { freezeE2EContext } from "../../packages/domain/src/e2e-context.ts";
 import { PrismaRunRepository } from "../../packages/domain/src/run-repository.ts";
 import { PrismaApiTokenStore } from "../../src/platform/auth/api-token-store.ts";
+import { GoogleOidcService } from "../../src/platform/auth/google-oidc.ts";
 import { PrismaOrganizationStore } from "../../src/platform/auth/organization-store.ts";
+import { E2E_FIXTURE_PERMISSIONS, E2E_FIXTURE_ROLE, E2EFixtureLeaseService } from "../../src/platform/e2e/fixture-service.ts";
 import {
   PrismaExternalConnectionStore,
   type CredentialKeyring,
@@ -24,6 +26,44 @@ const testDatabaseUrl = process.env.QASEY_TEST_DATABASE_URL?.trim();
 const describeWithPostgres = testDatabaseUrl ? describe : describe.skip;
 
 describeWithPostgres("PostgreSQL tenant isolation", () => {
+  it("provisions an authenticated isolated E2E tenant with an explicit fixture role and removes it", async () => {
+    const database = createApplicationDatabase(requiredTestDatabaseUrl());
+    const sourceSha = "a".repeat(40);
+    const fixtures = new E2EFixtureLeaseService({ schemaVersion: 1, sourceSha }, database.client);
+    const organizations = new PrismaOrganizationStore(database.client);
+    let lease: Awaited<ReturnType<typeof fixtures.create>> | undefined;
+    try {
+      await database.init();
+      await organizations.init();
+      await fixtures.healthCheck();
+      lease = await fixtures.create(`integration:${randomUUID()}`, 60);
+      const oidc = new GoogleOidcService({
+        callbackUrl: "http://runtime.test/auth/google/callback",
+        secureCookies: false,
+        organizationStore: organizations,
+        tenancy: { mode: "single", organizationId: "primary-tenant" },
+        allowSessionOrganization: (organizationId, userId) => fixtures.isActiveFixtureUser(organizationId, userId),
+      });
+      const user = await oidc.getCurrentUser(new Request("http://runtime.test/admin/api/session", {
+        headers: { cookie: `qasey_session=${lease.sessionToken}` },
+      }));
+      expect(user).toMatchObject({ id: lease.userId, tenantId: lease.organizationId, emailVerified: true });
+      await expect(database.client.platformSubjectRole.findUnique({
+        where: { tenantId_subjectId_roleId: { tenantId: lease.organizationId, subjectId: lease.userId, roleId: E2E_FIXTURE_ROLE } },
+      })).resolves.toBeTruthy();
+      await expect(database.client.platformRolePermission.count({
+        where: { tenantId: lease.organizationId, roleId: E2E_FIXTURE_ROLE },
+      })).resolves.toBe(E2E_FIXTURE_PERMISSIONS.length);
+      await fixtures.release({ id: lease.id, baseUrl: "http://qasey:4111", sourceSha, sessionToken: lease.sessionToken });
+      await expect(database.client.platformOrganization.findUnique({ where: { id: lease.organizationId } })).resolves.toBeNull();
+      await expect(database.client.platformUser.findUnique({ where: { id: lease.userId } })).resolves.toBeNull();
+      lease = undefined;
+    } finally {
+      if (lease) await fixtures.deleteForOwner(lease.owner, lease.id).catch(() => undefined);
+      await database.close();
+    }
+  });
+
   it("prevents cross-tenant run, event, heartbeat, and CAS access", async () => {
     const database = createApplicationDatabase(requiredTestDatabaseUrl());
     const ownerA = { applicationId: "qasey", tenantId: randomUUID() };

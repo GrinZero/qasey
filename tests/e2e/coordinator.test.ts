@@ -44,6 +44,10 @@ describe("E2E coordinator", () => {
       changeSetId: "97bb25db-18df-428e-af86-be305ad8b2ff", handoff: handoff(), platform: "web", framework: "playwright",
       playwrightVerification,
     }).success).toBe(false);
+    expect(CreateE2ERunRequestSchema.safeParse({
+      changeSetId: "97bb25db-18df-428e-af86-be305ad8b2ff", handoff: handoff(), platform: "web", framework: "playwright",
+      testEnvironment: { id: "attacker", baseUrl: "https://attacker.example" },
+    }).success).toBe(false);
   });
 
   it("requires trusted verification when a server creates a new run", () => {
@@ -140,16 +144,24 @@ describe("E2E coordinator", () => {
     await expect(repository.get(owner, original.id)).resolves.toMatchObject({ status: "failed", revision: 2 });
   });
 
-  it("requires a Sandbox author pass and an independent verifier pass before a Draft PR", async () => {
+  it("completes the one-Case happy path from Sandbox author through approval and Ready PR", async () => {
     const owner = { applicationId: "qasey", tenantId: "tenant-1" };
     const repository = new InMemoryRunRepository();
     const submitted: CodeTaskSpec[] = [];
-    const runner = fakeRunner(submitted);
+    const submittedSecrets: Array<Readonly<Record<string, string>> | undefined> = [];
+    const runner = fakeRunner(submitted, submittedSecrets);
     const draftPr = broker();
+    const authenticationSecrets = {
+      resolve: vi.fn(async () => ({
+        E2E_LOGIN_EMAIL: "operator@example.test",
+        E2E_LOGIN_PASSWORD: "redacted-password",
+      })),
+    };
     const coordinator = new E2ECoordinator(repository, artifacts(), draftPr, {
       maxRepairs: 2,
       reviewBaseUrl: "https://qasey.test",
       codeTasks: { forScope: vi.fn(async () => runner) } satisfies CodeTaskRunnerProvider,
+      authenticationSecrets,
     });
     const run = await coordinator.create(owner, createInput());
     expect(run.playwrightVerification).toEqual(playwrightVerification);
@@ -171,6 +183,13 @@ describe("E2E coordinator", () => {
       baseSha,
       allowedPaths: ["e2e"],
       skillPaths: [],
+      e2eSkillPath: ".agents/skills/e2e-testing/SKILL.md",
+      e2eAuthentication: {
+        strategy: "repository-playwright-setup",
+        setupPath: "e2e/auth.setup.ts",
+        setupProject: "setup",
+        requiredEnvironment: ["E2E_LOGIN_EMAIL", "E2E_LOGIN_PASSWORD"],
+      },
       specGlobs: ["e2e/**/*.spec.ts"],
       artifactGlobs: [],
       verification: playwrightVerification,
@@ -182,6 +201,7 @@ describe("E2E coordinator", () => {
 
     expect(submitted.map(spec => spec.executionProfileId)).toEqual(["web-e2e-author", "web-e2e-verifier"]);
     expect(submitted[0]?.playwrightVerification).toEqual(frozen?.executionBrief?.repository.verification);
+    expect(frozen?.executionBrief?.repository.testEnvironment).toEqual({ id: "qasey-test", baseUrl: "https://e2e.example.test" });
     expect(submitted[1]?.playwrightVerification).toEqual(frozen?.executionBrief?.repository.verification);
     expect(submitted.map(spec => spec.playwrightVerification)).toEqual([
       playwrightVerification,
@@ -189,6 +209,18 @@ describe("E2E coordinator", () => {
     ]);
     expect(submitted[1]?.attemptId).not.toBe(submitted[0]?.attemptId);
     expect(draftPr.publishChanges).toHaveBeenCalledTimes(1);
+    expect(authenticationSecrets.resolve).toHaveBeenCalledWith({
+      owner,
+      names: ["E2E_LOGIN_EMAIL", "E2E_LOGIN_PASSWORD"],
+    });
+    expect(submittedSecrets).toEqual([
+      undefined,
+      {
+        QASEY_E2E_BASE_URL: "https://e2e.example.test",
+        E2E_LOGIN_EMAIL: "operator@example.test",
+        E2E_LOGIN_PASSWORD: "redacted-password",
+      },
+    ]);
     expect(await repository.get(owner, run.id)).toMatchObject({
       status: "awaiting_qa",
       pullRequestUrl: "https://github.com/o/r/pull/1",
@@ -213,7 +245,15 @@ function createInput() {
       baseRef: "main",
       allowedPaths: ["e2e"],
       skillsPaths: [],
+      e2eSkillPath: ".agents/skills/e2e-testing/SKILL.md",
+      e2eAuthentication: {
+        strategy: "repository-playwright-setup" as const,
+        setupPath: "e2e/auth.setup.ts",
+        setupProject: "setup",
+        requiredEnvironment: ["E2E_LOGIN_EMAIL", "E2E_LOGIN_PASSWORD"],
+      },
     },
+    testEnvironment: { id: "qasey-test", baseUrl: "https://e2e.example.test" },
     playwrightVerification,
   };
 }
@@ -251,13 +291,17 @@ function broker(): DraftPrBroker {
   };
 }
 
-function fakeRunner(submitted: CodeTaskSpec[]): CodeTaskRunner {
+function fakeRunner(
+  submitted: CodeTaskSpec[],
+  submittedSecrets: Array<Readonly<Record<string, string>> | undefined> = [],
+): CodeTaskRunner {
   const specs = new Map<string, CodeTaskSpec>();
   const patchRef = ref("sandbox-patch", "patch", "changes.patch", "sandbox://changes.patch");
   const contentRef = ref("sandbox-content", "report", "a.spec.ts", "sandbox://a.spec.ts");
   return {
-    submit: vi.fn(async spec => {
+    submit: vi.fn(async (spec, secrets) => {
       submitted.push(spec);
+      submittedSecrets.push(secrets?.environment);
       specs.set(spec.taskId, spec);
       return { taskId: spec.taskId, attemptId: spec.attemptId, status: "succeeded" as const };
     }),

@@ -7,7 +7,7 @@ import { RedisServerCache } from "@mastra/redis";
 import { RedisStreamsPubSub } from "@mastra/redis-streams";
 import Redis from "ioredis";
 import { QASEY_TRACE_REQUEST_CONTEXT_KEYS } from "./applications/qasey/observability.ts";
-import { applicationDatabase, closeQaseyInfrastructure, config, createMastraRuntimeStorage, credentialKeyring, externalConnectionStore, failureInboxStore, initializeQaseyInfrastructure, runRepository, sandboxPoolClient } from "./runtime.ts";
+import { applicationDatabase, closeQaseyInfrastructure, config, createMastraRuntimeStorage, credentialKeyring, e2eFixtureLeaseService, externalConnectionStore, failureInboxStore, initializeQaseyInfrastructure, runRepository, sandboxPoolClient } from "./runtime.ts";
 import { createQaseyApplication } from "./applications/qasey/application.ts";
 import * as e2eModule from "./workflows/e2e-workflow.ts";
 import * as scorerModule from "./scorers/eval-scorers.ts";
@@ -255,6 +255,7 @@ const googleOidc = new GoogleOidcService({
     ? { mode: "single", organizationId: singleTenantId! }
     : { mode: "multi" },
   bootstrapMembershipEmails: [...bootstrapAdmins],
+  allowSessionOrganization: (organizationId, userId) => e2eFixtureLeaseService.isActiveFixtureUser(organizationId, userId),
 });
 const passwordAuth = new PasswordAuthService({
   enabled: config.QASEY_PASSWORD_AUTH_ENABLED === true && config.QASEY_TENANCY_MODE === "single",
@@ -426,7 +427,8 @@ const sharedRuntime = createSharedMastraConfig({
           // authorization. Multi-tenant mode resolves an explicit membership
           // below once the organization store is initialized.
           const tenantId = user.tenantId;
-          if (config.QASEY_TENANCY_MODE === "single" && tenantId !== singleTenantId) return undefined;
+          if (config.QASEY_TENANCY_MODE === "single" && tenantId !== singleTenantId
+            && !await e2eFixtureLeaseService.isActiveFixtureUser(tenantId, user.id)) return undefined;
           const roles = browserUserRoles(user, bootstrapAdmins, localAdmins);
           if (permissionStore instanceof InMemoryPermissionStore) {
             permissionStore.grant(
