@@ -17,7 +17,6 @@ const WEB_E2E_ENVIRONMENT_KEYS = [
   ...MODEL_ENVIRONMENT_KEYS,
   "PLAYWRIGHT_BROWSERS_PATH",
   "QASEY_E2E_BASE_URL",
-  "QASEY_E2E_STORAGE_STATE_PATH",
 ] as const;
 
 const PROFILES: Record<ExecutionProfile["id"], ExecutionProfile> = {
@@ -38,7 +37,7 @@ const PROFILES: Record<ExecutionProfile["id"], ExecutionProfile> = {
   "web-e2e-verifier": {
     id: "web-e2e-verifier", useAgent: false, writable: false, permission: "reject",
     allowedCheckIds: ["repo-install", "playwright"],
-    allowedEnvironmentKeys: ["PLAYWRIGHT_BROWSERS_PATH", "QASEY_E2E_BASE_URL", "QASEY_E2E_STORAGE_STATE_PATH"],
+    allowedEnvironmentKeys: ["PLAYWRIGHT_BROWSERS_PATH", "QASEY_E2E_BASE_URL"],
     environmentAliases: WEB_E2E_ENVIRONMENT_ALIASES,
   },
   "code-review-readonly": {

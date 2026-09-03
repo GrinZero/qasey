@@ -7,7 +7,18 @@
       "cloneUrl": "https://github.com/example-org/web-e2e.git",
       "baseRef": "main",
       "allowedPaths": ["web/tests/e2e", "web/pages"],
-      "skillsPaths": [".agents/skills", "skills"]
+      "skillsPaths": [".agents/skills", "skills"],
+      "e2eSkillPath": ".agents/skills/e2e-testing/SKILL.md",
+      "e2eAuthentication": {
+        "strategy": "repository-playwright-setup",
+        "setupPath": "web/tests/e2e/auth.setup.ts",
+        "setupProject": "setup",
+        "requiredEnvironment": ["E2E_LOGIN_EMAIL", "E2E_LOGIN_PASSWORD", "E2E_TEST_TENANT_ID"]
+      }
+    },
+    "environment": {
+      "id": "web-e2e",
+      "baseUrl": "https://e2e.example.test"
     },
     "verification": {
       "strategy": "changed-project-playwright",

@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { relative, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { parseEnv } from "node:util";
 
 export interface RuntimeEnvConfigResult {
@@ -56,13 +56,38 @@ export function resolveRuntimeEnvironment(
     ?? "development";
 }
 
+export function resolveRuntimeEnvRoot(
+  env: NodeJS.ProcessEnv = process.env,
+  startDirectory = process.cwd(),
+): string {
+  const candidates = [env.INIT_CWD, env.MASTRA_PROJECT_ROOT, startDirectory]
+    .filter((candidate): candidate is string => Boolean(candidate?.trim()));
+
+  for (const candidate of candidates) {
+    let current = resolve(candidate);
+    for (;;) {
+      try {
+        const manifest = JSON.parse(readFileSync(resolve(current, "package.json"), "utf8")) as { name?: unknown };
+        if (manifest.name === "qasey") return current;
+      } catch {
+        // Generated Mastra processes start below the repository; keep walking.
+      }
+      const parent = dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+  }
+
+  return resolve(startDirectory);
+}
+
 export function loadRuntimeEnv(options: {
   env?: NodeJS.ProcessEnv;
   cwd?: string;
   defaultEnvironment?: string;
 } = {}): RuntimeEnvConfigResult {
   const env = options.env ?? process.env;
-  const cwd = options.cwd ?? process.cwd();
+  const cwd = options.cwd ?? resolveRuntimeEnvRoot(env);
   const environment = resolveRuntimeEnvironment(env, cwd, options.defaultEnvironment);
   const parsed: Record<string, string> = {};
   const loadedFiles: string[] = [];
@@ -126,12 +151,13 @@ export function createRuntimeEnvLoadReport(
 }
 
 const preexistingEnvKeys = new Set(Object.keys(process.env));
-const envResult = loadRuntimeEnv();
+const envRoot = resolveRuntimeEnvRoot();
+const envResult = loadRuntimeEnv({ cwd: envRoot });
 if (process.env.NODE_ENV !== "test") {
   console.info(JSON.stringify({
     timestamp: new Date().toISOString(),
     level: "info",
     service: "qasey",
-    ...createRuntimeEnvLoadReport(envResult, preexistingEnvKeys),
+    ...createRuntimeEnvLoadReport(envResult, preexistingEnvKeys, envRoot),
   }));
 }

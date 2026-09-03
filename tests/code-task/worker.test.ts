@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ChangedProjectPlaywrightVerification, CodeTaskState } from "../../packages/contracts/src/index.ts";
 import { buildFreshDeviceBwrapArgs, type CodeTaskWorkerManifest } from "../../packages/code-task/src/index.ts";
-import { assertContainedWorkspaceWritePath } from "../../packages/code-task/src/backend.ts";
+import { assertContainedWorkspaceWritePath, repositorySkillPaths } from "../../packages/code-task/src/backend.ts";
 
 const exec = promisify(execFile);
 const cleanups: string[] = [];
@@ -91,6 +91,28 @@ describe("code-task-worker safety boundary", () => {
     await symlink(outside, join(root.workspaceRoot, "generated"));
     await expect(assertContainedWorkspaceWritePath(root.workspaceRoot, "generated/result.txt"))
       .rejects.toThrow(/ancestor symlink outside/iu);
+  });
+
+  it("requires the exact repository E2E Skill inside the checkout", async () => {
+    const root = await createRepository();
+    const skillPath = ".agents/skills/e2e-testing/SKILL.md";
+    await mkdir(join(root.workspaceRoot, dirname(skillPath)), { recursive: true });
+    await writeFile(join(root.workspaceRoot, skillPath), "---\nname: e2e-testing\ndescription: test\n---\n");
+    const context = JSON.stringify({ brief: { repository: { skillPaths: [".agents/skills"] } } });
+
+    await expect(repositorySkillPaths(root.workspaceRoot, context, skillPath)).resolves.toEqual([
+      skillPath,
+      ".agents/skills",
+    ]);
+    await expect(repositorySkillPaths(root.workspaceRoot, context, ".agents/skills/missing/SKILL.md"))
+      .rejects.toThrow(/Required repository E2E Skill was not found/u);
+
+    const outsideSkill = join(root.repositoryRoot, "outside-skill.md");
+    await writeFile(outsideSkill, "---\nname: outside\ndescription: outside\n---\n");
+    await rm(join(root.workspaceRoot, skillPath));
+    await symlink(outsideSkill, join(root.workspaceRoot, skillPath));
+    await expect(repositorySkillPaths(root.workspaceRoot, context, skillPath))
+      .rejects.toThrow(/resolves outside the task workspace/u);
   });
 
   it("hydrates dependencies with lifecycle scripts disabled", async () => {
@@ -181,7 +203,7 @@ async function runWorker(
       contextRef: { id: "context", kind: "report", name: "context.json", uri: "file:///context.json" },
       contextHash: createHash("sha256").update(context).digest("hex"),
       repositories: [{ owner: "example-org", repository: "web-e2e", destination: "target", mode: "write", baseRef: "main", baseSha: root.baseSha }],
-      baseSha: root.baseSha, executionProfileId: "web-e2e-verifier", allowedPaths: ["tests"], fixedChecks, deadlineMs: 60_000,
+      baseSha: root.baseSha, executionProfileId: "web-e2e-verifier", allowedPaths: ["tests"], fixedChecks, e2eRequiredEnvironment: [], deadlineMs: 60_000,
       traceContext: { traceId: "trace-worker-test" },
       ...(playwrightVerification ? { playwrightVerification } : {}),
     },

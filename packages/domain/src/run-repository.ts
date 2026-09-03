@@ -283,7 +283,7 @@ const allowedTransitions: Record<RunStatus, RunStatus[]> = {
   author_running: ["repairing", "clean_verifying", "cancelled", "failed"],
   repairing: ["preparing_workspace", "author_running", "cancelled", "failed"],
   clean_verifying: ["awaiting_qa", "cancelled", "failed"],
-  awaiting_qa: ["repairing", "clean_verifying", "succeeded", "cancelled"],
+  awaiting_qa: ["repairing", "clean_verifying", "succeeded", "failed", "cancelled"],
   succeeded: [], failed: [], cancelled: [],
 };
 

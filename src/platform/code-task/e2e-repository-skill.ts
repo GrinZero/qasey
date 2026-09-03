@@ -3,15 +3,23 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   ChangedProjectPlaywrightVerificationSchema,
+  E2EAuthenticationSchema,
+  E2EProjectSkillPathSchema,
+  E2ETestEnvironmentSchema,
   RepositoryProfileSchema,
   type ChangedProjectPlaywrightVerification,
+  type E2ETestEnvironment,
   type RepositoryProfile,
 } from "../../../packages/contracts/src/index.ts";
 
 const RepositorySkillReferenceSchema = z.object({
   version: z.literal(1),
   web: z.object({
-    target: RepositoryProfileSchema,
+    target: RepositoryProfileSchema.extend({
+      e2eSkillPath: E2EProjectSkillPathSchema,
+      e2eAuthentication: E2EAuthenticationSchema,
+    }).strict(),
+    environment: E2ETestEnvironmentSchema,
     verification: ChangedProjectPlaywrightVerificationSchema,
     contextRepositories: z.array(z.unknown()).default([]),
   }).strict(),
@@ -36,6 +44,13 @@ const RepositorySkillReferenceSchema = z.object({
       });
     }
   }
+  if (!verification.projects.some(project => isWithin(target.e2eAuthentication.setupPath, project.root))) {
+    context.addIssue({
+      code: "custom",
+      path: ["web", "target", "e2eAuthentication", "setupPath"],
+      message: "The Playwright authentication setup must be inside a fixed verification project root",
+    });
+  }
 });
 
 function repositoryReference(configFile?: string) {
@@ -50,13 +65,17 @@ function repositoryReference(configFile?: string) {
 }
 
 export interface WebE2EConfiguration {
-  target: RepositoryProfile;
+  target: RepositoryProfile & {
+    e2eSkillPath: string;
+    e2eAuthentication: { strategy: "repository-playwright-setup"; setupPath: string; setupProject: string; requiredEnvironment: string[] };
+  };
+  environment: E2ETestEnvironment;
   verification: ChangedProjectPlaywrightVerification;
 }
 
 export function webE2EConfigurationFromSkill(configFile?: string): WebE2EConfiguration {
   const snapshot = repositoryReference(configFile).web;
-  return { target: snapshot.target, verification: snapshot.verification };
+  return { target: snapshot.target, environment: snapshot.environment, verification: snapshot.verification };
 }
 
 export function webE2ERepositoryFromSkill(configFile?: string): RepositoryProfile {

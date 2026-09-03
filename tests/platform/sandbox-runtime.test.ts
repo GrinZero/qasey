@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import type { CommandResult, ExecuteCommandOptions } from "@mastra/core/workspace";
 import type { Browser } from "@playwright/test";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { CodeTaskSpec } from "../../packages/contracts/src/index.ts";
 import { InMemorySandboxLeaseStore } from "../../src/platform/workspace/sandbox-lease-store.ts";
 import { SandboxPoolClient } from "../../src/platform/workspace/sandbox-client.ts";
 import { signSandboxControlToken } from "../../src/platform/workspace/sandbox-control-token.ts";
@@ -33,6 +34,66 @@ afterEach(async () => {
 });
 
 describe("sandbox runtime protocol", () => {
+  it("passes only declared authentication variables to the non-Agent verifier", () => {
+    const runtime = new QaseySandboxRuntime({
+      dataRoot: "/tmp/qasey-secret-contract-test", port: 0, host: "127.0.0.1", maxSessions: 1,
+      idleTtlMs: 60_000, isolation: "none", commandTimeoutMs: 10_000,
+      workspaceRetentionMs: 60_000, controlKey: TEST_CONTROL_KEY,
+    });
+    const verifierSpec: CodeTaskSpec = {
+      taskId: "secret-contract", attemptId: "attempt", kind: "author",
+      scope: { applicationId: "qasey", tenantId: "tenant", sessionId: "session" },
+      contextRef: { id: "context", kind: "report", name: "context.json", uri: "sandbox://context" },
+      contextHash: "a".repeat(64),
+      repositories: [{ owner: "example", repository: "web", destination: "target", mode: "write", baseRef: "main", baseSha: "b".repeat(40) }],
+      baseSha: "b".repeat(40), executionProfileId: "web-e2e-verifier", allowedPaths: ["e2e"],
+      fixedChecks: [], e2eRequiredEnvironment: ["E2E_LOGIN_EMAIL", "E2E_LOGIN_PASSWORD"], deadlineMs: 60_000, traceContext: {},
+    };
+    const internals = runtime as unknown as {
+      codeTaskWorkerEnvironment(
+        session: { environment: NodeJS.ProcessEnv },
+        spec: CodeTaskSpec,
+        taskRoot: string,
+        secrets?: Readonly<Record<string, string>>,
+      ): NodeJS.ProcessEnv;
+    };
+    const environment = internals.codeTaskWorkerEnvironment(
+      { environment: { PATH: "/usr/bin" } },
+      verifierSpec,
+      "/tmp/qasey-secret-contract-test/task",
+      {
+        QASEY_E2E_BASE_URL: "https://e2e.example.test",
+        E2E_LOGIN_EMAIL: "operator@example.test",
+        E2E_LOGIN_PASSWORD: " secret-with-spaces ",
+      },
+    );
+
+    expect(environment).toMatchObject({
+      BASE_URL: "https://e2e.example.test",
+      E2E_LOGIN_EMAIL: "operator@example.test",
+      E2E_LOGIN_PASSWORD: " secret-with-spaces ",
+    });
+    expect(() => internals.codeTaskWorkerEnvironment(
+      { environment: { PATH: "/usr/bin" } }, verifierSpec, "/tmp/task",
+      { QASEY_E2E_BASE_URL: "https://e2e.example.test", E2E_LOGIN_EMAIL: "operator@example.test" },
+    )).toThrow(/Missing E2E secret environment variables: E2E_LOGIN_PASSWORD/u);
+    expect(() => internals.codeTaskWorkerEnvironment(
+      { environment: { PATH: "/usr/bin" } }, verifierSpec, "/tmp/task",
+      {
+        QASEY_E2E_BASE_URL: "https://e2e.example.test",
+        E2E_LOGIN_EMAIL: "operator@example.test",
+        E2E_LOGIN_PASSWORD: "redacted",
+        UNDECLARED_SECRET: "must-not-pass",
+      },
+    )).toThrow(/Unexpected E2E secret environment variables: UNDECLARED_SECRET/u);
+    expect(() => internals.codeTaskWorkerEnvironment(
+      { environment: { PATH: "/usr/bin" } },
+      { ...verifierSpec, executionProfileId: "web-e2e-author" },
+      "/tmp/task",
+      { E2E_LOGIN_EMAIL: "operator@example.test" },
+    )).toThrow(/restricted to the verifier profile/u);
+  });
+
   it("gates readiness on the fresh device contract", () => {
     expect(SANDBOX_READINESS_PROBE).toContain("test -c /dev/null");
     expect(SANDBOX_READINESS_PROBE).toContain("test -c /dev/urandom");
@@ -296,7 +357,7 @@ describe("sandbox runtime protocol", () => {
         baseRef: "main", baseSha: "a".repeat(40),
       }],
       baseSha: "a".repeat(40), executionProfileId: "web-e2e-author" as const,
-      allowedPaths: ["tests"], fixedChecks: [], deadlineMs: 60_000, traceContext: {},
+      allowedPaths: ["tests"], fixedChecks: [], e2eSkillPath: ".agents/skills/e2e-testing/SKILL.md", e2eRequiredEnvironment: [], deadlineMs: 60_000, traceContext: {},
     };
 
     const starting = session.codeTaskStart(spec, context);
@@ -600,6 +661,7 @@ describe("sandbox runtime protocol", () => {
 
   it("persists contained files and executes commands for an authenticated session", async () => {
     vi.stubEnv("PLAYWRIGHT_BROWSERS_PATH", "/ms-playwright");
+    vi.stubEnv("OPENAI_API_KEY", "public-test-placeholder");
     const dataRoot = await mkdtemp(join(tmpdir(), "qasey-sandbox-runtime-"));
     const runtime = new QaseySandboxRuntime({
       dataRoot, port: 0, host: "127.0.0.1", maxSessions: 2, idleTtlMs: 60_000, isolation: "none",
@@ -619,6 +681,8 @@ describe("sandbox runtime protocol", () => {
       githubTokenForScope: async () => "synthetic-installation-token-0000000000",
     });
     await expect(pool.healthCheck()).resolves.toBeUndefined();
+    await expect(pool.codeAgentHealthCheck()).resolves.toBeUndefined();
+    expect(() => pool.assertTestEnvironmentAddress("http://127.0.0.1:4111")).not.toThrow();
     await expect(pool.capacity()).resolves.toEqual({
       replicas: 1,
       active: 0,
@@ -664,6 +728,19 @@ describe("sandbox runtime protocol", () => {
       body: JSON.stringify({ operation: "exists", path: "hello.txt" }),
     });
     expect(unauthorized.status).toBe(401);
+  });
+
+  it("rejects a loopback test URL for a remotely-networked Sandbox", async () => {
+    const leases = new InMemorySandboxLeaseStore({ replicas: 1, maxSessionsPerReplica: 1, idleTtlMs: 60_000, encryptionKey: "test-key" });
+    await leases.init();
+    const pool = new SandboxPoolClient(leases, {
+      endpointTemplate: "http://sandbox-0:4120",
+      replicas: 1,
+      requestTimeoutMs: 10_000,
+      controlKey: TEST_CONTROL_KEY,
+    });
+    expect(() => pool.assertTestEnvironmentAddress("http://localhost:4111")).toThrow(/loopback-only/u);
+    expect(() => pool.assertTestEnvironmentAddress("http://qasey:4111")).not.toThrow();
   });
 
   it("aborts and drains an execute request before stop destroys its sandbox", async () => {
@@ -990,7 +1067,7 @@ describe("sandbox runtime protocol", () => {
       contextRef: { id: "context", kind: "report" as const, name: "context.json", uri: "sandbox://context.json" },
       contextHash: createHash("sha256").update(context).digest("hex"),
       repositories: [{ owner: "example-org", repository: "web-e2e", destination: "target", mode: "write" as const, baseRef: "main", baseSha: "a".repeat(40) }],
-      baseSha: "a".repeat(40), executionProfileId: "web-e2e-author" as const, allowedPaths: ["tests"], fixedChecks: [], deadlineMs: 60_000, traceContext: {},
+      baseSha: "a".repeat(40), executionProfileId: "web-e2e-author" as const, allowedPaths: ["tests"], fixedChecks: [], e2eSkillPath: ".agents/skills/e2e-testing/SKILL.md", e2eRequiredEnvironment: [], deadlineMs: 60_000, traceContext: {},
     };
 
     const firstStart = session.codeTaskStart(spec, context);

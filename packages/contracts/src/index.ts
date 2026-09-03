@@ -99,6 +99,52 @@ export const RunStatusSchema = z.enum([
 ]);
 export type RunStatus = z.infer<typeof RunStatusSchema>;
 
+export const E2EProjectSkillPathSchema = z.string().min(1).max(1_000)
+  .refine(value => !value.startsWith("/") && !value.startsWith("\\"), "E2E project Skill path must be relative")
+  .refine(value => !value.includes("\\"), "E2E project Skill path must use canonical POSIX separators")
+  .refine(value => value.split("/").every(segment => segment !== "." && segment !== ".." && segment.length > 0), "E2E project Skill path cannot contain dot or empty segments")
+  .refine(value => value === "SKILL.md" || value.endsWith("/SKILL.md"), "E2E project Skill path must point to a SKILL.md file");
+
+export const E2EAuthenticationSetupPathSchema = z.string().min(1).max(1_000)
+  .refine(value => !value.startsWith("/") && !value.startsWith("\\"), "E2E authentication setup path must be relative")
+  .refine(value => !value.includes("\\"), "E2E authentication setup path must use canonical POSIX separators")
+  .refine(value => value.split("/").every(segment => segment !== "." && segment !== ".." && segment.length > 0), "E2E authentication setup path cannot contain dot or empty segments")
+  .refine(value => /\.(?:[cm]?[jt]s|[jt]sx)$/u.test(value), "E2E authentication setup path must point to executable JavaScript or TypeScript");
+
+const E2EAuthenticationEnvironmentNameSchema = z.string().regex(/^[A-Z][A-Z0-9_]{0,99}$/u);
+
+function validateE2EAuthenticationEnvironment(
+  value: readonly string[],
+  context: z.RefinementCtx,
+  pathPrefix: Array<string | number> = [],
+): void {
+  const reserved = new Set(["BASE_URL", "CI", "HOME", "PATH", "PLAYWRIGHT_BROWSERS_PATH"]);
+  const names = new Set<string>();
+  for (const [index, name] of value.entries()) {
+    if (names.has(name)) {
+      context.addIssue({ code: "custom", path: [...pathPrefix, index], message: `Authentication environment variable ${name} is duplicated` });
+    }
+    if (reserved.has(name) || name.startsWith("QASEY_")) {
+      context.addIssue({
+        code: "custom",
+        path: [...pathPrefix, index],
+        message: `Authentication environment variable ${name} is reserved by the verifier`,
+      });
+    }
+    names.add(name);
+  }
+}
+
+export const E2EAuthenticationSchema = z.object({
+  strategy: z.literal("repository-playwright-setup"),
+  setupPath: E2EAuthenticationSetupPathSchema,
+  setupProject: z.string().regex(/^[A-Za-z0-9._-]{1,100}$/u),
+  requiredEnvironment: z.array(E2EAuthenticationEnvironmentNameSchema).min(1).max(32),
+}).strict().superRefine((value, context) => {
+  validateE2EAuthenticationEnvironment(value.requiredEnvironment, context, ["requiredEnvironment"]);
+});
+export type E2EAuthentication = z.infer<typeof E2EAuthenticationSchema>;
+
 export const RepositoryProfileSchema = z.object({
   owner: z.string().min(1),
   repository: z.string().min(1),
@@ -106,9 +152,17 @@ export const RepositoryProfileSchema = z.object({
   baseRef: z.string().min(1).default("main"),
   allowedPaths: z.array(z.string().min(1)).min(1),
   skillsPaths: z.array(z.string()).default([".agents/skills", ".claude/skills", "skills"]),
+  e2eSkillPath: E2EProjectSkillPathSchema.optional(),
+  e2eAuthentication: E2EAuthenticationSchema.optional(),
   installCommand: z.array(z.string()).optional(),
 });
 export type RepositoryProfile = z.infer<typeof RepositoryProfileSchema>;
+
+export const E2ETestEnvironmentSchema = z.object({
+  id: z.string().min(1).max(100),
+  baseUrl: z.url(),
+}).strict();
+export type E2ETestEnvironment = z.infer<typeof E2ETestEnvironmentSchema>;
 
 export const ArtifactRefSchema = z.object({
   id: z.string().min(1),
@@ -391,11 +445,21 @@ export const CodeTaskSpecSchema = z.object({
   executionProfileId: z.enum(["web-e2e-author", "web-e2e-repair", "web-e2e-verifier", "code-review-readonly"]),
   allowedPaths: z.array(RelativeWorkspacePathSchema).max(100),
   fixedChecks: z.array(FixedCheckRefSchema).max(20).default([]),
+  e2eSkillPath: E2EProjectSkillPathSchema.optional(),
+  e2eRequiredEnvironment: z.array(E2EAuthenticationEnvironmentNameSchema).max(32).default([]),
   deadlineMs: z.number().int().min(1_000).max(30 * 60_000),
   traceContext: CodeTaskTraceContextSchema.default({}),
   inputPatchRef: ArtifactRefSchema.optional(),
   playwrightVerification: ChangedProjectPlaywrightVerificationSchema.optional(),
 }).strict().superRefine((value, context) => {
+  validateE2EAuthenticationEnvironment(value.e2eRequiredEnvironment, context, ["e2eRequiredEnvironment"]);
+  if (["web-e2e-author", "web-e2e-repair"].includes(value.executionProfileId) && !value.e2eSkillPath) {
+    context.addIssue({
+      code: "custom",
+      path: ["e2eSkillPath"],
+      message: "E2E authoring requires a frozen repository-local project Skill",
+    });
+  }
   if (value.fixedChecks.some(check => check.id === "playwright") && !value.playwrightVerification) {
     context.addIssue({
       code: "custom",
@@ -489,10 +553,15 @@ export const E2ERepositoryExecutionSchema = z.object({
   baseSha: z.string().regex(/^[a-f0-9]{40,64}$/u).optional(),
   allowedPaths: z.array(z.string().min(1)).min(1),
   skillPaths: z.array(z.string().min(1)).default([]),
+  // Optional only while decoding execution briefs created before repository-
+  // local E2E Skills became mandatory. New authoring rejects a missing value.
+  e2eSkillPath: E2EProjectSkillPathSchema.optional(),
+  e2eAuthentication: E2EAuthenticationSchema.optional(),
   installCommand: z.array(z.string()).optional(),
   testCommand: z.array(z.string()).optional(),
   specGlobs: z.array(z.string()).default([]),
   artifactGlobs: z.array(z.string()).default([]),
+  testEnvironment: E2ETestEnvironmentSchema.optional(),
   verification: ChangedProjectPlaywrightVerificationSchema,
 }).strict();
 export type E2ERepositoryExecution = z.infer<typeof E2ERepositoryExecutionSchema>;
@@ -537,6 +606,9 @@ export const E2ERunSchema = z.object({
   amendments: z.array(E2EAmendmentSchema).default([]),
   codeTaskIds: z.array(z.string()).default([]),
   repository: RepositoryProfileSchema,
+  // Optional only while decoding historical runs created before the test
+  // environment address became part of the frozen run contract.
+  testEnvironment: E2ETestEnvironmentSchema.optional(),
   platform: E2EPlatformSchema,
   framework: E2EFrameworkSchema,
   status: RunStatusSchema,
@@ -560,6 +632,7 @@ export const CreateE2ERunSchema = z.object({
   handoff: E2EContextDraftSchema,
   // Execution commands are server-owned and can never be submitted by a browser/API client.
   repository: SubmittedRepositoryProfileSchema,
+  testEnvironment: E2ETestEnvironmentSchema,
   playwrightVerification: ChangedProjectPlaywrightVerificationSchema,
   platform: E2EPlatformSchema,
   framework: E2EFrameworkSchema,
@@ -569,6 +642,7 @@ export const CreateE2ERunRequestSchema = CreateE2ERunSchema.omit({
   requestId: true,
   sourceSessionId: true,
   repository: true,
+  testEnvironment: true,
   playwrightVerification: true,
 }).strict();
 export type CreateE2ERunRequest = z.infer<typeof CreateE2ERunRequestSchema>;

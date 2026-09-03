@@ -10,14 +10,16 @@ let manifest: { scripts?: Record<string, string> } = {};
 let playwrightConfig = "";
 let dogfoodPlaywrightConfig = "";
 let browserSuite = "";
+let dogfoodAuthSetup = "";
 
 beforeAll(async () => {
-  [workflow, manifest, playwrightConfig, dogfoodPlaywrightConfig, browserSuite] = await Promise.all([
+  [workflow, manifest, playwrightConfig, dogfoodPlaywrightConfig, browserSuite, dogfoodAuthSetup] = await Promise.all([
     readFile(resolve(projectRoot, ".github/workflows/ci.yml"), "utf8"),
     readFile(resolve(projectRoot, "package.json"), "utf8").then(source => JSON.parse(source) as typeof manifest),
     readFile(resolve(projectRoot, "playwright.config.ts"), "utf8"),
     readFile(resolve(projectRoot, "tests/browser/playwright.config.ts"), "utf8"),
     readFile(resolve(projectRoot, "tests/browser/admin-ui.spec.ts"), "utf8"),
+    readFile(resolve(projectRoot, "tests/browser/auth.setup.ts"), "utf8"),
   ]);
 });
 
@@ -36,7 +38,7 @@ describe("Admin UI browser gate", () => {
       "/admin/api/session",
       "/admin/api/catalog",
       "/admin/api/applications",
-      "/v1/runs",
+      "/v1/case-hub/runs",
     ]) {
       expect(browserSuite).toContain(endpoint);
     }
@@ -60,12 +62,20 @@ describe("Admin UI browser gate", () => {
     expect(playwrightConfig).toContain('screenshot: "only-on-failure"');
   });
 
-  it("keeps real dogfood evidence in a separate always-recording config", () => {
+  it("connects live dogfood verification to the repository-owned login setup", () => {
     expect(dogfoodPlaywrightConfig).toContain('video: "on"');
     expect(dogfoodPlaywrightConfig).toContain('trace: "on"');
     expect(dogfoodPlaywrightConfig).toContain('["json"');
     expect(dogfoodPlaywrightConfig).toContain('["html"');
-    expect(dogfoodPlaywrightConfig).toContain("QASEY_E2E_STORAGE_STATE_PATH");
+    expect(dogfoodPlaywrightConfig).toContain('dependencies: ["setup"]');
+    expect(dogfoodPlaywrightConfig).toContain("storageState: authStatePath");
+    expect(dogfoodPlaywrightConfig).toContain("process.env.BASE_URL");
+    expect(dogfoodPlaywrightConfig).not.toContain("QASEY_E2E_STORAGE_STATE_PATH");
+    for (const name of ["E2E_LOGIN_EMAIL", "E2E_LOGIN_PASSWORD", "E2E_TEST_TENANT_ID"]) {
+      expect(dogfoodAuthSetup).toContain(name);
+    }
+    expect(dogfoodAuthSetup).toContain('/auth/password/login');
+    expect(dogfoodAuthSetup).toContain("storageState");
   });
 
   it("keeps workflow actions immutable and permissions read-only", () => {

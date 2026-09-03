@@ -87,6 +87,10 @@ services:
       QASEY_ENABLE_DATADOG: ${QASEY_ENABLE_DATADOG:-false}
     ports:
       - "${QASEY_APP_PORT:-4111}:4111"
+    networks:
+      default:
+        aliases:
+          - qasey
     depends_on:
       dev-migrate:
         condition: service_completed_successfully

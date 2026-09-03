@@ -1,7 +1,7 @@
 import {
-  GitHubInstallationTokenProvider,
   GitHubPublisher,
   createGitHubClient,
+  type GitHubTokenConfig,
 } from "../../../packages/adapters/src/github.ts";
 import type { ExternalConnectionStore, RuntimeExternalConnection } from "./connection-store.ts";
 
@@ -21,28 +21,19 @@ export class TenantGitHubConnectionError extends Error {
   }
 }
 
-interface GitHubAppCredentials {
-  GITHUB_APP_ID: string;
-  GITHUB_APP_INSTALLATION_ID: number;
-  GITHUB_APP_PRIVATE_KEY: string;
-}
-
 interface TenantGitHubConnectionResolverOptions {
-  createPublisher?: (credentials: GitHubAppCredentials) => GitHubPublisher;
-  createTokenProvider?: (credentials: GitHubAppCredentials) => Pick<GitHubInstallationTokenProvider, "readToken">;
+  createPublisher?: (credentials: GitHubTokenConfig) => GitHubPublisher;
   maxCachedConnections?: number;
 }
 
 /**
- * Resolves GitHub App credentials at request time from the tenant-owned,
+ * Resolves GitHub PAT credentials at request time from the tenant-owned,
  * encrypted connection registry. Public connection configuration may contain
  * only a repository owner selector; every credential remains encrypted at rest.
  */
 export class TenantGitHubConnectionResolver {
   private readonly publishers = new Map<string, GitHubPublisher>();
-  private readonly tokenProviders = new Map<string, Pick<GitHubInstallationTokenProvider, "readToken">>();
-  private readonly createPublisher: (credentials: GitHubAppCredentials) => GitHubPublisher;
-  private readonly createTokenProvider: (credentials: GitHubAppCredentials) => Pick<GitHubInstallationTokenProvider, "readToken">;
+  private readonly createPublisher: (credentials: GitHubTokenConfig) => GitHubPublisher;
   private readonly maxCachedConnections: number;
 
   constructor(
@@ -50,7 +41,6 @@ export class TenantGitHubConnectionResolver {
     options: TenantGitHubConnectionResolverOptions = {},
   ) {
     this.createPublisher = options.createPublisher ?? (credentials => new GitHubPublisher(createGitHubClient(credentials)));
-    this.createTokenProvider = options.createTokenProvider ?? (credentials => new GitHubInstallationTokenProvider(credentials));
     this.maxCachedConnections = options.maxCachedConnections ?? 100;
     if (!Number.isInteger(this.maxCachedConnections) || this.maxCachedConnections < 1) {
       throw new RangeError("maxCachedConnections must be a positive integer");
@@ -62,27 +52,17 @@ export class TenantGitHubConnectionResolver {
     const key = cacheKey(connection);
     const cached = this.publishers.get(key);
     if (cached) return cached;
-    const publisher = this.safeCreate(() => this.createPublisher(githubAppCredentials(connection)));
+    const publisher = this.safeCreate(() => this.createPublisher(githubTokenCredentials(connection)));
     this.remember(this.publishers, key, publisher);
     return publisher;
   }
 
-  async installationToken(tenantId: string): Promise<string> {
+  async token(tenantId: string): Promise<string> {
     const connections = await this.activeConnections(tenantId);
     if (connections.length === 0) throw new TenantGitHubConnectionError("github_connection_not_found");
     if (connections.length !== 1) throw new TenantGitHubConnectionError("github_connection_ambiguous");
     const connection = connections[0]!;
-    const key = cacheKey(connection);
-    let provider = this.tokenProviders.get(key);
-    if (!provider) {
-      provider = this.safeCreate(() => this.createTokenProvider(githubAppCredentials(connection)));
-      this.remember(this.tokenProviders, key, provider);
-    }
-    try {
-      return await provider.readToken();
-    } catch {
-      throw new TenantGitHubConnectionError("github_connection_invalid");
-    }
+    return githubTokenCredentials(connection).GITHUB_TOKEN!;
   }
 
   private async activeConnections(tenantId: string): Promise<readonly RuntimeExternalConnection[]> {
@@ -131,18 +111,12 @@ function configuredOwner(connection: RuntimeExternalConnection): string | undefi
   return value.trim().toLowerCase();
 }
 
-function githubAppCredentials(connection: RuntimeExternalConnection): GitHubAppCredentials {
-  const appId = connection.credentials.appId?.trim();
-  const privateKey = connection.credentials.privateKey?.trim();
-  const installationId = Number(connection.credentials.installationId);
-  if (!appId || !privateKey || !Number.isSafeInteger(installationId) || installationId < 1) {
+function githubTokenCredentials(connection: RuntimeExternalConnection): GitHubTokenConfig {
+  const token = connection.credentials.token?.trim();
+  if (!token || Buffer.byteLength(token, "utf8") < 32 || Buffer.byteLength(token, "utf8") > 4_096) {
     throw new TenantGitHubConnectionError("github_connection_invalid");
   }
-  return {
-    GITHUB_APP_ID: appId,
-    GITHUB_APP_INSTALLATION_ID: installationId,
-    GITHUB_APP_PRIVATE_KEY: privateKey,
-  };
+  return { GITHUB_TOKEN: token };
 }
 
 function cacheKey(connection: RuntimeExternalConnection): string {

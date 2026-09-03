@@ -65,7 +65,7 @@ describe("same-origin Admin UI", () => {
     const adminUiHtml = await loadAdminUiHtml();
     expect(adminUiHtml).toContain("Qasey");
     expect(adminUiHtml).not.toContain("/studio/api/agents/");
-    expect(adminUiHtml).toContain("/v1/runs");
+    expect(adminUiHtml).toContain("/v1/case-hub/runs");
     expect(adminUiHtml).not.toContain("/studio/api/workflows/");
     expect(adminUiHtml).toContain("/v1/qasey/tasks");
     expect(app.routes?.find(route => route.id === "audit")?.access.permission).toBe("platform.audit.read");

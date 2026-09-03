@@ -18,11 +18,21 @@ describe("fixed Web E2E repository execution configuration", () => {
       "web/tests/e2e",
       "web/pages",
     ]));
+    expect(webE2ERepositoryFromSkill(configFile).e2eSkillPath).toBe(".agents/skills/e2e-testing/SKILL.md");
+    expect(webE2ERepositoryFromSkill(configFile)).toMatchObject({
+      e2eAuthentication: {
+        strategy: "repository-playwright-setup",
+        setupPath: "web/tests/e2e/auth.setup.ts",
+        setupProject: "setup",
+        requiredEnvironment: ["E2E_LOGIN_EMAIL", "E2E_LOGIN_PASSWORD", "E2E_TEST_TENANT_ID"],
+      },
+    });
   });
 
   it("loads the repository target and verification policy from one trusted snapshot", () => {
     const snapshot = webE2EConfigurationFromSkill(configFile);
     expect(snapshot.target.repository).toBe("web-e2e");
+    expect(snapshot.environment).toEqual({ id: "web-e2e", baseUrl: "https://e2e.example.test" });
     expect(snapshot.verification.projects[0]).toMatchObject({
       root: "web",
       config: "web/playwright.config.ts",
@@ -93,6 +103,38 @@ describe("fixed Web E2E repository execution configuration", () => {
       parsed.web.target.allowedPaths.push("unverified/path");
       writeFileSync(target, JSON.stringify(parsed));
       expect(() => webE2EConfigurationFromSkill(target)).toThrow(/writable path must be covered/u);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("requires one exact repository-local E2E Skill file", () => {
+    const directory = mkdtempSync(join(tmpdir(), "qasey-e2e-config-"));
+    const target = join(directory, "repository.json");
+    try {
+      const parsed = JSON.parse(readFileSync(configFile, "utf8")) as { web: { target: { e2eSkillPath?: string } } };
+      delete parsed.web.target.e2eSkillPath;
+      writeFileSync(target, JSON.stringify(parsed));
+      expect(() => webE2EConfigurationFromSkill(target)).toThrow(/e2eSkillPath/u);
+
+      parsed.web.target.e2eSkillPath = "../shared/SKILL.md";
+      writeFileSync(target, JSON.stringify(parsed));
+      expect(() => webE2EConfigurationFromSkill(target)).toThrow(/dot or empty segments/u);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("requires a non-reserved authentication environment contract", () => {
+    const directory = mkdtempSync(join(tmpdir(), "qasey-e2e-config-"));
+    const target = join(directory, "repository.json");
+    try {
+      const parsed = JSON.parse(readFileSync(configFile, "utf8")) as {
+        web: { target: { e2eAuthentication?: { strategy: string; setupPath: string; setupProject: string; requiredEnvironment: string[] } } };
+      };
+      parsed.web.target.e2eAuthentication = { strategy: "repository-playwright-setup", setupPath: "web/tests/e2e/auth.setup.ts", setupProject: "setup", requiredEnvironment: ["BASE_URL"] };
+      writeFileSync(target, JSON.stringify(parsed));
+      expect(() => webE2EConfigurationFromSkill(target)).toThrow(/strategy|reserved/u);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

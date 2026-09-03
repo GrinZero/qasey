@@ -13,7 +13,8 @@ import {
   type QaVerdict,
 } from "../../../packages/contracts/src/index.ts";
 import { caseHubVersionToTestCase, type CaseExecutionObservation } from "../../../packages/domain/src/index.ts";
-import { artifactStore, caseHubRepository, config, e2eCoordinator, getRuntimeContext, githubClient, runRepository } from "../runtime.ts";
+import { artifactStore, caseHubRepository, config, e2eCoordinator, e2ePreflight, getRuntimeContext, githubClient, runRepository } from "../runtime.ts";
+import { webE2EConfigurationFromSkill } from "../../platform/code-task/e2e-repository-skill.ts";
 import { ownerScopeFromRequestContext } from "../../platform/context/owner-scope.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY, PlatformRequestContextSchema } from "../../platform/context/schema.ts";
 import { startQaseyCorrelatedSpan } from "../applications/qasey/observability.ts";
@@ -45,6 +46,12 @@ const freezeExecutionBriefStep = createStep({
     if (run.contextSnapshot.blockingQuestions.length > 0) {
       throw new Error(`E2E context has unresolved blocking questions: ${run.contextSnapshot.blockingQuestions.join("; ")}`);
     }
+    if (!run.repository.e2eSkillPath) {
+      throw new Error("This legacy E2E run has no frozen repository-local project Skill; create a new run");
+    }
+    if (!run.repository.e2eAuthentication) {
+      throw new Error("This legacy E2E run has no frozen repository authentication contract; create a new run");
+    }
     abortSignal.throwIfAborted();
     const changeSet = await caseHubRepository.getChangeSet(owner, run.changeSetId);
     if (!changeSet) throw new Error(`Case Hub change set ${run.changeSetId} not found`);
@@ -71,6 +78,8 @@ const freezeExecutionBriefStep = createStep({
       baseSha,
       allowedPaths: run.repository.allowedPaths,
       skillPaths: run.repository.skillsPaths,
+      e2eSkillPath: run.repository.e2eSkillPath,
+      e2eAuthentication: run.repository.e2eAuthentication,
       ...(run.repository.installCommand ? { installCommand: run.repository.installCommand } : {}),
       testCommand: ["pnpm", "exec", "playwright", "test", "--config=<changed-project>", "--project=<configured-project>"],
       specGlobs: run.repository.allowedPaths,
@@ -277,6 +286,7 @@ export async function createAndStartE2ERun(
 }
 
 export async function rerunE2E(mastra: Mastra, owner: OwnerScope, runId: string, requestContext: RequestContext, resourceId?: string): Promise<E2ERun> {
+  await e2ePreflight.assertReady(owner, webE2EConfigurationFromSkill());
   const created = await e2eCoordinator.rerun(owner, runId);
   const workflow = mastra.getWorkflow("qasey-e2e-lifecycle");
   const run = await workflow.createRun({ runId: created.id, ...(resourceId ? { resourceId } : {}) });
@@ -294,9 +304,13 @@ export async function resumeE2EWithVerdict(mastra: Mastra, owner: OwnerScope, ru
   if (!await runRepository.get(owner, runId)) throw new Error(`Run ${runId} not found`);
   const workflow = mastra.getWorkflow("qasey-e2e-lifecycle");
   const run = await workflow.createRun({ runId });
-  await run.resume({ step: awaitQaVerdictStep, resumeData: verdict, requestContext });
+  const workflowResult = await run.resume({ step: awaitQaVerdictStep, resumeData: verdict, requestContext });
   const updated = await runRepository.get(owner, runId);
   if (!updated) throw new Error(`Run ${runId} not found after workflow resume`);
+  const expectedStatus = verdict.verdict === "approve" ? "succeeded" : "awaiting_qa";
+  if (workflowResult.status === "failed" || updated.status !== expectedStatus) {
+    throw new Error(updated.error ?? `E2E workflow resume stopped in ${updated.status}; expected ${expectedStatus}`);
+  }
   return updated;
 }
 
@@ -367,9 +381,27 @@ function collectPlaywrightTest(test: unknown, fallbackTitle: string, observed: M
     ? "failed"
     : statuses.length > 0 && statuses.every(status => status === "skipped") ? "skipped" : "passed";
   const durationMs = results.reduce((total, result) => total + (typeof result.duration === "number" ? result.duration : 0), 0);
+  const artifactNames = results.flatMap(result => {
+    const attachments = Array.isArray(result.attachments) ? result.attachments : [];
+    return attachments.flatMap(attachment => {
+      if (!attachment || typeof attachment !== "object") return [];
+      const path = (attachment as Record<string, unknown>).path;
+      if (typeof path !== "string") return [];
+      const normalized = path.replaceAll("\\", "/");
+      const marker = "/test-results/";
+      const markerIndex = normalized.lastIndexOf(marker);
+      return markerIndex >= 0 ? [normalized.slice(markerIndex + marker.length)] : [];
+    });
+  });
   const previous = observed.get(caseId);
   if (!previous || executionRank(executionStatus) > executionRank(previous.executionStatus)) {
-    observed.set(caseId, { caseId, executionStatus, durationMs });
+    observed.set(caseId, { caseId, executionStatus, durationMs, artifactNames: [...new Set(artifactNames)] });
+  } else if (executionRank(executionStatus) === executionRank(previous.executionStatus)) {
+    observed.set(caseId, {
+      ...previous,
+      durationMs: (previous.durationMs ?? 0) + durationMs,
+      artifactNames: [...new Set([...(previous.artifactNames ?? []), ...artifactNames])],
+    });
   }
 }
 

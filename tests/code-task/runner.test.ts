@@ -69,7 +69,7 @@ function reviewSpec(): CodeTaskSpec {
     contextRef: { id: "context", kind: "report", name: "context.json", uri: "file:///context.json" },
     contextHash: "a".repeat(64),
     repositories: [{ owner: "example-org", repository: "web-app", destination: "target", mode: "read", baseRef: "main", baseSha: "b".repeat(40) }],
-    baseSha: "b".repeat(40), executionProfileId: "code-review-readonly", allowedPaths: [], fixedChecks: [], deadlineMs: 60_000,
+    baseSha: "b".repeat(40), executionProfileId: "code-review-readonly", allowedPaths: [], fixedChecks: [], e2eRequiredEnvironment: [], deadlineMs: 60_000,
     traceContext: { traceId: "trace-1" },
   };
 }
