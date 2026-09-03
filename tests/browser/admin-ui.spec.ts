@@ -287,6 +287,24 @@ test("authenticated user can open the platform and navigate the Qasey applicatio
   await expect(page.getByRole("heading", { name: "所有 Agent 的工作轨迹" })).toBeVisible();
 });
 
+test("sidebar navigation scrolls without pushing account controls out of a short viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 520 });
+  await page.goto("/admin/apps/qasey");
+
+  const navigation = page.getByRole("navigation", { name: "主导航" });
+  await expect(page.getByText("tenant-browser-test", { exact: true })).toBeVisible();
+
+  const dimensions = await navigation.evaluate(element => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight);
+
+  await navigation.evaluate(element => element.scrollTo({ top: element.scrollHeight }));
+  await expect.poll(() => navigation.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+  await expect(page.getByRole("button", { name: "访问与审计", exact: true })).toBeVisible();
+});
+
 test("primary routes survive direct navigation and unknown paths render the 404 view", async ({ page }) => {
   const primaryRoutes = [
     ["/admin", "工作交给 Agent，判断留给人"],
