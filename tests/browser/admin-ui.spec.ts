@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
 
 interface BrowserDiagnostics {
   pageErrors: string[];
@@ -80,6 +80,23 @@ function json(route: Route, body: unknown) {
     headers: { "cache-control": "no-store" },
     body: JSON.stringify(body),
   });
+}
+
+async function expectFullyInViewport(
+  locator: Locator,
+  name: string,
+  viewport: { width: number; height: number },
+) {
+  await expect(locator, `${name} should be visible`).toBeVisible();
+  await expect(locator, `${name} should be fully inside the viewport`).toBeInViewport({ ratio: 1 });
+  const box = await locator.boundingBox();
+  expect(box, `${name} should have a layout box`).not.toBeNull();
+  if (!box) throw new Error(`${name} has no layout box`);
+  expect(box.x, `${name} should not cross the viewport's left edge`).toBeGreaterThanOrEqual(0);
+  expect(box.y, `${name} should not cross the viewport's top edge`).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width, `${name} should not cross the viewport's right edge`).toBeLessThanOrEqual(viewport.width);
+  expect(box.y + box.height, `${name} should not cross the viewport's bottom edge`).toBeLessThanOrEqual(viewport.height);
+  return box;
 }
 
 async function installAuthenticatedApiMocks(page: Page, diagnostics: BrowserDiagnostics): Promise<void> {
@@ -285,6 +302,82 @@ test("authenticated user can open the platform and navigate the Qasey applicatio
   await expect(page.getByRole("heading", { name: "需要你的判断" })).toBeVisible();
   await page.getByRole("button", { name: /^活动/u }).click();
   await expect(page.getByRole("heading", { name: "所有 Agent 的工作轨迹" })).toBeVisible();
+});
+
+test("QASEY-4 短视口下侧栏导航可滚动且底部控制保持可见", {
+  annotation: [
+    { type: "qasey.case", description: "QASEY-4" },
+    { type: "qasey.version", description: "f4f61ab13e03b8f90b6e2e365cce514640849e4030a4d13289371d0928672de7" },
+  ],
+}, async ({ page }) => {
+  const viewport = { width: 1280, height: 520 };
+  await page.setViewportSize(viewport);
+  await page.route("**/admin/api/audit", route => json(route, { records: [] }));
+  await page.route("**/admin/api/tokens", route => json(route, { tokens: [], availableScopes: [] }));
+  await page.goto("/admin/apps/qasey");
+  await expect(page.getByRole("heading", { name: "把需求变成可验证的结论" })).toBeVisible();
+
+  const sidebar = page.getByRole("complementary");
+  await expect(sidebar.getByText("1 个 Application 在线", { exact: true })).toBeVisible();
+  const navigation = page.getByRole("navigation", { name: "主导航" });
+  const runtimeCard = sidebar.getByText("Agent Runtime", { exact: true }).locator("..").locator("..");
+  const tenantAccount = sidebar.getByText(session.tenantId, { exact: true }).locator("..").locator("..");
+  const logoutButton = sidebar.getByRole("button", { name: "退出登录" });
+  const main = page.getByRole("main");
+
+  const sidebarBoxBefore = await sidebar.boundingBox();
+  const mainBoxBefore = await main.boundingBox();
+  const controlsBefore = {
+    runtime: await expectFullyInViewport(runtimeCard, "Agent Runtime status", viewport),
+    account: await expectFullyInViewport(tenantAccount, "tenant account", viewport),
+    logout: await expectFullyInViewport(logoutButton, "logout control", viewport),
+  };
+  await expect(logoutButton).toBeEnabled();
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+
+  const navigationBefore = await navigation.evaluate(element => ({
+    scrollTop: element.scrollTop,
+    scrollHeight: element.scrollHeight,
+    clientHeight: element.clientHeight,
+  }));
+  expect(navigationBefore.scrollTop).toBe(0);
+  expect(navigationBefore.scrollHeight).toBeGreaterThan(navigationBefore.clientHeight);
+
+  await navigation.hover();
+  await page.mouse.wheel(0, navigationBefore.scrollHeight - navigationBefore.clientHeight);
+  await expect.poll(() => navigation.evaluate(element => (
+    element.scrollTop + element.clientHeight >= element.scrollHeight - 1
+  )), { message: "main navigation should scroll to its final item" }).toBe(true);
+  const navigationAfter = await navigation.evaluate(element => ({
+    scrollTop: element.scrollTop,
+    scrollHeight: element.scrollHeight,
+    clientHeight: element.clientHeight,
+  }));
+  expect(navigationAfter.scrollTop).toBeGreaterThan(0);
+  expect(navigationAfter.scrollTop + navigationAfter.clientHeight)
+    .toBeGreaterThanOrEqual(navigationAfter.scrollHeight - 1);
+
+  const accessButton = navigation.getByRole("button", { name: "访问与审计", exact: true });
+  await expect(accessButton).toBeVisible();
+  expect(await sidebar.boundingBox()).toEqual(sidebarBoxBefore);
+  expect(await main.boundingBox()).toEqual(mainBoxBefore);
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  expect({
+    runtime: await expectFullyInViewport(runtimeCard, "Agent Runtime status after navigation scroll", viewport),
+    account: await expectFullyInViewport(tenantAccount, "tenant account after navigation scroll", viewport),
+    logout: await expectFullyInViewport(logoutButton, "logout control after navigation scroll", viewport),
+  }).toEqual(controlsBefore);
+  await expect(logoutButton).toBeEnabled();
+
+  await accessButton.click();
+  await expect(page).toHaveURL(/\/admin\/access$/u);
+  await expect(page.getByRole("heading", { name: "访问与审计", exact: true })).toBeVisible();
+  expect({
+    runtime: await expectFullyInViewport(runtimeCard, "Agent Runtime status after route change", viewport),
+    account: await expectFullyInViewport(tenantAccount, "tenant account after route change", viewport),
+    logout: await expectFullyInViewport(logoutButton, "logout control after route change", viewport),
+  }).toEqual(controlsBefore);
+  await expect(logoutButton).toBeEnabled();
 });
 
 test("primary routes survive direct navigation and unknown paths render the 404 view", async ({ page }) => {
