@@ -1,8 +1,8 @@
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createRuntimeEnvLoadReport, loadRuntimeEnv, runtimeEnvironment, runtimeEnvFiles } from "../src/load-env.ts";
+import { createRuntimeEnvLoadReport, loadRuntimeEnv, resolveRuntimeEnvRoot, runtimeEnvironment, runtimeEnvFiles } from "../src/load-env.ts";
 
 describe("runtime env files", () => {
   it("selects standard environment-specific files from NODE_ENV", () => {
@@ -67,6 +67,21 @@ describe("runtime env files", () => {
 
     expect(env).toMatchObject({ FROM_FILE: "environment", PRESERVED: "process" });
     expect(result.loadedFiles).toHaveLength(2);
+  });
+
+  it("discovers env files from a generated Mastra process below the project root", () => {
+    const root = mkdtempSync(join(tmpdir(), "qasey-env-root-"));
+    const generatedDirectory = join(root, ".mastra", "output", "public");
+    mkdirSync(generatedDirectory, { recursive: true });
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "qasey" }), "utf8");
+    writeFileSync(join(root, ".env.local"), "GITHUB_TOKEN=synthetic-personal-access-token-at-least-32-bytes\n", "utf8");
+    const env = { NODE_ENV: "development", INIT_CWD: generatedDirectory } as NodeJS.ProcessEnv;
+
+    expect(resolveRuntimeEnvRoot(env, generatedDirectory)).toBe(root);
+    const result = loadRuntimeEnv({ env });
+
+    expect(env.GITHUB_TOKEN).toBe("synthetic-personal-access-token-at-least-32-bytes");
+    expect(result.loadedFiles).toEqual([join(root, ".env.local")]);
   });
 
   it("ships only redacted runtime configuration examples", () => {

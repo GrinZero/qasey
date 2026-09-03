@@ -32,7 +32,7 @@ The image build derives the deployed source commit from the checkout and writes
 it to `.qasey/build-metadata.json`; the service image contains that artifact but
 does not contain `.git`. Do not add a manually maintained source-SHA variable.
 The Case Hub records this build fact and independently compares it with the
-frozen repository base SHA before provisioning an E2E fixture.
+frozen repository base SHA before running the repository-owned E2E login setup.
 
 For source development inside the same Linux and Node.js baseline, open the
 repository with the checked-in `.devcontainer/devcontainer.json`. It combines

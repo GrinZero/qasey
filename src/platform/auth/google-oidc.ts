@@ -76,6 +76,7 @@ export interface GoogleOidcOptions {
   organizationStore: OrganizationStore;
   tenancy: { mode: "single"; organizationId: string } | { mode: "multi" };
   bootstrapMembershipEmails?: readonly string[];
+  allowSessionOrganization?(organizationId: string, userId: string): Promise<boolean>;
   fetch?: typeof fetch;
   verifyIdToken?: (idToken: string) => Promise<GoogleIdClaims>;
   now?: () => number;
@@ -125,6 +126,7 @@ export class GoogleOidcService {
   private readonly organizationStore: OrganizationStore;
   private readonly tenancy: GoogleOidcOptions["tenancy"];
   private readonly bootstrapMembershipEmails: ReadonlySet<string>;
+  private readonly allowSessionOrganization?: GoogleOidcOptions["allowSessionOrganization"];
   private readonly fetchImpl: typeof fetch;
   private readonly verifyIdTokenImpl: (idToken: string) => Promise<GoogleIdClaims>;
   private readonly now: () => number;
@@ -158,6 +160,7 @@ export class GoogleOidcService {
     this.bootstrapMembershipEmails = new Set((options.bootstrapMembershipEmails ?? [])
       .map(email => email.trim().toLowerCase())
       .filter(Boolean));
+    this.allowSessionOrganization = options.allowSessionOrganization;
     this.fetchImpl = options.fetch ?? fetch;
     this.now = options.now ?? Date.now;
     if (options.verifyIdToken) {
@@ -333,9 +336,9 @@ export class GoogleOidcService {
     const sessionCookie = readCookie(request, SESSION_COOKIE_NAME);
     if (!sessionCookie) return null;
     const authenticated = await this.organizationStore.authenticateBrowserSession(sessionCookie);
-    if (!authenticated || !this.sessionMatchesTenancy(authenticated.session.organizationId)) {
-      return null;
-    }
+    if (!authenticated) return null;
+    if (!this.sessionMatchesTenancy(authenticated.session.organizationId)
+      && !await this.allowSessionOrganization?.(authenticated.session.organizationId, authenticated.user.id)) return null;
     const [googleIdentity, passwordIdentity] = await Promise.all([
       this.organizationStore.resolveIdentityForUser(authenticated.user.id, "google"),
       this.organizationStore.resolveIdentityForUser(authenticated.user.id, "password"),

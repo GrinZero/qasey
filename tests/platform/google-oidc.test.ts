@@ -5,6 +5,29 @@ import { ActiveMembershipRequiredError, InMemoryOrganizationStore } from "../../
 const COOKIE_PASSWORD = "test-cookie-password-that-is-longer-than-thirty-two-characters";
 
 describe("platform Google OIDC", () => {
+  it("accepts only explicitly authorized temporary fixture organizations in single-tenant mode", async () => {
+    const organizations = new InMemoryOrganizationStore();
+    await organizations.ensureOrganization({ id: "tenant-explicit", slug: "tenant-explicit", displayName: "Explicit tenant" });
+    await organizations.ensureOrganization({ id: "e2e-fixture", slug: "e2e-fixture", displayName: "E2E fixture" });
+    const user = await organizations.createUser({ displayName: "Fixture user" });
+    await organizations.linkIdentity({ userId: user.id, provider: "password", subject: "fixture", email: "fixture@example.test", emailVerified: true });
+    await organizations.grantBootstrapMembership({ organizationId: "e2e-fixture", userId: user.id });
+    const session = await organizations.createBrowserSession({ organizationId: "e2e-fixture", userId: user.id, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+    const allowSessionOrganization = vi.fn(async (organizationId: string, userId: string) => organizationId === "e2e-fixture" && userId === user.id);
+    const service = new GoogleOidcService({
+      callbackUrl: "http://runtime.test/auth/google/callback",
+      secureCookies: false,
+      organizationStore: organizations,
+      tenancy: { mode: "single", organizationId: "tenant-explicit" },
+      allowSessionOrganization,
+    });
+
+    await expect(service.getCurrentUser(new Request("http://runtime.test/admin/api/session", {
+      headers: { cookie: `qasey_session=${session.token}` },
+    }))).resolves.toMatchObject({ tenantId: "e2e-fixture", id: user.id });
+    expect(allowSessionOrganization).toHaveBeenCalledWith("e2e-fixture", user.id);
+  });
+
   it("uses state, nonce and PKCE before issuing an opaque, revocable single-tenant session", async () => {
     const now = 1_800_000_000_000;
     let expectedNonce = "";

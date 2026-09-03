@@ -1,9 +1,13 @@
 import { registerApiRoute } from "@mastra/core/server";
+import "playwright-core";
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { dirname, extname, resolve, sep } from "node:path";
 import { z } from "zod";
 import { CaseHubResultReviewInputSchema, CreateCaseHubChangeSetSchema, CreateE2ERunRequestSchema, type CaseHubChangeSet, type CaseHubResult, type OwnerScope } from "../../../../packages/contracts/src/index.ts";
 import { freezeE2EContext, normalizeJiraWebhook } from "../../../../packages/domain/src/index.ts";
-import { artifactStore, caseHubRepository, channelDeliveryInbox, config, e2eFixtureLeaseService, githubClient, jiraClient, runRepository, sandboxPoolClient } from "../../runtime.ts";
+import { artifactStore, caseHubRepository, channelDeliveryInbox, config, e2eFixtureLeaseService, e2ePreflight, githubClient, jiraClient, runRepository, sandboxPoolClient } from "../../runtime.ts";
 import { ArtifactNotFoundError, ArtifactOwnershipError } from "../../../../packages/e2e/src/index.ts";
 import { cancelE2ERun, createAndStartE2ERun, rerunE2E, resumeE2EWithVerdict } from "../../workflows/e2e-workflow.ts";
 import { ownerScopeFromRequestContext } from "../../../platform/context/owner-scope.ts";
@@ -70,6 +74,27 @@ function allLatestResultsApproved(results: CaseHubResult[]): boolean {
     if (!current || result.attempt > current.attempt) latest.set(result.caseVersionId, result);
   }
   return [...latest.values()].every(result => result.executionStatus === "passed" && result.reviewStatus === "approved");
+}
+
+const nodeRequire = createRequire(import.meta.url);
+let traceViewerRoot: string | undefined;
+
+function playwrightTraceViewerRoot(): string {
+  if (traceViewerRoot) return traceViewerRoot;
+  const playwrightCorePackage = nodeRequire.resolve("playwright-core/package.json");
+  traceViewerRoot = resolve(dirname(playwrightCorePackage), "lib/vite/traceViewer");
+  return traceViewerRoot;
+}
+
+function traceViewerContentType(path: string): string {
+  const extension = extname(path).toLowerCase();
+  if (extension === ".html") return "text/html; charset=utf-8";
+  if (extension === ".js") return "application/javascript; charset=utf-8";
+  if (extension === ".css") return "text/css; charset=utf-8";
+  if (extension === ".svg") return "image/svg+xml";
+  if (extension === ".webmanifest") return "application/manifest+json";
+  if (extension === ".ttf") return "font/ttf";
+  return "application/octet-stream";
 }
 
 function validGitHubSignature(rawBody: string, signature: string | undefined): boolean {
@@ -373,7 +398,7 @@ export const apiRoutes = [
       }
     },
   }),
-  registerApiRoute("/v1/runs", {
+  registerApiRoute("/v1/case-hub/runs", {
     method: "GET",
     handler: async c => c.json({ runs: await runRepository.list(owner(c), Number(c.req.query("limit") ?? 100)) }),
   }),
@@ -386,12 +411,24 @@ export const apiRoutes = [
     handler: async c => {
       const caseRecord = await caseHubRepository.getCase(owner(c), c.req.param("caseId"));
       if (!caseRecord) return c.json({ error: "not_found" }, 404);
-      return c.json({ case: caseRecord, versions: await caseHubRepository.versionsForCase(owner(c), caseRecord.id) });
+      const versions = await caseHubRepository.versionsForCase(owner(c), caseRecord.id);
+      const versionIds = new Set(versions.map(version => version.id));
+      const changeSets = (await caseHubRepository.listChangeSets(owner(c), 500))
+        .filter(changeSet => changeSet.caseVersionIds.some(versionId => versionIds.has(versionId)));
+      const results = (await Promise.all(changeSets.map(changeSet => caseHubRepository.listResults(owner(c), changeSet.id)))).flat();
+      return c.json({ case: caseRecord, versions, changeSets, results });
     },
   }),
   registerApiRoute("/v1/case-hub/change-sets", {
     method: "GET",
     handler: async c => c.json({ changeSets: await caseHubRepository.listChangeSets(owner(c), Number(c.req.query("limit") ?? 100)) }),
+  }),
+  registerApiRoute("/v1/case-hub/preflight", {
+    method: "GET",
+    handler: async c => {
+      const snapshot = await e2ePreflight.inspect(owner(c), webE2EConfigurationFromSkill());
+      return c.json(snapshot, snapshot.ready ? 200 : 503);
+    },
   }),
   registerApiRoute("/v1/case-hub/change-sets", {
     method: "POST",
@@ -414,11 +451,13 @@ export const apiRoutes = [
         resourceId: String(requestContext.get(MASTRA_RESOURCE_ID_KEY) ?? principal.subjectId),
       });
       try {
+        const preflight = await e2ePreflight.assertReady(owner(c), webE2EConfiguration);
         const changeSet = await caseHubRepository.createChangeSet(owner(c), {
           requirement,
           proposals: parsed.data.proposals,
           repository: webE2EConfiguration.target,
           createdBy: principal.subjectId,
+          baseSha: preflight.baseSha,
           environmentSourceSha: e2eFixtureLeaseService.version().sourceSha,
         });
         const run = await createAndStartE2ERun(c.get("mastra"), owner(c), {
@@ -426,6 +465,7 @@ export const apiRoutes = [
           changeSetId: changeSet.id,
           handoff: parsed.data.requirement,
           repository: webE2EConfiguration.target,
+          testEnvironment: webE2EConfiguration.environment,
           playwrightVerification: webE2EConfiguration.verification,
           platform: "web",
           framework: "playwright",
@@ -484,7 +524,7 @@ export const apiRoutes = [
       }
     },
   }),
-  registerApiRoute("/v1/runs", {
+  registerApiRoute("/v1/case-hub/runs", {
     method: "POST",
     handler: async c => {
       const parsed = CreateE2ERunRequestSchema.safeParse(await c.req.json());
@@ -495,10 +535,12 @@ export const apiRoutes = [
       const requestContext = c.get("requestContext");
       try {
         const webE2EConfiguration = webE2EConfigurationFromSkill();
+        await e2ePreflight.assertReady(owner(c), webE2EConfiguration);
         const trustedInput = {
           ...parsed.data,
           sourceSessionId: String(requestContext.get("sessionId")),
           repository: webE2EConfiguration.target,
+          testEnvironment: webE2EConfiguration.environment,
           playwrightVerification: webE2EConfiguration.verification,
         };
         return c.json(await createAndStartE2ERun(c.get("mastra"), owner(c), trustedInput, requestContext, authenticatedUser(c)?.id), 202);
@@ -506,25 +548,44 @@ export const apiRoutes = [
       catch (error) { return c.json(errorBody(error, crypto.randomUUID()), 400); }
     },
   }),
-  registerApiRoute("/v1/runs/:runId", {
+  registerApiRoute("/v1/case-hub/runs/:runId", {
     method: "GET",
     handler: async c => {
       const run = await runRepository.get(owner(c), c.req.param("runId"));
       return run ? c.json(run) : c.json({ error: "not_found" }, 404);
     },
   }),
-  registerApiRoute("/v1/runs/:runId/events", {
+  registerApiRoute("/v1/case-hub/runs/:runId/events", {
     method: "GET",
     handler: async c => c.json({ events: await runRepository.events(owner(c), c.req.param("runId")) }),
   }),
-  registerApiRoute("/v1/runs/:runId/artifacts", {
+  registerApiRoute("/v1/case-hub/trace-viewer/*", {
+    method: "GET",
+    handler: async c => {
+      const relativePath = c.req.param("*") || "index.html";
+      if (relativePath === "ping") return c.body("");
+      const root = playwrightTraceViewerRoot();
+      const target = resolve(root, relativePath);
+      if (target !== root && !target.startsWith(`${root}${sep}`)) return c.json({ error: "not_found" }, 404);
+      const content = await readFile(target).catch(() => undefined);
+      if (!content) return c.json({ error: "not_found" }, 404);
+      c.header("content-type", traceViewerContentType(target));
+      c.header("cache-control", relativePath === "index.html" || relativePath === "sw.bundle.js" ? "no-cache" : "public, max-age=31536000, immutable");
+      c.header("service-worker-allowed", "/v1/case-hub/trace-viewer/");
+      if (relativePath === "index.html") {
+        c.header("content-security-policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' blob:; worker-src 'self' blob:");
+      }
+      return c.body(content);
+    },
+  }),
+  registerApiRoute("/v1/case-hub/runs/:runId/artifacts", {
     method: "GET",
     handler: async c => {
       const run = await runRepository.get(owner(c), c.req.param("runId"));
       return run ? c.json({ artifacts: run.artifacts }) : c.json({ error: "not_found" }, 404);
     },
   }),
-  registerApiRoute("/v1/runs/:runId/artifacts/:artifactId", {
+  registerApiRoute("/v1/case-hub/runs/:runId/artifacts/:artifactId", {
     method: "GET",
     handler: async c => {
       const run = await runRepository.get(owner(c), c.req.param("runId"));
@@ -532,7 +593,7 @@ export const apiRoutes = [
       if (!artifact) return c.json({ error: "not_found" }, 404);
       try {
         const content = await artifactStore.open(owner(c), artifact);
-        c.header("content-type", artifact.contentType ?? "application/octet-stream");
+        c.header("content-type", artifact.contentType ?? (artifact.kind === "trace" && /trace\.zip$/iu.test(artifact.name) ? "application/zip" : "application/octet-stream"));
         c.header("content-disposition", `inline; filename="${artifact.name.replace(/["\\]/g, "_")}"`);
         if (content.contentLength !== undefined) c.header("content-length", String(content.contentLength));
         return c.body(content.body);
@@ -543,14 +604,14 @@ export const apiRoutes = [
       }
     },
   }),
-  registerApiRoute("/v1/runs/:runId/rerun", {
+  registerApiRoute("/v1/case-hub/runs/:runId/rerun", {
     method: "POST",
     handler: async c => {
       try { return c.json(await rerunE2E(c.get("mastra"), owner(c), c.req.param("runId"), c.get("requestContext"), authenticatedUser(c)?.id), 202); }
       catch (error) { return c.json({ error: "rerun_failed", ...errorBody(error, crypto.randomUUID()) }, 409); }
     },
   }),
-  registerApiRoute("/v1/runs/:runId/cancel", {
+  registerApiRoute("/v1/case-hub/runs/:runId/cancel", {
     method: "POST",
     handler: async c => {
       try { return c.json(await cancelE2ERun(c.get("mastra"), owner(c), c.req.param("runId"))); }
@@ -704,7 +765,7 @@ export const apiRoutes = [
       if (!run) return c.html("<h1>Run not found</h1>", 404);
       const events = await runRepository.events(owner(c), id);
       const payload = JSON.stringify({ run, events }).replaceAll("<", "\\u003c");
-      return c.html(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Qasey Run</title><style>body{font-family:ui-sans-serif,system-ui;background:#0b1020;color:#e9eefc;margin:0;padding:32px}main{max-width:960px;margin:auto}.card{background:#151d33;border:1px solid #293655;border-radius:14px;padding:20px;margin:16px 0}.status,a{color:#7dd3fc}li{margin:8px 0}code{color:#c4b5fd}</style></head><body><main><h1>Qasey E2E Run</h1><div id="app"></div></main><script>const {run,events}=${payload};const app=document.getElementById('app');const card=(title)=>{const d=document.createElement('div');d.className='card';const h=document.createElement('h3');h.textContent=title;d.append(h);app.append(d);return d};const overview=card(run.framework+' · '+run.repository.repository);const status=document.createElement('div');status.className='status';status.textContent=run.status;const code=document.createElement('code');code.textContent=run.id;overview.append(status,code);const timeline=card('Timeline');const tl=document.createElement('ul');for(const e of events){const li=document.createElement('li');li.textContent=e.at+' · '+e.message;tl.append(li)}timeline.append(tl);const artifacts=card('Artifacts');const al=document.createElement('ul');for(const a of run.artifacts){const li=document.createElement('li');const link=document.createElement('a');link.textContent=a.kind+' · '+a.name;link.href='/v1/runs/'+encodeURIComponent(run.id)+'/artifacts/'+encodeURIComponent(a.id);link.target='_blank';li.append(link);al.append(li)}artifacts.append(al);</script></body></html>`);
+      return c.html(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Qasey Run</title><style>body{font-family:ui-sans-serif,system-ui;background:#0b1020;color:#e9eefc;margin:0;padding:32px}main{max-width:960px;margin:auto}.card{background:#151d33;border:1px solid #293655;border-radius:14px;padding:20px;margin:16px 0}.status,a{color:#7dd3fc}li{margin:8px 0}code{color:#c4b5fd}</style></head><body><main><h1>Qasey E2E Run</h1><div id="app"></div></main><script>const {run,events}=${payload};const app=document.getElementById('app');const card=(title)=>{const d=document.createElement('div');d.className='card';const h=document.createElement('h3');h.textContent=title;d.append(h);app.append(d);return d};const overview=card(run.framework+' · '+run.repository.repository);const status=document.createElement('div');status.className='status';status.textContent=run.status;const code=document.createElement('code');code.textContent=run.id;overview.append(status,code);const timeline=card('Timeline');const tl=document.createElement('ul');for(const e of events){const li=document.createElement('li');li.textContent=e.at+' · '+e.message;tl.append(li)}timeline.append(tl);const artifacts=card('Artifacts');const al=document.createElement('ul');for(const a of run.artifacts){const li=document.createElement('li');const link=document.createElement('a');link.textContent=a.kind+' · '+a.name;link.href='/v1/case-hub/runs/'+encodeURIComponent(run.id)+'/artifacts/'+encodeURIComponent(a.id);link.target='_blank';li.append(link);al.append(li)}artifacts.append(al);</script></body></html>`);
     },
   }),
 ];
@@ -738,20 +799,22 @@ const routePolicies: Record<string, { id: string; access: PrimitiveAccessPolicy;
   "POST /webhooks/jira": { id: "jira-webhook", access: { permission: "qasey.channel.receive", audiences: ["channel"] } },
   "POST /webhooks/github": { id: "github-webhook", access: { permission: "qasey.channel.receive", audiences: ["channel"] }, public: true },
   "POST /v1/qasey/tasks": { id: "qasey-task", access: { permission: "qasey.agent.execute", audiences: ["admin-ui", "api"] } },
-  "GET /v1/runs": { id: "run-list", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
-  "POST /v1/runs": { id: "run-create", access: { permission: "qasey.runs.write", audiences: ["admin-ui", "api", "service"] } },
+  "GET /v1/case-hub/runs": { id: "run-list", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
+  "POST /v1/case-hub/runs": { id: "run-create", access: { permission: "qasey.runs.write", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/case-hub/cases": { id: "case-list", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/case-hub/cases/:caseId": { id: "case-read", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/case-hub/change-sets": { id: "change-set-list", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
+  "GET /v1/case-hub/preflight": { id: "e2e-preflight", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
   "POST /v1/case-hub/change-sets": { id: "change-set-create", access: { permission: "qasey.cases.write", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/case-hub/change-sets/:changeSetId": { id: "change-set-read", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
   "POST /v1/case-hub/results/:resultId/review": { id: "case-result-review", access: { permission: "qasey.results.approve", audiences: ["admin-ui", "api"] } },
-  "GET /v1/runs/:runId": { id: "run-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
-  "GET /v1/runs/:runId/events": { id: "run-events-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
-  "GET /v1/runs/:runId/artifacts": { id: "run-artifacts-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
-  "GET /v1/runs/:runId/artifacts/:artifactId": { id: "run-artifact-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
-  "POST /v1/runs/:runId/rerun": { id: "run-rerun", access: { permission: "qasey.runs.write", audiences: ["admin-ui", "api", "service"] } },
-  "POST /v1/runs/:runId/cancel": { id: "run-cancel", access: { permission: "qasey.runs.write", audiences: ["admin-ui", "api", "service"] } },
+  "GET /v1/case-hub/runs/:runId": { id: "run-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
+  "GET /v1/case-hub/runs/:runId/events": { id: "run-events-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
+  "GET /v1/case-hub/trace-viewer/*": { id: "trace-viewer-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api"] } },
+  "GET /v1/case-hub/runs/:runId/artifacts": { id: "run-artifacts-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
+  "GET /v1/case-hub/runs/:runId/artifacts/:artifactId": { id: "run-artifact-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
+  "POST /v1/case-hub/runs/:runId/rerun": { id: "run-rerun", access: { permission: "qasey.runs.write", audiences: ["admin-ui", "api", "service"] } },
+  "POST /v1/case-hub/runs/:runId/cancel": { id: "run-cancel", access: { permission: "qasey.runs.write", audiences: ["admin-ui", "api", "service"] } },
   "POST /v1/sandbox-sessions/:sessionId": { id: "sandbox-session-claim", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },
   "POST /v1/sandbox-sessions/:sessionId/browser/start": { id: "sandbox-browser-start", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },
   "POST /v1/sandbox-sessions/:sessionId/browser/action": { id: "sandbox-browser-action", access: { permission: "qasey.sandbox.use", audiences: ["admin-ui", "api"] } },

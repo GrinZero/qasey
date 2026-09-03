@@ -343,14 +343,10 @@ describe("Trigger provider registry", () => {
 describe("managed Slack webhook provider", () => {
   it("activates an installation only after a signed Slack URL verification", async () => {
     const previousGitHubConfig = {
-      GITHUB_APP_ID: process.env.GITHUB_APP_ID,
-      GITHUB_APP_INSTALLATION_ID: process.env.GITHUB_APP_INSTALLATION_ID,
-      GITHUB_APP_PRIVATE_KEY: process.env.GITHUB_APP_PRIVATE_KEY,
+      GITHUB_TOKEN: process.env.GITHUB_TOKEN,
     };
     Object.assign(process.env, {
-      GITHUB_APP_ID: "123",
-      GITHUB_APP_INSTALLATION_ID: "456",
-      GITHUB_APP_PRIVATE_KEY: "test-private-key",
+      GITHUB_TOKEN: "synthetic-personal-access-token-at-least-32-bytes",
     });
 
     try {

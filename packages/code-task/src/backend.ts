@@ -1,7 +1,7 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { Agent } from "@mastra/core/agent";
 import { LocalFilesystem, WORKSPACE_TOOLS, Workspace } from "@mastra/core/workspace";
-import { access, realpath } from "node:fs/promises";
+import { access, realpath, stat } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 import type { CodeTaskTraceContext } from "../../contracts/src/index.ts";
 import type { ExecutionProfile } from "./profiles.ts";
@@ -12,6 +12,7 @@ export interface CodingAgentRequest {
   context: string;
   allowedPaths: string[];
   profile: ExecutionProfile;
+  e2eSkillPath?: string;
   traceContext: CodeTaskTraceContext;
   credentials?: {
     openaiApiKey?: string;
@@ -47,7 +48,7 @@ export class NativeMastraCodingBackend implements CodingAgentBackend {
     const workspace = new Workspace({
       id: `code-task-${request.taskId}`,
       filesystem,
-      skills: await existingSkillPaths(request.workspaceRoot, request.context),
+      skills: await repositorySkillPaths(request.workspaceRoot, request.context, request.e2eSkillPath),
       tools: {
         requireApproval: false,
         [WORKSPACE_TOOLS.FILESYSTEM.WRITE_FILE]: {
@@ -85,36 +86,45 @@ export class NativeMastraCodingBackend implements CodingAgentBackend {
       },
     });
 
-    const apiKey = request.credentials?.openaiApiKey;
-    const openai = createOpenAI({
-      ...(apiKey ? { apiKey } : {}),
-      ...(request.credentials?.openaiBaseUrl
-        ? { baseURL: request.credentials.openaiBaseUrl.replace(/\/$/u, "") }
-        : {}),
-    });
-    const modelId = process.env.QASEY_CODE_AGENT_MODEL?.trim() || "gpt-5.6-sol";
-    const agent = new Agent({
-      id: `qasey-e2e-code-author-${request.taskId}`,
-      name: "Qasey E2E Code Author",
-      description: "Writes or reviews E2E implementation in one isolated repository checkout.",
-      model: openai.responses(modelId),
-      workspace,
-      instructions: [
-        "You are Qasey's repository coding specialist, implemented as a native Mastra Agent.",
-        "Activate and follow relevant repository-local Skills before changing files.",
-        "Inspect existing tests, page objects, helpers, and conventions before implementing.",
-        "Use only Workspace filesystem tools. Repository checks run deterministically after you finish.",
-        "Never read, print, or persist credentials. Never weaken assertions to hide a product or environment failure.",
-        "For Playwright, map exactly one test to each Case Hub case. Put the QASEY case id in the title and add qasey.case and qasey.version annotations using the frozen id and versionHash. Never use test.only or unapproved skip.",
-        "Use QASEY_E2E_BASE_URL for the test deployment and configure Playwright storageState from QASEY_E2E_STORAGE_STATE_PATH when present. Never read or print the storage-state file.",
-        request.profile.writable
-          ? `You may write only under: ${writablePaths.join(", ") || "no paths"}.`
-          : "This execution profile is read-only; do not modify files.",
-      ],
-    });
-
     try {
       await workspace.init();
+      const requiredSkill = request.e2eSkillPath
+        ? await workspace.skills?.get(request.e2eSkillPath)
+        : undefined;
+      if (request.e2eSkillPath && !requiredSkill) {
+        throw new Error(`Required repository E2E Skill is invalid or undiscoverable: ${request.e2eSkillPath}`);
+      }
+      const apiKey = request.credentials?.openaiApiKey;
+      const openai = createOpenAI({
+        ...(apiKey ? { apiKey } : {}),
+        ...(request.credentials?.openaiBaseUrl
+          ? { baseURL: request.credentials.openaiBaseUrl.replace(/\/$/u, "") }
+          : {}),
+      });
+      const modelId = process.env.QASEY_CODE_AGENT_MODEL?.trim() || "gpt-5.6-sol";
+      const agent = new Agent({
+        id: `qasey-e2e-code-author-${request.taskId}`,
+        name: "Qasey E2E Code Author",
+        description: "Writes or reviews E2E implementation in one isolated repository checkout.",
+        model: openai.responses(modelId),
+        workspace,
+        instructions: [
+          "You are Qasey's repository coding specialist, implemented as a native Mastra Agent.",
+          "Activate and follow relevant repository-local Skills before changing files.",
+          ...(requiredSkill ? [
+            `The required project E2E Skill at ${request.e2eSkillPath} is authoritative for project routes, test-account roles, repository-owned authentication setup, data setup, and cleanup:`,
+            requiredSkill.instructions,
+          ] : []),
+          "Inspect existing tests, page objects, helpers, and conventions before implementing.",
+          "Use only Workspace filesystem tools. Repository checks run deterministically after you finish.",
+          "Never read, print, or persist credentials. Never weaken assertions to hide a product or environment failure.",
+          "For Playwright, map exactly one test to each Case Hub case. Put the QASEY case id in the title and add qasey.case and qasey.version annotations using the frozen id and versionHash. Never use test.only or unapproved skip.",
+          "Use QASEY_E2E_BASE_URL for the test deployment. Authentication must use the repository's checked-in Playwright setup and declared environment contract; never synthesize cookies or storage state.",
+          request.profile.writable
+            ? `You may write only under: ${writablePaths.join(", ") || "no paths"}.`
+            : "This execution profile is read-only; do not modify files.",
+        ],
+      });
       const output = await agent.generate([
         `Execution profile: ${request.profile.id}`,
         `Frozen writable paths: ${writablePaths.join(", ") || "none"}`,
@@ -188,14 +198,29 @@ function isAllowedPath(pathInput: string, allowedPaths: string[]): boolean {
   return allowedPaths.some(allowed => path === allowed || path.startsWith(`${allowed}/`));
 }
 
-async function existingSkillPaths(workspaceRoot: string, context: string): Promise<string[]> {
+export async function repositorySkillPaths(workspaceRoot: string, context: string, requiredSkillPath?: string): Promise<string[]> {
   const configured = taskSkillPaths(context);
+  const candidates = [...new Set([...(requiredSkillPath ? [requiredSkillPath] : []), ...configured])];
+  const canonicalWorkspaceRoot = await realpath(workspaceRoot);
   const paths: string[] = [];
-  for (const candidate of configured) {
+  for (const candidate of candidates) {
     const absolute = resolve(workspaceRoot, candidate);
     const rel = relative(workspaceRoot, absolute);
-    if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || rel.startsWith(sep)) continue;
-    if (await access(absolute).then(() => true).catch(() => false)) paths.push(candidate);
+    if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || rel.startsWith(sep)) {
+      throw new Error(`Repository Skill path escaped the task workspace: ${candidate}`);
+    }
+    const canonical = await realpath(absolute).catch(() => undefined);
+    if (!canonical) {
+      if (candidate === requiredSkillPath) throw new Error(`Required repository E2E Skill was not found: ${candidate}`);
+      continue;
+    }
+    if (canonical !== canonicalWorkspaceRoot && !canonical.startsWith(`${canonicalWorkspaceRoot}${sep}`)) {
+      throw new Error(`Repository Skill path resolves outside the task workspace: ${candidate}`);
+    }
+    if (candidate === requiredSkillPath && !(await stat(canonical)).isFile()) {
+      throw new Error(`Required repository E2E Skill must be a SKILL.md file: ${candidate}`);
+    }
+    paths.push(candidate);
   }
   return paths;
 }

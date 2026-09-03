@@ -36,8 +36,12 @@ export interface E2EFixtureLease {
 }
 
 export interface E2EFixtureLeaseProvider {
-  acquire(input: { owner: OwnerScope; runId: string; expectedSourceSha: string }): Promise<E2EFixtureLease>;
+  acquire(input: { owner: OwnerScope; runId: string; expectedSourceSha: string; baseUrl: string }): Promise<E2EFixtureLease>;
   release(lease: E2EFixtureLease): Promise<void>;
+}
+
+export interface E2EAuthenticationSecretProvider {
+  resolve(input: { owner: OwnerScope; names: readonly string[] }): Promise<Readonly<Record<string, string>>>;
 }
 
 export class NoopDraftPrBroker implements DraftPrBroker {
@@ -50,7 +54,7 @@ export class E2ECoordinator {
     private readonly repository: RunRepository,
     private readonly artifacts: ArtifactStore,
     private readonly prBroker: DraftPrBroker,
-    private readonly options: { maxRepairs: number; reviewBaseUrl: string; codeTasks?: CodeTaskRunnerProvider; effects?: SideEffectRunner; fixtureLeases?: E2EFixtureLeaseProvider },
+    private readonly options: { maxRepairs: number; reviewBaseUrl: string; codeTasks?: CodeTaskRunnerProvider; effects?: SideEffectRunner; authenticationSecrets?: E2EAuthenticationSecretProvider },
   ) {}
 
   assertExecutionAvailable(): void {
@@ -80,6 +84,7 @@ export class E2ECoordinator {
       id: randomUUID(), requestId, sourceSessionId: source.sessionId,
       changeSetId: trustedInput.changeSetId, contextSnapshot, caseSnapshot: [], amendments: [], codeTaskIds: [],
       repository: trustedInput.repository, platform: trustedInput.platform,
+      testEnvironment: trustedInput.testEnvironment,
       playwrightVerification: trustedInput.playwrightVerification,
       framework: trustedInput.framework, status: "queued", revision: 1, createdAt: now, updatedAt: now, artifacts: [],
     };
@@ -103,8 +108,12 @@ export class E2ECoordinator {
     if (!run.playwrightVerification) {
       throw new Error("This legacy E2E run has no frozen Playwright verification mapping; create a new run");
     }
+    if (!run.testEnvironment) {
+      throw new Error("This legacy E2E run has no frozen test environment; create a new run");
+    }
     const trustedRepositoryExecution: E2ERepositoryExecution = {
       ...repositoryExecution,
+      testEnvironment: run.testEnvironment,
       verification: run.playwrightVerification,
     };
     const executionBrief = freezeE2EExecutionBrief({ context: run.contextSnapshot, cases, repository: trustedRepositoryExecution });
@@ -201,6 +210,8 @@ export class E2ECoordinator {
   private async verifyWithCodeTask(owner: OwnerScope, runId: string, requirePassing: boolean): Promise<void> {
     let run = await this.requireRun(owner, runId);
     if (!run.executionBrief || !run.briefHash || !run.baseSha) throw new Error("E2E execution brief and pinned base SHA must be frozen before verification");
+    if (!run.testEnvironment) throw new Error("This legacy E2E run has no frozen test environment; create a new run");
+    const testEnvironment = run.testEnvironment;
     const patchRef = run.artifacts.find(item => item.kind === "patch" && item.id === `${run.id}:patch`);
     if (!patchRef) throw new Error("Clean verifier requires the persisted author patch");
     const runner = await this.options.codeTasks!.forScope({ ...owner, sessionId: run.sourceSessionId });
@@ -215,26 +226,33 @@ export class E2ECoordinator {
       kind: "author",
       inputPatchRef: patchRef,
     });
+    const authentication = run.executionBrief?.repository.e2eAuthentication;
+    if (!authentication) throw new Error("Clean verifier requires the frozen repository authentication contract");
+    if (!this.options.authenticationSecrets) throw new Error("Clean verifier authentication secrets are not configured");
+    const authenticationEnvironment = await this.options.authenticationSecrets.resolve({
+      owner,
+      names: authentication.requiredEnvironment,
+    });
+    const unexpectedAuthenticationEnvironment = Object.keys(authenticationEnvironment)
+      .filter(name => !authentication.requiredEnvironment.includes(name));
+    if (unexpectedAuthenticationEnvironment.length > 0) {
+      throw new Error(`Clean verifier authentication provider returned undeclared environment variables: ${unexpectedAuthenticationEnvironment.join(", ")}`);
+    }
+    for (const name of authentication.requiredEnvironment) {
+      if (!authenticationEnvironment[name]?.trim()) throw new Error(`Clean verifier authentication environment is missing ${name}`);
+    }
     run = await this.repository.update(owner, run.id, run.revision, { codeTaskIds: [...run.codeTaskIds, taskId] });
     await this.repository.addEvent(owner, run.id, "code_task.submitted", "Sandbox verifier CodeTask submitted", codeTaskMetadata(spec));
     const startedAt = Date.now();
-    const fixtureLease = this.options.fixtureLeases
-      ? await this.options.fixtureLeases.acquire({ owner, runId: run.id, expectedSourceSha: run.baseSha! })
-      : undefined;
-    let executed;
-    try {
-      executed = await submitAndWaitForCodeTask(runner, spec, {
-        deadlineMs: spec.deadlineMs + 30_000,
-        lostRetries: 1,
-        onHeartbeat: throttledHeartbeat(() => this.repository.heartbeat(owner, run.id)),
-        ...(fixtureLease ? { secrets: { environment: {
-          QASEY_E2E_BASE_URL: fixtureLease.baseUrl,
-          QASEY_E2E_SESSION_TOKEN: fixtureLease.sessionToken,
-        } } } : {}),
-      });
-    } finally {
-      if (fixtureLease) await this.options.fixtureLeases!.release(fixtureLease);
-    }
+    const executed = await submitAndWaitForCodeTask(runner, spec, {
+      deadlineMs: spec.deadlineMs + 30_000,
+      lostRetries: 1,
+      onHeartbeat: throttledHeartbeat(() => this.repository.heartbeat(owner, run.id)),
+      secrets: { environment: {
+        ...authenticationEnvironment,
+        QASEY_E2E_BASE_URL: testEnvironment.baseUrl,
+      } },
+    });
     const result = executed.result;
     await this.repository.addEvent(owner, run.id, "code_task.completed", `Sandbox verifier CodeTask ${result.status}`, {
       ...codeTaskMetadata(executed.spec), status: result.status, durationMs: Date.now() - startedAt, provenance: result.provenance,
@@ -293,6 +311,10 @@ export class E2ECoordinator {
     if (!playwrightVerification) {
       throw new Error("CodeTask execution requires the frozen Playwright verification mapping; create a new run");
     }
+    const e2eSkillPath = run.executionBrief?.repository.e2eSkillPath;
+    if (["web-e2e-author", "web-e2e-repair"].includes(options.profile) && !e2eSkillPath) {
+      throw new Error("CodeTask authoring requires the frozen repository-local project Skill; create a new run");
+    }
     return {
       taskId,
       attemptId: `${attempt}-${randomUUID()}`,
@@ -312,6 +334,8 @@ export class E2ECoordinator {
       executionProfileId: options.profile,
       allowedPaths: run.repository.allowedPaths,
       fixedChecks: options.profile === "web-e2e-verifier" ? [{ id: "repo-install" }, { id: "playwright" }] : [{ id: "repo-install" }],
+      ...(e2eSkillPath ? { e2eSkillPath } : {}),
+      e2eRequiredEnvironment: run.executionBrief?.repository.e2eAuthentication?.requiredEnvironment ?? [],
       playwrightVerification,
       deadlineMs: 20 * 60_000,
       traceContext: { ...(run.traceId ? { traceId: run.traceId } : {}) },

@@ -32,7 +32,12 @@ docker compose -f docker-compose.yml -f docker-compose.runtime.yml up --build -d
 在被 Git 忽略的 `.env` 中填写 `OPENAI_API_KEY`，或在命令前注入该变量。Code Task
 的 Sandbox 已启动，但目标仓库仍必须由部署者显式配置：将
 `config/e2e-repository.example.json` 复制为被忽略的
-`config/e2e-repository.json` 并填写获授权的仓库。
+`config/e2e-repository.json` 并填写获授权的仓库。目标仓库还必须提交一个由
+`web.target.e2eSkillPath` 精确指向的项目级 E2E Skill，用于声明登录、测试身份、
+数据准备与 Playwright 约定；并由 `e2eAuthentication.setupPath` 指向的 Playwright setup 从
+`e2eAuthentication.requiredEnvironment` 声明的环境变量完成真实
+登录。Qasey 部署的 Secret store 只向 Sandbox verifier 提供这些变量，Skill 和代码中
+不得保存账号密码或租户数据。任一契约缺失时 E2E 预检会阻止创建 Run。
 
 Compose 使用固定的本地开发密钥与容器内 HTTP Sandbox 网络，只用于本机开发；生产
 环境应使用下文的角色隔离镜像和外部密钥管理，不得复用这些默认值。
@@ -45,6 +50,12 @@ Sandbox。进入容器后运行：
 ```bash
 pnpm dev:container
 ```
+
+Compose 在创建容器时只会自动读取根目录的 `.env` 做变量插值；Qasey 开发实例还会
+从挂载的项目根目录按标准顺序读取 `.env.local`。因此本地 `GITHUB_TOKEN` 可以继续
+保存在被 Git 忽略的 `.env.local`，而 Compose 已显式提供的数据库和容器网络配置拥有
+更高优先级。发布镜像不包含这些文件，runtime Compose 仍应通过 `.env`、Shell 或
+Secret manager 注入变量。
 
 也可以先用 `pnpm compose:dev` 创建同一套容器，再让支持 Compose Remote 的编辑器附着
 到 `development` 服务。此模式保留 API/Sandbox 隔离，但开发容器额外包含源码、开发
@@ -70,7 +81,7 @@ PostgreSQL/Redis 并执行 Prisma migration。首次运行后应按需要填写�
 
 - Agent：`POST /studio/api/agents/qasey-main/generate`、`/stream`
 - Workflow：`POST /studio/api/workflows/qasey-e2e-lifecycle/start`、`/resume`
-- Qasey Run：`GET|POST /v1/runs` 与 owner-scoped 子资源
+- Qasey Run：`GET|POST /v1/case-hub/runs` 与 owner-scoped 子资源
 - Slack（Admin UI 管理）：`POST /channels/slack/apps/:webhookId/events`
 - Slack（兼容原有环境变量配置）：`POST /studio/api/agents/qasey-main/channels/slack/webhook`
 - Jira：`POST /webhooks/jira`（签名后直接进入原生 Agent）
@@ -97,7 +108,7 @@ PostgreSQL/Redis 并执行 Prisma migration。首次运行后应按需要填写�
 - Admin UI 的“触发器”通过通用 TriggerProvider registry 管理外部事件来源与 Agent/Workflow 绑定；Slack 是首个 provider，可保存多个已安装的 Slack App 并获取稳定 Webhook URL。Bot Token 与 Signing Secret 会在服务端加密保存，不需要配置 `SLACK_*` 环境变量
 - `SLACK_BOT_TOKEN`、`SLACK_SIGNING_SECRET`；本地 Socket Mode 可用 `SLACK_SOCKET_MODE_APP_TOKEN`（仅用于兼容原有单 App 配置）
 - `JIRA_BASE_URL`、`JIRA_EMAIL`、`JIRA_API_TOKEN`、`JIRA_WEBHOOK_TOKEN`
-- `GITHUB_APP_ID`、`GITHUB_APP_INSTALLATION_ID`、`GITHUB_APP_PRIVATE_KEY`：GitHub App installation authentication
+- `GITHUB_TOKEN`：GitHub personal access token（PAT）；发布 Draft PR 需要目标仓库的 Contents 与 Pull requests 读写权限
 - `QASEY_MCP_CONFIG_FILE`、`QASEY_MCP_OAUTH_DIR`；MCP 默认不配置；multi
   模式仅允许静态 subject-bound OAuth，Bearer MCP 必须保存为租户加密外部连接
 - `MASTRA_ENCRYPTION_KEY`、`MASTRA_ENCRYPTION_ACTIVE_KEY_ID` 与
