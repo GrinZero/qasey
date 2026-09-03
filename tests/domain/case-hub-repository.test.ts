@@ -21,6 +21,7 @@ describe("Case Hub repository", () => {
     const [first] = await hub.createPendingResults(owner, changeSet.id, "97bb25db-18df-428e-af86-be305ad8b2ff", [
       { id: "matching-video", kind: "video", name: "verifier/qasey-dogfood/truncated-output/video.webm", uri: "file:///tmp/video.webm" },
       { id: "other-video", kind: "video", name: "verifier/qasey-dogfood/another-case/video.webm", uri: "file:///tmp/other.webm" },
+      { id: "implementation-log", kind: "log", name: "verifier/repo-install.log", uri: "file:///tmp/repo-install.log" },
     ], undefined, [{
       caseId: version!.caseId,
       executionStatus: "passed",
@@ -31,6 +32,8 @@ describe("Case Hub repository", () => {
     expect((await hub.versionsForCase(owner, version!.caseId))[0]?.status).toBe("approved");
     const [second] = await hub.createPendingResults(owner, changeSet.id, "d825e3e4-9dc3-4ad6-829c-2f31ead90bbb", [], [version!.id]);
     expect(second?.attempt).toBe(2);
+    await expect(hub.reviewResult(owner, second!.id, "qa-1", { verdict: "approve" }))
+      .rejects.toThrow("A video or Playwright trace is required before approval");
     expect(first?.reviewStatus).toBe("pending");
     expect((await hub.versionsForCase(owner, version!.caseId))[0]?.status).toBe("proposed");
   });

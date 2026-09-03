@@ -1,6 +1,9 @@
+import "../../src/load-env.ts";
 import { defineConfig, devices } from "@playwright/test";
+import { authStatePath } from "./auth-state.ts";
 
-const baseURL = process.env.QASEY_E2E_BASE_URL ?? "http://127.0.0.1:4111";
+process.env.BASE_URL ??= "http://localhost:4111";
+const baseURL = process.env.BASE_URL;
 
 export default defineConfig({
   testDir: ".",
@@ -21,7 +24,13 @@ export default defineConfig({
     trace: "on",
     screenshot: "only-on-failure",
     video: "on",
-    storageState: process.env.QASEY_E2E_STORAGE_STATE_PATH,
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    { name: "setup", testMatch: /auth\.setup\.ts/u },
+    {
+      name: "chromium",
+      dependencies: ["setup"],
+      use: { ...devices["Desktop Chrome"], storageState: authStatePath },
+    },
+  ],
 });

@@ -15,10 +15,7 @@ export interface TaskHandle {
 }
 
 export interface CodeTaskSecrets {
-  environment?: {
-    QASEY_E2E_BASE_URL?: string;
-    QASEY_E2E_SESSION_TOKEN?: string;
-  };
+  environment?: Readonly<Record<string, string>>;
 }
 
 export interface CodeTaskRunner {

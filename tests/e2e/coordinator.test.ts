@@ -148,17 +148,20 @@ describe("E2E coordinator", () => {
     const owner = { applicationId: "qasey", tenantId: "tenant-1" };
     const repository = new InMemoryRunRepository();
     const submitted: CodeTaskSpec[] = [];
-    const runner = fakeRunner(submitted);
+    const submittedSecrets: Array<Readonly<Record<string, string>> | undefined> = [];
+    const runner = fakeRunner(submitted, submittedSecrets);
     const draftPr = broker();
-    const fixtureLease = {
-      acquire: vi.fn(async () => ({ id: "lease-1", baseUrl: "https://e2e.example.test", sourceSha: baseSha, sessionToken: "s".repeat(32) })),
-      release: vi.fn(async () => undefined),
+    const authenticationSecrets = {
+      resolve: vi.fn(async () => ({
+        E2E_LOGIN_EMAIL: "operator@example.test",
+        E2E_LOGIN_PASSWORD: "redacted-password",
+      })),
     };
     const coordinator = new E2ECoordinator(repository, artifacts(), draftPr, {
       maxRepairs: 2,
       reviewBaseUrl: "https://qasey.test",
       codeTasks: { forScope: vi.fn(async () => runner) } satisfies CodeTaskRunnerProvider,
-      fixtureLeases: fixtureLease,
+      authenticationSecrets,
     });
     const run = await coordinator.create(owner, createInput());
     expect(run.playwrightVerification).toEqual(playwrightVerification);
@@ -180,6 +183,13 @@ describe("E2E coordinator", () => {
       baseSha,
       allowedPaths: ["e2e"],
       skillPaths: [],
+      e2eSkillPath: ".agents/skills/e2e-testing/SKILL.md",
+      e2eAuthentication: {
+        strategy: "repository-playwright-setup",
+        setupPath: "e2e/auth.setup.ts",
+        setupProject: "setup",
+        requiredEnvironment: ["E2E_LOGIN_EMAIL", "E2E_LOGIN_PASSWORD"],
+      },
       specGlobs: ["e2e/**/*.spec.ts"],
       artifactGlobs: [],
       verification: playwrightVerification,
@@ -199,13 +209,18 @@ describe("E2E coordinator", () => {
     ]);
     expect(submitted[1]?.attemptId).not.toBe(submitted[0]?.attemptId);
     expect(draftPr.publishChanges).toHaveBeenCalledTimes(1);
-    expect(fixtureLease.acquire).toHaveBeenCalledWith({
+    expect(authenticationSecrets.resolve).toHaveBeenCalledWith({
       owner,
-      runId: run.id,
-      expectedSourceSha: baseSha,
-      baseUrl: "https://e2e.example.test",
+      names: ["E2E_LOGIN_EMAIL", "E2E_LOGIN_PASSWORD"],
     });
-    expect(fixtureLease.release).toHaveBeenCalledTimes(1);
+    expect(submittedSecrets).toEqual([
+      undefined,
+      {
+        QASEY_E2E_BASE_URL: "https://e2e.example.test",
+        E2E_LOGIN_EMAIL: "operator@example.test",
+        E2E_LOGIN_PASSWORD: "redacted-password",
+      },
+    ]);
     expect(await repository.get(owner, run.id)).toMatchObject({
       status: "awaiting_qa",
       pullRequestUrl: "https://github.com/o/r/pull/1",
@@ -230,6 +245,13 @@ function createInput() {
       baseRef: "main",
       allowedPaths: ["e2e"],
       skillsPaths: [],
+      e2eSkillPath: ".agents/skills/e2e-testing/SKILL.md",
+      e2eAuthentication: {
+        strategy: "repository-playwright-setup" as const,
+        setupPath: "e2e/auth.setup.ts",
+        setupProject: "setup",
+        requiredEnvironment: ["E2E_LOGIN_EMAIL", "E2E_LOGIN_PASSWORD"],
+      },
     },
     testEnvironment: { id: "qasey-test", baseUrl: "https://e2e.example.test" },
     playwrightVerification,
@@ -269,13 +291,17 @@ function broker(): DraftPrBroker {
   };
 }
 
-function fakeRunner(submitted: CodeTaskSpec[]): CodeTaskRunner {
+function fakeRunner(
+  submitted: CodeTaskSpec[],
+  submittedSecrets: Array<Readonly<Record<string, string>> | undefined> = [],
+): CodeTaskRunner {
   const specs = new Map<string, CodeTaskSpec>();
   const patchRef = ref("sandbox-patch", "patch", "changes.patch", "sandbox://changes.patch");
   const contentRef = ref("sandbox-content", "report", "a.spec.ts", "sandbox://a.spec.ts");
   return {
-    submit: vi.fn(async spec => {
+    submit: vi.fn(async (spec, secrets) => {
       submitted.push(spec);
+      submittedSecrets.push(secrets?.environment);
       specs.set(spec.taskId, spec);
       return { taskId: spec.taskId, attemptId: spec.attemptId, status: "succeeded" as const };
     }),

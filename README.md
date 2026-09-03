@@ -32,7 +32,12 @@ docker compose -f docker-compose.yml -f docker-compose.runtime.yml up --build -d
 在被 Git 忽略的 `.env` 中填写 `OPENAI_API_KEY`，或在命令前注入该变量。Code Task
 的 Sandbox 已启动，但目标仓库仍必须由部署者显式配置：将
 `config/e2e-repository.example.json` 复制为被忽略的
-`config/e2e-repository.json` 并填写获授权的仓库。
+`config/e2e-repository.json` 并填写获授权的仓库。目标仓库还必须提交一个由
+`web.target.e2eSkillPath` 精确指向的项目级 E2E Skill，用于声明登录、测试身份、
+数据准备与 Playwright 约定；并由 `e2eAuthentication.setupPath` 指向的 Playwright setup 从
+`e2eAuthentication.requiredEnvironment` 声明的环境变量完成真实
+登录。Qasey 部署的 Secret store 只向 Sandbox verifier 提供这些变量，Skill 和代码中
+不得保存账号密码或租户数据。任一契约缺失时 E2E 预检会阻止创建 Run。
 
 Compose 使用固定的本地开发密钥与容器内 HTTP Sandbox 网络，只用于本机开发；生产
 环境应使用下文的角色隔离镜像和外部密钥管理，不得复用这些默认值。
@@ -45,6 +50,12 @@ Sandbox。进入容器后运行：
 ```bash
 pnpm dev:container
 ```
+
+Compose 在创建容器时只会自动读取根目录的 `.env` 做变量插值；Qasey 开发实例还会
+从挂载的项目根目录按标准顺序读取 `.env.local`。因此本地 `GITHUB_TOKEN` 可以继续
+保存在被 Git 忽略的 `.env.local`，而 Compose 已显式提供的数据库和容器网络配置拥有
+更高优先级。发布镜像不包含这些文件，runtime Compose 仍应通过 `.env`、Shell 或
+Secret manager 注入变量。
 
 也可以先用 `pnpm compose:dev` 创建同一套容器，再让支持 Compose Remote 的编辑器附着
 到 `development` 服务。此模式保留 API/Sandbox 隔离，但开发容器额外包含源码、开发

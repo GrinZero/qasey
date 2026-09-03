@@ -51,10 +51,10 @@ export const SandboxCodeTaskStartSchema = z.object({
   spec: CodeTaskSpecSchema,
   context: z.string().max(256 * 1024),
   secrets: z.object({
-    environment: z.object({
-      QASEY_E2E_BASE_URL: z.url().optional(),
-      QASEY_E2E_SESSION_TOKEN: z.string().min(32).max(512).optional(),
-    }).strict().refine(value => Boolean(value.QASEY_E2E_BASE_URL) === Boolean(value.QASEY_E2E_SESSION_TOKEN), "E2E base URL and session token must be provided together").optional(),
+    environment: z.record(
+      z.string().regex(/^[A-Z][A-Z0-9_]{0,99}$/u),
+      z.string().min(1).max(32 * 1024).refine(value => !value.includes("\0"), "Secret environment values cannot contain NUL bytes"),
+    ).refine(value => Object.keys(value).length <= 33, "At most 33 E2E environment variables may be provided").optional(),
   }).strict().optional(),
 }).strict();
 export const SandboxCodeTaskCancelSchema = z.object({

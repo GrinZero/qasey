@@ -198,10 +198,17 @@ export const e2eFixtureLeaseService = new E2EFixtureLeaseService(
 );
 export const e2ePreflight = new E2EPreflightService({
   buildMetadata,
-  fixture: e2eFixtureLeaseService,
+  environment: process.env,
   ...(sandboxPoolClient ? { sandbox: sandboxPoolClient } : {}),
   ...(githubClient ? { github: githubClient } : {}),
 });
+const e2eAuthenticationSecrets = {
+  resolve: async ({ names }: { names: readonly string[] }) => Object.fromEntries(names.map(name => {
+    const value = process.env[name];
+    if (!value?.trim()) throw new Error(`E2E authentication environment is missing ${name}`);
+    return [name, value];
+  })),
+};
 export const e2eCoordinator = new E2ECoordinator(
   runRepository,
   artifactStore,
@@ -211,7 +218,7 @@ export const e2eCoordinator = new E2ECoordinator(
     reviewBaseUrl: config.QASEY_PUBLIC_BASE_URL,
     effects: sideEffectExecutor,
     ...(codeTaskRunnerProvider ? { codeTasks: codeTaskRunnerProvider } : {}),
-    fixtureLeases: e2eFixtureLeaseService,
+    authenticationSecrets: e2eAuthenticationSecrets,
   },
 );
 

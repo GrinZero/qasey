@@ -66,6 +66,8 @@ describe("community deployment", () => {
     expect(developmentCompose).toContain("- .:/app");
     expect(developmentCompose).not.toContain("- .env.example");
     expect(developmentCompose).toContain("QASEY_SANDBOX_ENDPOINT_TEMPLATE: http://sandbox-{ordinal}:4120");
+    expect(developmentCompose).not.toContain("GITHUB_TOKEN:");
+    expect(runtimeCompose).toContain("GITHUB_TOKEN: ${GITHUB_TOKEN:-}");
     expect(runtimeCompose).not.toContain("privileged: true");
     expect(developmentCompose).not.toContain("privileged: true");
     expect(runtimeCompose).not.toContain("SYS_ADMIN");

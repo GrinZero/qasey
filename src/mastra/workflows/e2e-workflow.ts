@@ -46,6 +46,12 @@ const freezeExecutionBriefStep = createStep({
     if (run.contextSnapshot.blockingQuestions.length > 0) {
       throw new Error(`E2E context has unresolved blocking questions: ${run.contextSnapshot.blockingQuestions.join("; ")}`);
     }
+    if (!run.repository.e2eSkillPath) {
+      throw new Error("This legacy E2E run has no frozen repository-local project Skill; create a new run");
+    }
+    if (!run.repository.e2eAuthentication) {
+      throw new Error("This legacy E2E run has no frozen repository authentication contract; create a new run");
+    }
     abortSignal.throwIfAborted();
     const changeSet = await caseHubRepository.getChangeSet(owner, run.changeSetId);
     if (!changeSet) throw new Error(`Case Hub change set ${run.changeSetId} not found`);
@@ -72,6 +78,8 @@ const freezeExecutionBriefStep = createStep({
       baseSha,
       allowedPaths: run.repository.allowedPaths,
       skillPaths: run.repository.skillsPaths,
+      e2eSkillPath: run.repository.e2eSkillPath,
+      e2eAuthentication: run.repository.e2eAuthentication,
       ...(run.repository.installCommand ? { installCommand: run.repository.installCommand } : {}),
       testCommand: ["pnpm", "exec", "playwright", "test", "--config=<changed-project>", "--project=<configured-project>"],
       specGlobs: run.repository.allowedPaths,

@@ -25,23 +25,24 @@ Chromium, and a strict one-test-to-one-case mapping.
 Results are append-only. A rerun creates a new Attempt and never overwrites old
 evidence. Product and environment blockers do not trigger assertion weakening.
 
-## Test environment
+## Test environment and login
 
-The service audience can read `GET /internal/e2e/version`, create a TTL-bound
-fixture lease with `POST /internal/e2e/leases`, and idempotently clean it with
-`DELETE /internal/e2e/leases/:id`. The build automatically stamps the checked-out
-Git commit into a runtime artifact. The Workflow freezes that observed value on
-the Change Set and blocks when it differs from the repository base SHA; callers
-cannot submit or override it. Each fresh verifier obtains a lease directly from
-the shared in-process fixture service, receives `QASEY_E2E_BASE_URL` plus a
-one-shot Playwright storage-state file, and releases the lease in a `finally`
-path with idempotent retries. `PLATFORM_SERVICE_TOKEN` authenticates external
-service callers of the HTTP API only and is not used for Qasey self-calls.
+The build automatically stamps the checked-out Git commit into a runtime
+artifact. The Workflow freezes that observed value on the Change Set and blocks
+when it differs from the repository base SHA; callers cannot submit or override
+it. Generic target verification uses the target repository's checked-in
+Playwright setup project. Qasey supplies `BASE_URL` and only the secret variable
+names declared by the repository configuration to the non-Agent verifier. The
+setup performs the login and owns any storage-state file under an ignored test
+output path. Those variables do not enter prompts, Change Set JSON, logs, PRs,
+or artifacts.
 
-The opaque browser token crosses only the authenticated sandbox start request;
-the sandbox runtime materializes it as a mode-0600 storage-state file for the
-non-Agent verifier. It is not part of the CodeTask spec or manifest, prompts,
-Change Set JSON, logs, PRs, or artifacts.
+The target repository's project Skill identifies the test-account class,
+role/tenant, login route, setup file, and cleanup rules. Qasey's Sandbox verifier
+receives the declared variables from the deployment secret source and runs the
+configured Playwright project. The internal `/internal/e2e/leases` API is
+reserved for explicit Qasey service tests and is not used to authenticate an
+arbitrary target product.
 
 ## Native CodeTask rollout
 

@@ -92,6 +92,7 @@ export function App() {
   const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
   const [applications, setApplications] = useState<AgentApplication[]>([]);
   const [runs, setRuns] = useState<QaseyRun[]>([]);
+  const [changeSets, setChangeSets] = useState<CaseHubChangeSet[]>([]);
   const [dataError, setDataError] = useState("");
   const [loadingRuns, setLoadingRuns] = useState(false);
 
@@ -99,10 +100,13 @@ export function App() {
     setLoadingRuns(true);
     setDataError("");
     try {
-      const [catalogResponse, applicationsResponse, runsResponse] = await Promise.all([api.catalog(), api.applications(), api.listRuns()]);
+      const [catalogResponse, applicationsResponse, runsResponse, changeSetResponse] = await Promise.all([
+        api.catalog(), api.applications(), api.listRuns(), api.listChangeSets(),
+      ]);
       setCatalog(catalogResponse);
       setApplications(applicationsResponse);
       setRuns(runsResponse.runs);
+      setChangeSets(changeSetResponse.changeSets);
     } catch (error) {
       if (!(error instanceof ApiError && error.status === 401)) setDataError(errorMessage(error));
     } finally {
@@ -155,7 +159,9 @@ export function App() {
   if (auth.kind === "selecting-organization") return <OrganizationSelectionScreen initialSelection={auth.selection} />;
 
   const activeCount = runs.filter(run => activeStatuses.includes(run.status)).length;
-  const reviewCount = runs.filter(run => run.status === "awaiting_qa").length;
+  const reviewableChangeSetIds = new Set(changeSets.filter(changeSet => changeSet.status === "awaiting_review").map(changeSet => changeSet.id));
+  const reviewRuns = runs.filter(run => reviewableChangeSetIds.has(run.changeSetId));
+  const reviewCount = reviewableChangeSetIds.size;
   const view = viewForAdminPath(location.pathname);
   const platformNav: Array<{ id: View; label: string; icon: typeof Gauge; badge?: number }> = [
     { id: "platform-home", label: "平台首页", icon: LayoutDashboard },
@@ -239,13 +245,13 @@ export function App() {
         <div className="page">
           {dataError && <InlineError message={dataError} action="重新加载" onAction={loadWorkspace} />}
           <Routes>
-            <Route path={adminPaths["platform-home"]} element={<PlatformHome applications={applications} runs={runs} loading={loadingRuns} onOpenApplication={openApplication} onOpenInbox={() => openView("inbox")} />} />
-            <Route path={adminPaths.inbox} element={<UnifiedInbox runs={runs} onOpenQaseyReview={() => openView("qasey-review")} />} />
+            <Route path={adminPaths["platform-home"]} element={<PlatformHome applications={applications} runs={runs} reviewRuns={reviewRuns} reviewCount={reviewCount} loading={loadingRuns} onOpenApplication={openApplication} onOpenInbox={() => openView("inbox")} />} />
+            <Route path={adminPaths.inbox} element={<UnifiedInbox runs={reviewRuns} onOpenQaseyReview={() => openView("qasey-review")} />} />
             <Route path={adminPaths.activity} element={<ActivityView runs={runs} loading={loadingRuns} onRefresh={loadWorkspace} />} />
             <Route path={adminPaths["qasey-overview"]} element={<Overview catalog={catalog} runs={runs} loading={loadingRuns} onRefresh={loadWorkspace} onOpenRuns={() => openView("qasey-runs")} />} />
             <Route path={adminPaths["qasey-runs"]} element={<RunsView runs={runs} loading={loadingRuns} onRefresh={loadWorkspace} />} />
             <Route path={adminPaths["qasey-cases"]} element={<CaseHubView />} />
-            <Route path={adminPaths["qasey-review"]} element={<CaseHubView />} />
+            <Route path={adminPaths["qasey-review"]} element={<QaReviewView onReviewQueueChanged={loadWorkspace} />} />
             <Route path={adminPaths["qasey-cua"]} element={<CuaView subjectId={auth.session.subjectId} />} />
             <Route path={adminPaths.triggers} element={auth.session.isAdmin ? <TriggersView /> : <Navigate to={adminPaths["platform-home"]} replace />} />
             <Route path={adminPaths.access} element={auth.session.isAdmin ? <AccessView session={auth.session} /> : <Navigate to={adminPaths["platform-home"]} replace />} />
@@ -505,9 +511,8 @@ function OrganizationSelectionScreen({ initialSelection }: { initialSelection: O
   );
 }
 
-function PlatformHome({ applications, runs, loading, onOpenApplication, onOpenInbox }: { applications: AgentApplication[]; runs: QaseyRun[]; loading: boolean; onOpenApplication: (application: AgentApplication) => void; onOpenInbox: () => void }) {
+function PlatformHome({ applications, runs, reviewRuns, reviewCount, loading, onOpenApplication, onOpenInbox }: { applications: AgentApplication[]; runs: QaseyRun[]; reviewRuns: QaseyRun[]; reviewCount: number; loading: boolean; onOpenApplication: (application: AgentApplication) => void; onOpenInbox: () => void }) {
   const active = runs.filter(run => activeStatuses.includes(run.status));
-  const review = runs.filter(run => run.status === "awaiting_qa");
   return <>
     <PageHeading eyebrow="Qasey Agent Platform" title="工作交给 Agent，判断留给人" description="从一个入口找到合适的 Agent Application，并集中处理所有需要你介入的工作。" />
     <section className="surface handoff-runway" aria-label="Agent 工作流概览">
@@ -517,7 +522,7 @@ function PlatformHome({ applications, runs, loading, onOpenApplication, onOpenIn
         <i><ArrowRight size={15} /></i>
         <div className="runway-apps">{applications.length ? applications.slice(0,3).map(application => <span className={`mini-app ${application.accent}`} key={application.id} title={application.name}>{application.name.slice(0,1)}</span>) : <span className="mini-app neutral">—</span>}</div>
         <i><ArrowRight size={15} /></i>
-        <button className="runway-node handoff" onClick={onOpenInbox}><span><UserRound size={17} /></span><div><strong>{review.length ? `${review.length} 项待处理` : "无需介入"}</strong><small>统一人工交接</small></div></button>
+        <button className="runway-node handoff" onClick={onOpenInbox}><span><UserRound size={17} /></span><div><strong>{reviewCount ? `${reviewCount} 项待处理` : "无需介入"}</strong><small>统一人工交接</small></div></button>
       </div>
     </section>
     <div className="platform-grid">
@@ -528,14 +533,14 @@ function PlatformHome({ applications, runs, loading, onOpenApplication, onOpenIn
             <div className="application-card-head"><span className={`app-glyph ${application.id === "qasey" ? "qasey" : "generic"}`}>{application.id === "qasey" ? <TestTube2 size={19} /> : <Bot size={19} />}</span><span className="online-badge"><i />在线</span></div>
             <p className="app-category">{application.category}</p><h3>{application.name}</h3><p className="app-description">{application.description}</p>
             <div className="capability-list">{application.capabilities.map(capability => <span key={capability}>{capability}</span>)}</div>
-            <div className="application-metrics"><div><strong>{application.id === "qasey" ? active.length : 0}</strong><span>进行中</span></div><div><strong>{application.id === "qasey" ? review.length : 0}</strong><span>待处理</span></div><button onClick={() => onOpenApplication(application)}>打开工作空间 <ArrowRight size={15} /></button></div>
+            <div className="application-metrics"><div><strong>{application.id === "qasey" ? active.length : 0}</strong><span>进行中</span></div><div><strong>{application.id === "qasey" ? reviewCount : 0}</strong><span>待处理</span></div><button onClick={() => onOpenApplication(application)}>打开工作空间 <ArrowRight size={15} /></button></div>
           </article>)}
           {!loading && applications.length === 0 && <EmptyState icon={AppWindow} title="没有可用的 Application" text="请联系平台管理员分配访问权限。" />}
         </div>
       </section>
       <section className="surface handoff-panel">
         <div className="list-heading"><div><h2>需要你的判断</h2><p>跨 Application 的统一 Inbox</p></div><button className="text-button" onClick={onOpenInbox}>全部 <ArrowRight size={15} /></button></div>
-        {review.length ? <div className="handoff-list">{review.slice(0,4).map(run => <button key={run.id} onClick={onOpenInbox}><span className="app-glyph qasey"><TestTube2 size={15} /></span><div><strong>{run.repository.owner}/{run.repository.repository}</strong><small>Qasey · 等待 QA 审阅 · {formatRelative(run.updatedAt)}</small></div><ChevronRight size={16} /></button>)}</div> : <div className="handoff-empty"><CheckCircle2 size={22} /><strong>当前没有待处理事项</strong><span>Agent 需要人工判断时会汇总到这里。</span></div>}
+        {reviewRuns.length ? <div className="handoff-list">{reviewRuns.slice(0,4).map(run => <button key={run.id} onClick={onOpenInbox}><span className="app-glyph qasey"><TestTube2 size={15} /></span><div><strong>{run.repository.owner}/{run.repository.repository}</strong><small>Qasey · 等待 QA 审阅 · {formatRelative(run.updatedAt)}</small></div><ChevronRight size={16} /></button>)}</div> : <div className="handoff-empty"><CheckCircle2 size={22} /><strong>当前没有待处理事项</strong><span>Agent 需要人工判断时会汇总到这里。</span></div>}
       </section>
     </div>
     <section className="surface platform-activity-preview"><div className="list-heading"><div><h2>最近活动</h2><p>所有 Application 的运行记录</p></div><span className="live-label"><i />实时更新</span></div><RunTable runs={runs.slice(0,4)} loading={loading} /></section>
@@ -543,7 +548,7 @@ function PlatformHome({ applications, runs, loading, onOpenApplication, onOpenIn
 }
 
 function UnifiedInbox({ runs, onOpenQaseyReview }: { runs: QaseyRun[]; onOpenQaseyReview: () => void }) {
-  const pending = runs.filter(run => run.status === "awaiting_qa");
+  const pending = runs;
   return <><PageHeading eyebrow="Unified Inbox" title="需要你的判断" description="不同 Agent Application 的人工交接集中在这里，同时保留原始上下文和业务动作。" />
     <div className="inbox-layout"><section className="surface inbox-list"><div className="inbox-toolbar"><div className="segmented"><button className="active">待处理 <span>{pending.length}</span></button><button>已完成</button></div><button className="filter-button"><ListFilter size={15} />筛选 Application</button></div>{pending.length ? pending.map(run => <button className="inbox-item" key={run.id} onClick={onOpenQaseyReview}><span className="app-glyph qasey"><TestTube2 size={17} /></span><div className="inbox-item-body"><span className="app-category">Qasey · QA approval</span><strong>{run.repository.owner}/{run.repository.repository} 等待审阅</strong><p>{run.artifacts.length} 项证据已就绪，需要决定批准或要求修改。</p><small><Clock3 size={13} />{formatRelative(run.updatedAt)} · <code>{compactId(run.id)}</code></small></div><span className="status-badge review"><ClipboardCheck size={14} />等待审阅</span><ChevronRight size={17} /></button>) : <div className="handoff-empty tall"><CheckCircle2 size={24} /><strong>Inbox 已清空</strong><span>暂时没有 Agent 需要你的判断。</span></div>}</section><aside className="inbox-guide"><span><Inbox size={20} /></span><h2>一个 Inbox，保留不同动作</h2><p>Qasey 请求 QA 结论；未来 Code Review 可以请求接受 Finding，CS Investigator 可以请求确认根因。平台只统一交接，不统一业务。</p></aside></div>
   </>;
@@ -613,45 +618,225 @@ function Overview({ catalog, runs, loading, onRefresh, onOpenRuns }: { catalog: 
   );
 }
 
+type CaseHubDetail = { case: CaseHubCase; versions: CaseHubCaseVersion[]; changeSets: CaseHubChangeSet[]; results: CaseHubResult[] };
+
 function CaseHubView() {
   const [cases, setCases] = useState<CaseHubCase[]>([]);
   const [changeSets, setChangeSets] = useState<CaseHubChangeSet[]>([]);
-  const [selected, setSelected] = useState<{ changeSet: CaseHubChangeSet; versions: CaseHubCaseVersion[]; results: CaseHubResult[] } | null>(null);
+  const [selected, setSelected] = useState<CaseHubDetail | null>(null);
+  const [detailLoadingId, setDetailLoadingId] = useState("");
   const [query, setQuery] = useState("");
-  const [feedback, setFeedback] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
   const load = useCallback(async () => {
     setError("");
     try {
       const [caseResponse, changeSetResponse] = await Promise.all([api.listCases(query), api.listChangeSets()]);
-      setCases(caseResponse.cases); setChangeSets(changeSetResponse.changeSets);
-      if (selected) setSelected(await api.getChangeSet(selected.changeSet.id));
+      setCases(caseResponse.cases);
+      setChangeSets(changeSetResponse.changeSets);
     } catch (cause) { setError(errorMessage(cause)); }
-  }, [query, selected?.changeSet.id]);
+  }, [query]);
   useEffect(() => { void load(); }, [load]);
-  const open = async (id: string) => { try { setSelected(await api.getChangeSet(id)); } catch (cause) { setError(errorMessage(cause)); } };
+
+  const open = async (caseId: string) => {
+    setDetailLoadingId(caseId); setError("");
+    try { setSelected(await api.getCase(caseId)); }
+    catch (cause) { setError(errorMessage(cause)); }
+    finally { setDetailLoadingId(""); }
+  };
+
+  return <>
+    <PageHeading eyebrow="Case Hub · 用例资产" title="Case Hub" description="查看每条 Case 的生效版本、历史提案、验收步骤和交付状态。人工结论仍在「待我审阅」完成。" action={<button className="secondary-button" onClick={() => void load()}><RefreshCw size={16} />刷新</button>} />
+    {error && <InlineError message={error} />}
+    <section className="surface case-library">
+      <div className="case-library-head">
+        <div><span className="section-icon"><Library size={18} /></span><div><h2>用例库</h2><p>{cases.length} 条符合条件的 QASEY Case</p></div></div>
+        <label className="case-search" htmlFor="case-hub-search"><Search size={17} /><span className="sr-only">搜索用例</span><input id="case-hub-search" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索 Case ID、标题或 Suite" /></label>
+      </div>
+      <div className="case-table-scroll"><table className="case-table"><caption className="sr-only">Case Hub 用例</caption><thead><tr><th>Case</th><th>Suite</th><th>当前版本</th><th>最新进度</th><th>最近更新</th><th><span className="sr-only">操作</span></th></tr></thead><tbody>
+        {cases.map(testCase => { const latestChangeSet = latestChangeSetForCase(testCase, changeSets); return <tr key={testCase.id}><td><button className="case-open" onClick={() => void open(testCase.id)}><span className="run-icon"><TestTube2 size={16} /></span><span><strong>{testCase.id}</strong><small>{testCase.title}</small></span></button></td><td>{testCase.suitePath}</td><td>{testCase.activeVersionId ? <span className="status-badge success">已生效</span> : <span className="status-badge">暂无</span>}</td><td>{latestChangeSet ? <ChangeSetBadge status={latestChangeSet.status} /> : <span className="status-badge">无交付记录</span>}</td><td className="updated">{formatRelative(testCase.updatedAt)}</td><td><button className="icon-button case-open-arrow" aria-label={`查看 ${testCase.id} 详情`} disabled={detailLoadingId === testCase.id} onClick={() => void open(testCase.id)}>{detailLoadingId === testCase.id ? <LoaderCircle className="spin" size={16} /> : <ChevronRight size={17} />}</button></td></tr>; })}
+        {cases.length === 0 && <tr><td colSpan={6}><div className="case-empty"><Library size={23} /><strong>{query ? "没有匹配的用例" : "Case Hub 还是空的"}</strong><span>{query ? "换一个 Case ID、标题或 Suite 试试。" : "通过需求分析创建的用例会出现在这里。"}</span></div></td></tr>}
+      </tbody></table></div>
+    </section>
+    {selected && <CaseDetailDialog detail={selected} onClose={() => setSelected(null)} />}
+  </>;
+}
+
+function CaseDetailDialog({ detail, onClose }: { detail: CaseHubDetail; onClose: () => void }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const initialVersionId = detail.case.activeVersionId ?? detail.versions.at(-1)?.id ?? "";
+  const [versionId, setVersionId] = useState(initialVersionId);
+  const version = detail.versions.find(item => item.id === versionId) ?? detail.versions.at(-1);
+  const changeSet = version ? detail.changeSets.find(item => item.caseVersionIds.includes(version.id)) : undefined;
+  const result = version ? latestCaseResults(detail.results.filter(item => item.caseVersionId === version.id))[0] : undefined;
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog && !dialog.open) dialog.showModal();
+    return () => dialog?.close();
+  }, []);
+
+  return <dialog ref={dialogRef} className="case-detail-dialog" aria-labelledby="case-detail-title" onCancel={event => { event.preventDefault(); onClose(); }}>
+      <header className="case-detail-head"><div><p className="eyebrow">Case archive · {detail.versions.length} 个版本</p><h2 id="case-detail-title">{detail.case.id} · {detail.case.title}</h2><p>{detail.case.suitePath}</p></div><button className="icon-button bordered" onClick={onClose} aria-label="关闭 Case 详情"><X size={18} /></button></header>
+      <div className="case-detail-layout">
+        <aside className="version-ledger" aria-label="Case 版本"><div><span>版本档案</span><small>最新在前</small></div>{[...detail.versions].reverse().map(item => { const itemChangeSet = detail.changeSets.find(candidate => candidate.caseVersionIds.includes(item.id)); return <button className={item.id === version?.id ? "active" : ""} key={item.id} onClick={() => setVersionId(item.id)}><span><strong>v{item.version}</strong><small>{formatDate(item.createdAt)}</small></span><VersionBadge version={item} changeSet={itemChangeSet} /></button>; })}</aside>
+        {version ? <main className="case-version-sheet">
+          <div className="case-version-title"><div className="case-version-mark"><span>V</span><strong>{version.version}</strong></div><div><div className="case-version-badges"><span>{version.priority}</span><span>{version.target === "web" ? "Web" : version.target}</span><VersionBadge version={version} changeSet={changeSet} /></div><h3>{version.title}</h3><p>{version.description || "这个版本没有补充说明。"}</p></div></div>
+          <section className="case-delivery-strip"><div><span>自动化文件</span><code>{version.automationPath}</code></div><div><span>Change Set</span><code>{changeSet ? compactId(changeSet.id) : "未关联"}</code></div><div><span>交付</span>{changeSet?.pullRequestUrl ? <a href={changeSet.pullRequestUrl} target="_blank" rel="noreferrer"><GitBranch size={14} />打开 Pull Request</a> : <strong>{changeSet ? changeSetStatusLabel(changeSet.status) : "暂无"}</strong>}</div></section>
+          <section className="case-archive-section"><div className="case-archive-heading"><h4>前置条件</h4><span>{version.preconditions.length}</span></div>{version.preconditions.length ? <ul className="case-preconditions">{version.preconditions.map(item => <li key={item}><CheckCircle2 size={14} />{item}</li>)}</ul> : <p className="case-archive-empty">无额外前置条件</p>}</section>
+          <section className="case-archive-section"><div className="case-archive-heading"><h4>验收步骤</h4><span>{version.steps.length}</span></div><ol className="case-archive-steps">{version.steps.map((step, index) => <li key={`${version.id}:${index}`}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{step.action}</strong><p>{step.expected.join("；")}</p></div></li>)}</ol></section>
+          <section className="case-archive-section case-archive-meta"><div><h4>标签</h4><p>{version.tags.length ? version.tags.map(tag => <span key={tag}>{tag}</span>) : "无标签"}</p></div><div><h4>内容指纹</h4><code>{compactHash(version.contentHash)}</code></div></section>
+          <section className="case-archive-section"><div className="case-archive-heading"><h4>QA 验收证据</h4>{result && <span>{reviewStatusLabel(result.reviewStatus)}</span>}</div>{result ? <QaEvidenceViewer result={result} /> : <p className="case-archive-empty">这个版本尚未产生 E2E 视频或 Playwright Trace。</p>}</section>
+        </main> : <main className="case-version-sheet case-version-sheet--empty"><FileSearch size={24} /><strong>没有可查看的版本</strong></main>}
+      </div>
+  </dialog>;
+}
+
+type ChangeSetDetail = { changeSet: CaseHubChangeSet; versions: CaseHubCaseVersion[]; results: CaseHubResult[] };
+
+function QaReviewView({ onReviewQueueChanged }: { onReviewQueueChanged: () => Promise<void> }) {
+  const [changeSets, setChangeSets] = useState<CaseHubChangeSet[]>([]);
+  const [selected, setSelected] = useState<ChangeSetDetail | null>(null);
+  const selectedId = useRef<string | undefined>(undefined);
+  const [activeVersionId, setActiveVersionId] = useState("");
+  const [feedback, setFeedback] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const pendingChangeSets = useMemo(() => changeSets.filter(changeSet => changeSet.status === "awaiting_review"), [changeSets]);
+
+  const open = useCallback(async (id: string) => {
+    setError("");
+    try {
+      const detail = await api.getChangeSet(id);
+      selectedId.current = id;
+      setSelected(detail);
+      const latest = latestCaseResults(detail.results);
+      setActiveVersionId(current => detail.versions.some(version => version.id === current)
+        ? current
+        : latest.find(result => result.reviewStatus === "pending")?.caseVersionId ?? detail.versions[0]?.id ?? "");
+    } catch (cause) { setError(errorMessage(cause)); }
+  }, []);
+
+  const load = useCallback(async () => {
+    setLoading(true); setError("");
+    try {
+      const response = await api.listChangeSets();
+      setChangeSets(response.changeSets);
+      const pending = response.changeSets.filter(changeSet => changeSet.status === "awaiting_review");
+      const nextId = pending.some(changeSet => changeSet.id === selectedId.current) ? selectedId.current : pending[0]?.id;
+      if (nextId) await open(nextId); else { selectedId.current = undefined; setSelected(null); setActiveVersionId(""); }
+    } catch (cause) { setError(errorMessage(cause)); }
+    finally { setLoading(false); }
+  }, [open]);
+
+  useEffect(() => { void load(); }, [load]);
+
   const review = async (result: CaseHubResult, verdict: "approve" | "request_changes" | "product_bug" | "environment_issue") => {
     const note = feedback[result.id]?.trim();
     if (verdict !== "approve" && !note) { setError("非批准结论需要填写反馈。"); return; }
-    try { await api.reviewCaseResult(result.id, verdict, note); await open(result.changeSetId ?? selected!.changeSet.id); }
+    if (verdict === "approve" && !hasQaEvidence(result)) { setError("没有 E2E 视频或 Playwright Trace，不能批准这个 Case。"); return; }
+    try { await api.reviewCaseResult(result.id, verdict, note); await Promise.all([load(), onReviewQueueChanged()]); }
     catch (cause) { setError(errorMessage(cause)); }
   };
   const latest = selected ? latestCaseResults(selected.results) : [];
+  const activeVersion = selected?.versions.find(version => version.id === activeVersionId) ?? selected?.versions[0];
+  const activeResult = activeVersion ? latest.find(result => result.caseVersionId === activeVersion.id) : undefined;
+  const approvedCount = latest.filter(result => result.reviewStatus === "approved").length;
+
   return <>
-    <PageHeading eyebrow="Case Hub · QASEY" title="测试用例与变更审阅" description="Case Hub 保存不可变 Case Version；Git 只保存与版本绑定的 Playwright。" action={<button className="secondary-button" onClick={() => void load()}><RefreshCw size={16} />刷新</button>} />
+    <PageHeading eyebrow="QA Review · 人工验收" title="待我审阅" description="一次只判断一个 Case。有效证据只有可播放的 E2E 视频或可交互的 Playwright Trace。" action={<button className="secondary-button" onClick={() => void Promise.all([load(), onReviewQueueChanged()])} disabled={loading}><RefreshCw className={loading ? "spin" : ""} size={16} />刷新</button>} />
     {error && <InlineError message={error} />}
-    <div className="overview-grid">
-      <section className="surface runs-surface"><div className="list-heading"><div><h2>Case repository</h2><p>{cases.length} 条 QASEY Case</p></div><label className="filter-button"><Search size={15} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索 ID、标题或 Suite" /></label></div>
-        <div className="run-table">{cases.map(testCase => <div className="run-row" key={testCase.id}><div className="run-name"><span className="run-icon"><TestTube2 size={16} /></span><div><strong>{testCase.id} · {testCase.title}</strong><span>{testCase.suitePath}</span></div></div><span>{testCase.activeVersionId ? "Active" : "Proposed"}</span></div>)}</div>
-      </section>
-      <section className="surface runs-surface"><div className="list-heading"><div><h2>Change Sets</h2><p>需求快照、PR 与逐 Case 进度</p></div></div>
-        <div className="handoff-list">{changeSets.map(changeSet => <button key={changeSet.id} onClick={() => void open(changeSet.id)}><span className="app-glyph qasey"><GitBranch size={15} /></span><div><strong>{changeSet.requirement.goal}</strong><small>{changeSet.status} · {changeSet.caseVersionIds.length} cases · {formatRelative(changeSet.updatedAt)}</small></div><ChevronRight size={16} /></button>)}</div>
-      </section>
+    <div className="review-workbench">
+      <aside className="surface review-queue"><div className="review-queue-head"><span>待审队列</span><strong>{pendingChangeSets.length}</strong></div>{pendingChangeSets.map(changeSet => <button className={selected?.changeSet.id === changeSet.id ? "active" : ""} key={changeSet.id} onClick={() => void open(changeSet.id)}><span className="app-glyph qasey"><ClipboardCheck size={15} /></span><div><strong>{changeSet.requirement.goal}</strong><small>{changeSet.caseVersionIds.length} Cases · {formatRelative(changeSet.updatedAt)}</small></div><ChevronRight size={16} /></button>)}{!loading && pendingChangeSets.length === 0 && <div className="review-queue-empty"><CheckCircle2 size={22} /><strong>已全部审完</strong><span>新的验证结果会进入这里。</span></div>}</aside>
+      {selected && activeVersion ? <main className="surface review-focus">
+        <header className="review-focus-head"><div><p className="eyebrow">{selected.changeSet.requirement.goal}</p><h2>{activeVersion.caseId} · {activeVersion.title}</h2><p>{selected.changeSet.requirement.requirementSummary}</p></div><div className="review-progress"><strong>{approvedCount}/{latest.length}</strong><span>已批准</span></div></header>
+        <nav className="case-switcher" aria-label="本次变更的 Case">{selected.versions.map(version => { const result = latest.find(item => item.caseVersionId === version.id); return <button className={version.id === activeVersion.id ? "active" : ""} key={version.id} onClick={() => setActiveVersionId(version.id)}><span>{version.caseId}</span><i className={`case-state case-state--${result?.reviewStatus ?? "verifying"}`} /> </button>; })}</nav>
+        <section className="case-review-body">
+          <div className="case-review-main"><div className="case-review-meta"><span>{activeVersion.priority}</span><span>{activeVersion.suitePath}</span><code>v{activeVersion.version} · {activeVersion.automationPath}</code></div>{activeResult ? <QaEvidenceViewer key={activeResult.id} result={activeResult} /> : <MissingEvidence message="验证尚未生成 Case Result。" />}
+            <div className="case-steps"><div className="case-steps-head"><h3>验收步骤</h3><span>{activeVersion.steps.length} 步</span></div><ol>{activeVersion.steps.map((step, index) => <li key={`${activeVersion.id}:${index}`}><span>{index + 1}</span><div><strong>{step.action}</strong><p>{step.expected.join("；")}</p></div></li>)}</ol></div>
+          </div>
+          <aside className="review-decision"><div><p className="eyebrow">你的结论</p><h3>{reviewStatusLabel(activeResult?.reviewStatus)}</h3><p>{activeResult?.reviewStatus === "pending" ? "先在左侧完成视频播放或 Trace 调试，再提交结论。" : activeResult?.feedback ?? "这个 Case 当前不需要操作。"}</p></div>{activeResult?.reviewStatus === "pending" && <><label htmlFor={`case-feedback-${activeResult.id}`}>问题说明 <span>非批准结论必填</span></label><textarea id={`case-feedback-${activeResult.id}`} value={feedback[activeResult.id] ?? ""} onChange={event => setFeedback(current => ({ ...current, [activeResult.id]: event.target.value }))} placeholder="描述实际结果、期望结果和复现位置" /><div className="review-actions review-actions--stacked"><button className="primary-button success-button" disabled={!hasQaEvidence(activeResult)} onClick={() => void review(activeResult, "approve")}><Check size={16} />批准这个 Case</button><button className="secondary-button" onClick={() => void review(activeResult, "request_changes")}>要求修改</button><button className="secondary-button" onClick={() => void review(activeResult, "product_bug")}>标记产品缺陷</button><button className="secondary-button" onClick={() => void review(activeResult, "environment_issue")}>标记环境问题</button></div>{!hasQaEvidence(activeResult) && <p className="approval-blocked"><CircleAlert size={14} />缺少有效 QA 证据，无法批准。</p>}</>}</aside>
+        </section>
+      </main> : <section className="surface review-focus review-focus--empty"><span><ClipboardCheck size={25} /></span><h2>{loading ? "正在加载待审队列" : "没有待审 Case"}</h2><p>{loading ? "正在读取最新的验证结果。" : "当前没有需要你判断的验证结果。"}</p></section>}
     </div>
-    {selected && <section className="surface recent-section"><div className="list-heading"><div><h2>{selected.changeSet.requirement.goal}</h2><p>{selected.changeSet.requirement.requirementSummary}</p></div><span className="status-badge review">{latest.filter(result => result.reviewStatus === "approved").length} / {latest.length} approved</span></div>
-      <div className="review-grid">{selected.versions.map(version => { const result = latest.find(item => item.caseVersionId === version.id); return <article className="review-card" key={version.id}><div className="review-card-head"><div><span>{version.priority} · {version.suitePath}</span><h3>{version.caseId} · {version.title}</h3><p>{version.automationPath} · v{version.version}</p></div><span className="status-badge review">{result?.reviewStatus ?? "verifying"}</span></div><ol>{version.steps.map(step => <li key={`${version.id}:${step.action}`}><strong>{step.action}</strong><span>{step.expected.join("；")}</span></li>)}</ol>{result && <><div className="artifact-links">{result.artifacts.map(artifact => <a key={artifact.id} href={`/v1/case-hub/runs/${encodeURIComponent(result.runId)}/artifacts/${encodeURIComponent(artifact.id)}`} target="_blank" rel="noreferrer">{artifact.kind} · {artifact.name}</a>)}</div>{result.reviewStatus === "pending" && <><label htmlFor={`case-feedback-${result.id}`}>审阅反馈</label><textarea id={`case-feedback-${result.id}`} value={feedback[result.id] ?? ""} onChange={event => setFeedback(current => ({ ...current, [result.id]: event.target.value }))} placeholder="打回、产品缺陷或环境问题的具体反馈" /><div className="review-actions"><button className="primary-button" onClick={() => void review(result, "approve")}>批准</button><button className="secondary-button" onClick={() => void review(result, "request_changes")}>要求修改</button><button className="secondary-button" onClick={() => void review(result, "product_bug")}>产品缺陷</button><button className="secondary-button" onClick={() => void review(result, "environment_issue")}>环境问题</button></div></>}</>}</article>; })}</div>
-    </section>}
   </>;
+}
+
+function QaEvidenceViewer({ result }: { result: CaseHubResult }) {
+  const videos = result.artifacts.filter(artifact => artifact.kind === "video");
+  const traces = result.artifacts.filter(artifact => artifact.kind === "trace" && /(?:^|\/)trace\.zip$/iu.test(artifact.name.replaceAll("\\", "/")));
+  const [mode, setMode] = useState<"video" | "trace">(videos.length ? "video" : "trace");
+  if (!videos.length && !traces.length) return <MissingEvidence message="本次运行没有生成 E2E 视频或 Playwright Trace。日志和报告文件不能替代人工验收。" />;
+  const artifact = mode === "video" ? videos[0] : traces[0];
+  if (!artifact) return <MissingEvidence message="所选证据不可用。" />;
+  const url = artifactUrl(result.runId, artifact.id);
+  const traceUrl = typeof window === "undefined" ? url : new URL(url, window.location.origin).href;
+  return <section className="qa-evidence"><header><div><span className="evidence-live"><i />QA 有效证据</span><strong>{mode === "video" ? "E2E 运行录像" : "Playwright 调试器"}</strong></div><div className="evidence-modes">{videos.length > 0 && <button className={mode === "video" ? "active" : ""} onClick={() => setMode("video")}><Play size={14} />播放视频</button>}{traces.length > 0 && <button className={mode === "trace" ? "active" : ""} onClick={() => setMode("trace")}><MonitorPlay size={14} />调试 Trace</button>}</div></header><div className="evidence-stage">{mode === "video" ? <video key={url} controls playsInline preload="metadata" src={url}>当前浏览器无法播放该 E2E 视频。</video> : <iframe key={url} title={`${result.caseId} Playwright Trace Viewer`} sandbox="allow-scripts allow-same-origin" src={`/v1/case-hub/trace-viewer/index.html?trace=${encodeURIComponent(traceUrl)}`} />}</div><footer><span>{mode === "video" ? `${videos.length} 段录像` : `${traces.length} 个 Trace`}</span><code>{artifact.name.split("/").at(-1)}</code></footer></section>;
+}
+
+function MissingEvidence({ message }: { message: string }) {
+  return <div className="missing-evidence"><CircleAlert size={23} /><strong>没有可审阅证据</strong><p>{message}</p></div>;
+}
+
+function artifactUrl(runId: string, artifactId: string): string {
+  return `/v1/case-hub/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}`;
+}
+
+function hasQaEvidence(result: CaseHubResult): boolean {
+  return result.artifacts.some(artifact => artifact.kind === "video" || artifact.kind === "trace" && /(?:^|\/)trace\.zip$/iu.test(artifact.name.replaceAll("\\", "/")));
+}
+
+function reviewStatusLabel(status?: string): string {
+  if (status === "pending") return "等待你的判断";
+  if (status === "approved") return "已批准";
+  if (status === "changes_requested") return "已要求修改";
+  if (status === "product_bug") return "已标记产品缺陷";
+  if (status === "environment_issue") return "已标记环境问题";
+  return "等待验证";
+}
+
+const changeSetStatusMeta: Record<string, { label: string; tone: string }> = {
+  authoring: { label: "编写 E2E", tone: "progress" },
+  verifying: { label: "验证中", tone: "progress" },
+  awaiting_review: { label: "待审阅", tone: "review" },
+  revising: { label: "修改中", tone: "warning" },
+  blocked_product: { label: "产品问题", tone: "danger" },
+  blocked_environment: { label: "环境问题", tone: "warning" },
+  final_verifying: { label: "最终验证", tone: "progress" },
+  ready_to_merge: { label: "等待合并", tone: "success" },
+  merged: { label: "已合并", tone: "success" },
+  failed: { label: "执行失败", tone: "danger" },
+  cancelled: { label: "已取消", tone: "neutral" },
+  abandoned: { label: "已放弃", tone: "neutral" },
+};
+
+function ChangeSetBadge({ status }: { status: string }) {
+  const meta = changeSetStatusMeta[status] ?? { label: status, tone: "neutral" };
+  return <span className={`status-badge ${meta.tone}`}>{meta.label}</span>;
+}
+
+function VersionBadge({ version, changeSet }: { version: CaseHubCaseVersion; changeSet: CaseHubChangeSet | undefined }) {
+  if (version.status === "active") return <span className="status-badge success">已生效</span>;
+  if (changeSet) return <ChangeSetBadge status={changeSet.status} />;
+  if (version.status === "approved") return <span className="status-badge success">已批准</span>;
+  if (version.status === "rejected") return <span className="status-badge danger">已拒绝</span>;
+  return <span className="status-badge">提案</span>;
+}
+
+function latestChangeSetForCase(testCase: CaseHubCase, changeSets: CaseHubChangeSet[]): CaseHubChangeSet | undefined {
+  const versionIds = new Set([...testCase.proposedVersionIds, ...(testCase.activeVersionId ? [testCase.activeVersionId] : [])]);
+  return changeSets.find(changeSet => changeSet.caseVersionIds.some(versionId => versionIds.has(versionId)));
+}
+
+function changeSetStatusLabel(status: string): string {
+  return changeSetStatusMeta[status]?.label ?? status;
+}
+
+function formatDate(value: string): string {
+  return tokenDateFormatter.format(new Date(value));
+}
+
+function compactHash(value: string): string {
+  return value.length > 20 ? `${value.slice(0, 12)}…${value.slice(-6)}` : value;
 }
 
 function latestCaseResults(results: CaseHubResult[]): CaseHubResult[] {

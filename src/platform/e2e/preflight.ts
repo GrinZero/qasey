@@ -2,7 +2,7 @@ import type { OwnerScope } from "../../../packages/contracts/src/index.ts";
 import type { WebE2EConfiguration } from "../code-task/e2e-repository-skill.ts";
 import type { BuildMetadata } from "./build-metadata.ts";
 
-export type E2EPreflightCheckId = "sandbox" | "model" | "github" | "version" | "test_environment" | "fixture";
+export type E2EPreflightCheckId = "sandbox" | "model" | "github" | "project_skill" | "auth_setup" | "playwright_config" | "authentication" | "version" | "test_environment";
 
 export interface E2EPreflightCheck {
   id: E2EPreflightCheckId;
@@ -25,6 +25,7 @@ interface GitHubRepositoryReader {
   repos: {
     get(input: { owner: string; repo: string }): Promise<{ data: { permissions?: { push?: boolean; admin?: boolean; maintain?: boolean } | null } }>;
     getCommit(input: { owner: string; repo: string; ref: string }): Promise<{ data: { sha: string } }>;
+    getContent(input: { owner: string; repo: string; path: string; ref: string }): Promise<{ data: unknown }>;
   };
 }
 
@@ -32,10 +33,6 @@ interface SandboxPreflightTarget {
   healthCheck(): Promise<void>;
   codeAgentHealthCheck(): Promise<void>;
   assertTestEnvironmentAddress(baseUrl: string): void;
-}
-
-interface FixturePreflightTarget {
-  healthCheck(): Promise<void>;
 }
 
 export class E2EPreflightError extends Error {
@@ -51,9 +48,9 @@ export class E2EPreflightService {
   constructor(private readonly dependencies: {
     buildMetadata: BuildMetadata;
     sandbox?: SandboxPreflightTarget;
-    fixture: FixturePreflightTarget;
     github?: GitHubRepositoryReader;
     fetch?: typeof fetch;
+    environment?: Readonly<Record<string, string | undefined>>;
   }) {}
 
   async inspect(_owner: OwnerScope, configuration: WebE2EConfiguration): Promise<E2EPreflightSnapshot> {
@@ -111,6 +108,77 @@ export class E2EPreflightService {
     }
 
     if (!baseSha) {
+      record("project_skill", "blocked", "Target base ref could not be resolved");
+    } else if (!this.dependencies.github) {
+      record("project_skill", "blocked", "GitHub read client is not configured");
+    } else {
+      try {
+        const response = await this.dependencies.github.repos.getContent({
+          owner: configuration.target.owner,
+          repo: configuration.target.repository,
+          path: configuration.target.e2eSkillPath,
+          ref: baseSha,
+        });
+        if (!repositoryFile(response.data)) {
+          throw new Error("Configured path is not a repository file");
+        }
+        record("project_skill", "ready", `Repository E2E Skill is pinned at ${configuration.target.e2eSkillPath}`);
+      } catch (error) {
+        record("project_skill", "blocked", `Repository E2E Skill ${configuration.target.e2eSkillPath} is unavailable: ${message(error)}`);
+      }
+    }
+
+    if (!baseSha) {
+      record("auth_setup", "blocked", "Target base ref could not be resolved");
+    } else if (!this.dependencies.github) {
+      record("auth_setup", "blocked", "GitHub read client is not configured");
+    } else {
+      try {
+        const response = await this.dependencies.github.repos.getContent({
+          owner: configuration.target.owner,
+          repo: configuration.target.repository,
+          path: configuration.target.e2eAuthentication.setupPath,
+          ref: baseSha,
+        });
+        const setup = repositoryTextFile(response.data);
+        assertAuthenticationSetupContract(setup, configuration);
+        record("auth_setup", "ready", `Repository Playwright authentication setup is pinned at ${configuration.target.e2eAuthentication.setupPath}`);
+      } catch (error) {
+        record("auth_setup", "blocked", `Repository Playwright authentication setup ${configuration.target.e2eAuthentication.setupPath} is unavailable: ${message(error)}`);
+      }
+    }
+
+    if (!baseSha) {
+      record("playwright_config", "blocked", "Target base ref could not be resolved");
+    } else if (!this.dependencies.github) {
+      record("playwright_config", "blocked", "GitHub read client is not configured");
+    } else {
+      try {
+        for (const configPath of new Set(configuration.verification.projects.map(project => project.config))) {
+          const response = await this.dependencies.github.repos.getContent({
+            owner: configuration.target.owner,
+            repo: configuration.target.repository,
+            path: configPath,
+            ref: baseSha,
+          });
+          assertPlaywrightConfigContract(repositoryTextFile(response.data), configuration, configPath);
+        }
+        record("playwright_config", "ready", "Repository Playwright configs connect browser projects to the authentication setup project");
+      } catch (error) {
+        record("playwright_config", "blocked", message(error));
+      }
+    }
+
+    const authenticationEnvironment = this.dependencies.environment ?? process.env;
+    const missingAuthenticationEnvironment = configuration.target.e2eAuthentication.requiredEnvironment
+      .filter(name => !authenticationEnvironment[name]?.trim());
+    if (missingAuthenticationEnvironment.length > 0) {
+      record("authentication", "blocked", `Repository Playwright setup requires unavailable environment variables: ${missingAuthenticationEnvironment.join(", ")}`);
+    } else {
+      record("authentication", "ready", "Repository Playwright setup environment is available");
+    }
+
+    if (!baseSha) {
       record("version", "blocked", "Target base SHA could not be resolved");
     } else if (baseSha !== this.dependencies.buildMetadata.sourceSha) {
       record("version", "blocked", `Deployment ${this.dependencies.buildMetadata.sourceSha} does not match ${configuration.target.baseRef} at ${baseSha}`);
@@ -125,13 +193,6 @@ export class E2EPreflightService {
       record("test_environment", "ready", `${configuration.environment.id} is reachable at ${configuration.environment.baseUrl}`);
     } catch (error) {
       record("test_environment", "blocked", message(error));
-    }
-
-    try {
-      await this.dependencies.fixture.healthCheck();
-      record("fixture", "ready", "Persistent fixture leases are available");
-    } catch (error) {
-      record("fixture", "blocked", message(error));
     }
 
     return {
@@ -155,4 +216,46 @@ export class E2EPreflightService {
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function repositoryFile(value: unknown): boolean {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value)
+    && (value as { type?: unknown }).type === "file");
+}
+
+function repositoryTextFile(value: unknown): string {
+  if (!repositoryFile(value)) throw new Error("Configured path is not a repository file");
+  const file = value as { content?: unknown; encoding?: unknown };
+  if (file.encoding !== "base64" || typeof file.content !== "string" || !file.content.trim()) {
+    throw new Error("Repository workflow content is unavailable");
+  }
+  return Buffer.from(file.content.replaceAll("\n", ""), "base64").toString("utf8");
+}
+
+function assertAuthenticationSetupContract(setup: string, configuration: WebE2EConfiguration): void {
+  if (!/\bstorageState\b/u.test(setup)) {
+    throw new Error("Authentication setup must persist Playwright storageState");
+  }
+  for (const name of configuration.target.e2eAuthentication.requiredEnvironment) {
+    if (!setup.includes(name)) {
+      throw new Error(`Authentication setup must consume declared environment variable ${name}`);
+    }
+  }
+}
+
+function assertPlaywrightConfigContract(
+  source: string,
+  configuration: WebE2EConfiguration,
+  configPath: string,
+): void {
+  const setupProject = configuration.target.e2eAuthentication.setupProject;
+  if (!source.includes(setupProject)) {
+    throw new Error(`Playwright config ${configPath} must declare authentication setup project ${setupProject}`);
+  }
+  if (!/\bdependencies\b/u.test(source)) {
+    throw new Error(`Playwright config ${configPath} must make browser projects depend on authentication setup project ${setupProject}`);
+  }
+  if (!/\bstorageState\b/u.test(source)) {
+    throw new Error(`Playwright config ${configPath} must load storageState produced by authentication setup project ${setupProject}`);
+  }
 }

@@ -50,16 +50,28 @@ describe("E2E fixture lease service", () => {
     await expect(service.isActiveFixtureUser(lease.organizationId, lease.userId)).resolves.toBe(false);
   });
 
-  it("rejects incomplete per-run secret payloads", () => {
+  it("accepts generic repository authentication variables without defining their values in the protocol", () => {
     const base = {
       spec: {
         taskId: "task", attemptId: "attempt", kind: "author", scope: { applicationId: "qasey", tenantId: "tenant-1", sessionId: "session" },
-        contextRef: { id: "context", kind: "context", uri: "sandbox://context" }, contextHash: "a".repeat(64),
+        contextRef: { id: "context", kind: "report", name: "context.json", uri: "sandbox://context" }, contextHash: "a".repeat(64),
         repositories: [{ owner: "example", repository: "web", destination: "target", mode: "write", baseRef: "main", baseSha: "a".repeat(40) }],
-        baseSha: "a".repeat(40), executionProfileId: "web-e2e-verifier", allowedPaths: ["e2e"], fixedChecks: [], deadlineMs: 60_000, traceContext: {},
+        baseSha: "a".repeat(40), executionProfileId: "web-e2e-verifier", allowedPaths: ["e2e"], fixedChecks: [],
+        e2eRequiredEnvironment: ["E2E_LOGIN_EMAIL", "E2E_LOGIN_PASSWORD"], deadlineMs: 60_000, traceContext: {},
       },
       context: "frozen",
     };
-    expect(SandboxCodeTaskStartSchema.safeParse({ ...base, secrets: { environment: { QASEY_E2E_SESSION_TOKEN: "s".repeat(32) } } }).success).toBe(false);
+    expect(SandboxCodeTaskStartSchema.safeParse({
+      ...base,
+      secrets: { environment: {
+        QASEY_E2E_BASE_URL: "https://e2e.example.test",
+        E2E_LOGIN_EMAIL: "operator@example.test",
+        E2E_LOGIN_PASSWORD: "redacted-password",
+      } },
+    }).success).toBe(true);
+    expect(SandboxCodeTaskStartSchema.safeParse({
+      ...base,
+      secrets: { environment: { e2e_login_password: "redacted-password" } },
+    }).success).toBe(false);
   });
 });

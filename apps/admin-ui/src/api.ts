@@ -62,6 +62,7 @@ export const api = {
   applications: () => requestJson<AgentApplication[]>("/admin/api/applications"),
   listRuns: () => requestJson<{ runs: QaseyRun[] }>("/v1/case-hub/runs?limit=100"),
   listCases: (query = "") => requestJson<{ cases: CaseHubCase[] }>(`/v1/case-hub/cases?q=${encodeURIComponent(query)}`),
+  getCase: (id: string) => requestJson<{ case: CaseHubCase; versions: CaseHubCaseVersion[]; changeSets: CaseHubChangeSet[]; results: CaseHubResult[] }>(`/v1/case-hub/cases/${encodeURIComponent(id)}`),
   listChangeSets: () => requestJson<{ changeSets: CaseHubChangeSet[] }>("/v1/case-hub/change-sets?limit=100"),
   getChangeSet: (id: string) => requestJson<{ changeSet: CaseHubChangeSet; versions: CaseHubCaseVersion[]; results: CaseHubResult[] }>(`/v1/case-hub/change-sets/${encodeURIComponent(id)}`),
   reviewCaseResult: (id: string, verdict: "approve" | "request_changes" | "product_bug" | "environment_issue", feedback?: string) => requestJson<{ result: CaseHubResult; changeSet: CaseHubChangeSet }>(`/v1/case-hub/results/${encodeURIComponent(id)}/review`, { method: "POST", body: JSON.stringify({ verdict, ...(feedback ? { feedback } : {}) }) }),

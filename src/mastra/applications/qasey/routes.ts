@@ -1,5 +1,9 @@
 import { registerApiRoute } from "@mastra/core/server";
+import "playwright-core";
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { dirname, extname, resolve, sep } from "node:path";
 import { z } from "zod";
 import { CaseHubResultReviewInputSchema, CreateCaseHubChangeSetSchema, CreateE2ERunRequestSchema, type CaseHubChangeSet, type CaseHubResult, type OwnerScope } from "../../../../packages/contracts/src/index.ts";
 import { freezeE2EContext, normalizeJiraWebhook } from "../../../../packages/domain/src/index.ts";
@@ -70,6 +74,27 @@ function allLatestResultsApproved(results: CaseHubResult[]): boolean {
     if (!current || result.attempt > current.attempt) latest.set(result.caseVersionId, result);
   }
   return [...latest.values()].every(result => result.executionStatus === "passed" && result.reviewStatus === "approved");
+}
+
+const nodeRequire = createRequire(import.meta.url);
+let traceViewerRoot: string | undefined;
+
+function playwrightTraceViewerRoot(): string {
+  if (traceViewerRoot) return traceViewerRoot;
+  const playwrightCorePackage = nodeRequire.resolve("playwright-core/package.json");
+  traceViewerRoot = resolve(dirname(playwrightCorePackage), "lib/vite/traceViewer");
+  return traceViewerRoot;
+}
+
+function traceViewerContentType(path: string): string {
+  const extension = extname(path).toLowerCase();
+  if (extension === ".html") return "text/html; charset=utf-8";
+  if (extension === ".js") return "application/javascript; charset=utf-8";
+  if (extension === ".css") return "text/css; charset=utf-8";
+  if (extension === ".svg") return "image/svg+xml";
+  if (extension === ".webmanifest") return "application/manifest+json";
+  if (extension === ".ttf") return "font/ttf";
+  return "application/octet-stream";
 }
 
 function validGitHubSignature(rawBody: string, signature: string | undefined): boolean {
@@ -386,7 +411,12 @@ export const apiRoutes = [
     handler: async c => {
       const caseRecord = await caseHubRepository.getCase(owner(c), c.req.param("caseId"));
       if (!caseRecord) return c.json({ error: "not_found" }, 404);
-      return c.json({ case: caseRecord, versions: await caseHubRepository.versionsForCase(owner(c), caseRecord.id) });
+      const versions = await caseHubRepository.versionsForCase(owner(c), caseRecord.id);
+      const versionIds = new Set(versions.map(version => version.id));
+      const changeSets = (await caseHubRepository.listChangeSets(owner(c), 500))
+        .filter(changeSet => changeSet.caseVersionIds.some(versionId => versionIds.has(versionId)));
+      const results = (await Promise.all(changeSets.map(changeSet => caseHubRepository.listResults(owner(c), changeSet.id)))).flat();
+      return c.json({ case: caseRecord, versions, changeSets, results });
     },
   }),
   registerApiRoute("/v1/case-hub/change-sets", {
@@ -529,6 +559,25 @@ export const apiRoutes = [
     method: "GET",
     handler: async c => c.json({ events: await runRepository.events(owner(c), c.req.param("runId")) }),
   }),
+  registerApiRoute("/v1/case-hub/trace-viewer/*", {
+    method: "GET",
+    handler: async c => {
+      const relativePath = c.req.param("*") || "index.html";
+      if (relativePath === "ping") return c.body("");
+      const root = playwrightTraceViewerRoot();
+      const target = resolve(root, relativePath);
+      if (target !== root && !target.startsWith(`${root}${sep}`)) return c.json({ error: "not_found" }, 404);
+      const content = await readFile(target).catch(() => undefined);
+      if (!content) return c.json({ error: "not_found" }, 404);
+      c.header("content-type", traceViewerContentType(target));
+      c.header("cache-control", relativePath === "index.html" || relativePath === "sw.bundle.js" ? "no-cache" : "public, max-age=31536000, immutable");
+      c.header("service-worker-allowed", "/v1/case-hub/trace-viewer/");
+      if (relativePath === "index.html") {
+        c.header("content-security-policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' blob:; worker-src 'self' blob:");
+      }
+      return c.body(content);
+    },
+  }),
   registerApiRoute("/v1/case-hub/runs/:runId/artifacts", {
     method: "GET",
     handler: async c => {
@@ -544,7 +593,7 @@ export const apiRoutes = [
       if (!artifact) return c.json({ error: "not_found" }, 404);
       try {
         const content = await artifactStore.open(owner(c), artifact);
-        c.header("content-type", artifact.contentType ?? "application/octet-stream");
+        c.header("content-type", artifact.contentType ?? (artifact.kind === "trace" && /trace\.zip$/iu.test(artifact.name) ? "application/zip" : "application/octet-stream"));
         c.header("content-disposition", `inline; filename="${artifact.name.replace(/["\\]/g, "_")}"`);
         if (content.contentLength !== undefined) c.header("content-length", String(content.contentLength));
         return c.body(content.body);
@@ -761,6 +810,7 @@ const routePolicies: Record<string, { id: string; access: PrimitiveAccessPolicy;
   "POST /v1/case-hub/results/:resultId/review": { id: "case-result-review", access: { permission: "qasey.results.approve", audiences: ["admin-ui", "api"] } },
   "GET /v1/case-hub/runs/:runId": { id: "run-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/case-hub/runs/:runId/events": { id: "run-events-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
+  "GET /v1/case-hub/trace-viewer/*": { id: "trace-viewer-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api"] } },
   "GET /v1/case-hub/runs/:runId/artifacts": { id: "run-artifacts-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/case-hub/runs/:runId/artifacts/:artifactId": { id: "run-artifact-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
   "POST /v1/case-hub/runs/:runId/rerun": { id: "run-rerun", access: { permission: "qasey.runs.write", audiences: ["admin-ui", "api", "service"] } },

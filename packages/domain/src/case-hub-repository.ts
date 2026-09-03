@@ -195,6 +195,9 @@ export class InMemoryCaseHubRepository implements CaseHubRepository {
     if (review.verdict === "approve" && current.executionStatus !== "passed") {
       throw new Error("Only passed results can be approved");
     }
+    if (review.verdict === "approve" && !current.artifacts.some(isQaReviewArtifact)) {
+      throw new Error("A video or Playwright trace is required before approval");
+    }
     const reviewStatus = review.verdict === "approve" ? "approved" : review.verdict;
     const updated = CaseHubResultSchema.parse({
       ...current, reviewStatus, reviewerId, ...(review.feedback ? { feedback: review.feedback } : {}), reviewedAt: this.now().toISOString(),
@@ -448,6 +451,7 @@ export class PrismaCaseHubRepository implements CaseHubRepository {
     if (!current) throw new Error(`Case Hub result ${resultId} not found`);
     if (current.reviewStatus !== "pending") throw new Error("Only pending results can be reviewed");
     if (review.verdict === "approve" && current.executionStatus !== "passed") throw new Error("Only passed results can be approved");
+    if (review.verdict === "approve" && !current.artifacts.some(isQaReviewArtifact)) throw new Error("A video or Playwright trace is required before approval");
     const updated = CaseHubResultSchema.parse({
       ...current, reviewStatus: review.verdict === "approve" ? "approved" : review.verdict,
       reviewerId, ...(review.feedback ? { feedback: review.feedback } : {}), reviewedAt: this.now().toISOString(),
@@ -519,11 +523,15 @@ function artifactsForCase(artifacts: ArtifactRef[], caseId: string, observedArti
   const normalizedCaseId = caseId.toLowerCase().replace(/[^a-z0-9]/gu, "");
   const observed = observedArtifactNames.map(name => name.replaceAll("\\", "/"));
   return artifacts.filter(artifact => {
-    if (artifact.kind === "log" || artifact.kind === "report" || artifact.kind === "patch") return true;
+    if (!isQaReviewArtifact(artifact)) return false;
     const artifactName = artifact.name.replaceAll("\\", "/");
     if (observed.some(name => artifactName.endsWith(name))) return true;
     return artifact.name.toLowerCase().replace(/[^a-z0-9]/gu, "").includes(normalizedCaseId);
   });
+}
+function isQaReviewArtifact(artifact: ArtifactRef): boolean {
+  return artifact.kind === "video"
+    || artifact.kind === "trace" && /(?:^|\/)trace\.zip$/iu.test(artifact.name.replaceAll("\\", "/"));
 }
 function caseSequence(id: string): number { return Number(id.slice("QASEY-".length)); }
 function ownerPrefix(owner: OwnerScope): string { return `${owner.applicationId}\u0000${owner.tenantId}\u0000`; }

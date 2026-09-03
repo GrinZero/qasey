@@ -265,6 +265,8 @@ test("authenticated user can open the platform and navigate the Qasey applicatio
   await page.goto("/admin");
 
   await expect(page.getByRole("heading", { name: "工作交给 Agent，判断留给人" })).toBeVisible();
+  await expect(page.getByText("无需介入", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "待处理", exact: true })).toBeVisible();
   await expect(page.getByText("tenant-browser-test", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Qasey QA" })).toBeVisible();
 
@@ -277,8 +279,8 @@ test("authenticated user can open the platform and navigate the Qasey applicatio
   await expect(page.getByRole("heading", { name: "追踪每一次验证" })).toBeVisible();
   await expect(page.getByText("example/sample-app", { exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: /^待我审阅/u }).click();
-  await expect(page.getByRole("heading", { name: "测试用例与变更审阅" })).toBeVisible();
+  await page.getByRole("button", { name: "待我审阅", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "待我审阅", exact: true })).toBeVisible();
   await page.getByRole("button", { name: /^待处理/u }).click();
   await expect(page.getByRole("heading", { name: "需要你的判断" })).toBeVisible();
   await page.getByRole("button", { name: /^活动/u }).click();
@@ -292,8 +294,8 @@ test("primary routes survive direct navigation and unknown paths render the 404 
     ["/admin/activity", "所有 Agent 的工作轨迹"],
     ["/admin/apps/qasey", "把需求变成可验证的结论"],
     ["/admin/apps/qasey/runs", "追踪每一次验证"],
-    ["/admin/apps/qasey/cases", "测试用例与变更审阅"],
-    ["/admin/apps/qasey/reviews", "测试用例与变更审阅"],
+    ["/admin/apps/qasey/cases", "Case Hub"],
+    ["/admin/apps/qasey/reviews", "待我审阅"],
   ] as const;
 
   for (const [path, heading] of primaryRoutes) {
@@ -306,6 +308,51 @@ test("primary routes survive direct navigation and unknown paths render the 404 
   await expect(page.getByText("找不到这个页面", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "返回平台首页" }).click();
   await expect(page).toHaveURL(/\/admin$/u);
+});
+
+test("case hub exposes the version archive and reports lifecycle status instead of a misleading proposal count", async ({ page }) => {
+  const firstVersionId = "11111111-1111-4111-8111-111111111111";
+  const latestVersionId = "22222222-2222-4222-8222-222222222222";
+  const failedChangeSetId = "33333333-3333-4333-8333-333333333333";
+  const readyChangeSetId = "44444444-4444-4444-8444-444444444444";
+  const caseRecord = {
+    id: "QASEY-1", suitePath: "Appointments / Reschedule", title: "Reschedule across time zones",
+    proposedVersionIds: [firstVersionId, latestVersionId], updatedAt: "2026-09-03T01:00:00.000Z",
+  };
+  const changeSets = [
+    { id: readyChangeSetId, status: "ready_to_merge", revision: 4, caseVersionIds: [latestVersionId], pullRequestUrl: "https://example.test/pull/7", requirement: { goal: "Cover rescheduling", requirementSummary: "Validate rescheduling behavior." }, updatedAt: "2026-09-03T01:00:00.000Z" },
+    { id: failedChangeSetId, status: "failed", revision: 2, caseVersionIds: [firstVersionId], requirement: { goal: "Initial coverage", requirementSummary: "First attempt." }, updatedAt: "2026-09-02T01:00:00.000Z" },
+  ];
+  const versions = [
+    { id: firstVersionId, caseId: "QASEY-1", version: 1, suitePath: caseRecord.suitePath, title: caseRecord.title, description: "Initial proposal", priority: "P1", target: "web", preconditions: [], steps: [{ action: "Open the appointment", expected: ["Appointment details are visible"] }], tags: ["regression"], automationPath: "e2e/reschedule.spec.ts", contentHash: "a".repeat(64), status: "proposed", createdAt: "2026-09-02T01:00:00.000Z" },
+    { id: latestVersionId, caseId: "QASEY-1", version: 2, suitePath: caseRecord.suitePath, title: caseRecord.title, description: "Covers staff and customer time zones.", priority: "P1", target: "web", preconditions: ["An appointment exists in another time zone"], steps: [{ action: "Move the appointment by one hour", expected: ["The customer sees the local converted time", "The staff calendar has no conflict"] }], tags: ["regression", "timezone"], automationPath: "e2e/reschedule.spec.ts", contentHash: "b".repeat(64), status: "approved", createdAt: "2026-09-03T01:00:00.000Z" },
+  ];
+
+  await page.route("**/*", async route => {
+    const url = new URL(route.request().url());
+    if (route.request().method() === "GET" && url.pathname === "/v1/case-hub/cases") { await json(route, { cases: [caseRecord] }); return; }
+    if (route.request().method() === "GET" && url.pathname === "/v1/case-hub/change-sets") { await json(route, { changeSets }); return; }
+    if (route.request().method() === "GET" && url.pathname === "/v1/case-hub/cases/QASEY-1") { await json(route, { case: caseRecord, versions, changeSets, results: [] }); return; }
+    await route.fallback();
+  });
+
+  await page.goto("/admin/apps/qasey/cases");
+  await expect(page.getByRole("columnheader", { name: "最新进度" })).toBeVisible();
+  await expect(page.getByRole("columnheader", { name: "待生效提案" })).toHaveCount(0);
+  await expect(page.getByText("等待合并", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^QASEY-1 Reschedule/u }).click();
+
+  const dialog = page.getByRole("dialog", { name: /QASEY-1/u });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("2 个版本", { exact: false })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "Reschedule across time zones", exact: true })).toBeVisible();
+  await expect(dialog.getByText("An appointment exists in another time zone", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("The customer sees the local converted time", { exact: false })).toBeVisible();
+  await expect(dialog.getByRole("link", { name: "打开 Pull Request" })).toHaveAttribute("href", "https://example.test/pull/7");
+
+  await dialog.getByRole("button", { name: /v1/u }).click();
+  await expect(dialog.locator(".case-version-badges .status-badge")).toHaveText("执行失败");
+  await expect(dialog.getByText("Initial proposal", { exact: true })).toBeVisible();
 });
 
 test("multi-organization login requires an explicit tenant-safe selection before entering", async ({ page }) => {

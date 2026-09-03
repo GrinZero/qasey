@@ -87,7 +87,7 @@ export interface CaseHubChangeSet {
 
 export interface CaseHubCaseVersion {
   id: string; caseId: string; version: number; suitePath: string; title: string; description: string; priority: "P0" | "P1" | "P2" | "P3";
-  preconditions: string[]; steps: Array<{ action: string; expected: string[] }>; tags: string[]; automationPath: string; contentHash: string; status: string;
+  target: "web"; preconditions: string[]; steps: Array<{ action: string; expected: string[] }>; tags: string[]; automationPath: string; contentHash: string; status: string; createdAt: string;
 }
 
 export interface CaseHubResult {

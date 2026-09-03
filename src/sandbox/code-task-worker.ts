@@ -10,6 +10,7 @@ import {
   type CodeTaskChange,
   type CodeTaskEvent,
   type CodeTaskResult,
+  type CodeTaskSpec,
   type CodeTaskState,
 } from "../../packages/contracts/src/index.ts";
 import {
@@ -107,6 +108,7 @@ async function runAgent(): Promise<string> {
     context: manifest.context,
     allowedPaths: spec.allowedPaths,
     profile,
+    ...(spec.e2eSkillPath ? { e2eSkillPath: spec.e2eSkillPath } : {}),
     traceContext: spec.traceContext,
     credentials: {
       ...(credentials.openaiApiKey ? { openaiApiKey: credentials.openaiApiKey } : {}),
@@ -242,7 +244,7 @@ async function fixedCheckSandbox(): Promise<LocalSandbox> {
     workingDirectory: manifest.workspaceRoot,
     timeout: spec.deadlineMs,
     isolation: manifest.isolation,
-    env: fixedCheckEnvironment(manifest.checkRoot),
+    env: fixedCheckEnvironment(manifest.checkRoot, spec),
     nativeSandbox: {
       allowNetwork: true,
       allowSystemBinaries: true,
@@ -283,7 +285,7 @@ async function runPlaywrightCheck(paths: string[]): Promise<CheckResult> {
       ],
       cwd: manifest.workspaceRoot,
       env: {
-        ...fixedCheckEnvironment(manifest.checkRoot),
+        ...fixedCheckEnvironment(manifest.checkRoot, spec),
         PLAYWRIGHT_HTML_OUTPUT_DIR: join(planRoot, "html-report"),
         PLAYWRIGHT_JSON_OUTPUT_NAME: join(planRoot, "results.json"),
       },
@@ -335,7 +337,9 @@ async function collectPlaywrightArtifacts(planId: string, sourceRoot: string, de
         kind,
         name: `${planId}/${path.replaceAll("\\", "/")}`,
         uri: sandboxUri(destination),
-        contentType: kind === "video" ? "video/webm" : kind === "screenshot" ? "image/png" : undefined,
+        contentType: kind === "video" ? "video/webm"
+          : kind === "screenshot" ? "image/png"
+            : kind === "trace" && /trace\.zip$/iu.test(path) ? "application/zip" : undefined,
       });
     }
   }
@@ -706,9 +710,9 @@ function isRuntimeGeneratedPath(path: string): boolean {
     || path === ".yarn/cache" || path.startsWith(".yarn/cache/");
 }
 
-function fixedCheckEnvironment(checkRoot: string): Record<string, string> {
+function fixedCheckEnvironment(checkRoot: string, spec: CodeTaskSpec): Record<string, string> {
   const inheritedKeys = [
-    "PATH", "CI", "BASE_URL", "QASEY_E2E_BASE_URL", "QASEY_E2E_STORAGE_STATE_PATH", "PLAYWRIGHT_BROWSERS_PATH",
+    "PATH", "CI", "BASE_URL", "QASEY_E2E_BASE_URL", "PLAYWRIGHT_BROWSERS_PATH", ...spec.e2eRequiredEnvironment,
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
   ];
   const home = join(checkRoot, "home");
