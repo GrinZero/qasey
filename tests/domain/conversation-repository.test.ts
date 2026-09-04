@@ -114,4 +114,55 @@ describe("Qasey conversation repository", () => {
     expect(turn).toMatchObject({ assistantText: "投影正常", status: "completed" });
     expect(turn).not.toHaveProperty("eventSequence");
   });
+
+  it("serializes concurrent event appends for the same turn", async () => {
+    const now = new Date("2026-09-04T05:00:00.000Z");
+    const conversationId = "88888888-8888-4888-8888-888888888888";
+    const turnId = "99999999-9999-4999-8999-999999999999";
+    let eventSequence = 1;
+    let activeTransactions = 0;
+    let maximumActiveTransactions = 0;
+    const transaction = {
+      qaseyConversationRecord: {
+        findUnique: async () => ({
+          ...owner, id: conversationId, subjectId: "qa-1", title: "并发事件",
+          activeTurnId: turnId, createdAt: now, updatedAt: now,
+        }),
+        update: async () => undefined,
+      },
+      qaseyConversationTurnRecord: {
+        findUnique: async () => {
+          await new Promise(resolve => setTimeout(resolve, 5));
+          return {
+            ...owner, id: turnId, conversationId,
+            clientMessageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            userMessage: "并发事件", assistantText: "", status: "running",
+            agentRunId: null, linkedRunId: null, error: null,
+            eventSequence, createdAt: now, updatedAt: now,
+          };
+        },
+        update: async ({ data }: { data: { eventSequence: number } }) => { eventSequence = data.eventSequence; },
+      },
+      qaseyConversationEventRecord: { create: async () => undefined },
+    };
+    const prisma = {
+      $connect: async () => undefined,
+      $transaction: async (operation: (value: typeof transaction) => Promise<unknown>) => {
+        activeTransactions += 1;
+        maximumActiveTransactions = Math.max(maximumActiveTransactions, activeTransactions);
+        try { return await operation(transaction); } finally { activeTransactions -= 1; }
+      },
+    };
+    const repository = new PrismaQaseyConversationRepository(prisma as never, () => now);
+    await repository.init();
+
+    const events = await Promise.all([
+      repository.appendEvent(owner, "qa-1", conversationId, turnId, "progress", { title: "一" }),
+      repository.appendEvent(owner, "qa-1", conversationId, turnId, "progress", { title: "二" }),
+      repository.appendEvent(owner, "qa-1", conversationId, turnId, "progress", { title: "三" }),
+    ]);
+
+    expect(events.map(event => event.sequence)).toEqual([2, 3, 4]);
+    expect(maximumActiveTransactions).toBe(1);
+  });
 });

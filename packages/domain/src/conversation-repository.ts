@@ -186,6 +186,7 @@ export class InMemoryQaseyConversationRepository implements QaseyConversationRep
 
 export class PrismaQaseyConversationRepository implements QaseyConversationRepository {
   private initialized?: Promise<void>;
+  private readonly appendTails = new Map<string, Promise<void>>();
   constructor(private readonly prisma: PrismaClient, private readonly now: () => Date = () => new Date()) {}
   init(): Promise<void> { this.initialized ??= this.prisma.$connect(); return this.initialized; }
   private ready(): Promise<void> { return this.initialized ?? Promise.reject(new Error("PrismaQaseyConversationRepository has not been initialized")); }
@@ -288,9 +289,10 @@ export class PrismaQaseyConversationRepository implements QaseyConversationRepos
 
   async appendEvent(owner: OwnerScope, subjectId: string, conversationId: string, turnId: string, type: ConversationEventType, payload: Record<string, unknown> = {}): Promise<QaseyConversationEvent> {
     await this.ready();
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      try {
-        return await this.prisma.$transaction(async transaction => {
+    return this.withAppendLock(ownerKey(owner, turnId), async () => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          return await this.prisma.$transaction(async transaction => {
           const conversation = await transaction.qaseyConversationRecord.findUnique({ where: { applicationId_tenantId_id: { ...owner, id: conversationId } } });
           const turn = await transaction.qaseyConversationTurnRecord.findUnique({ where: { applicationId_tenantId_id: { ...owner, id: turnId } } });
           if (!conversation || conversation.subjectId !== subjectId || !turn || turn.conversationId !== conversationId) throw new Error("Qasey conversation turn not found");
@@ -321,13 +323,14 @@ export class PrismaQaseyConversationRepository implements QaseyConversationRepos
             data: { ...(status === "running" ? {} : { activeTurnId: null }), updatedAt: now },
           });
           return event;
-        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-      } catch (error) {
-        if ((prismaErrorCode(error) === "P2034" || prismaErrorCode(error) === "P2002") && attempt < 2) continue;
-        throw error;
+          }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+        } catch (error) {
+          if ((prismaErrorCode(error) === "P2034" || prismaErrorCode(error) === "P2002") && attempt < 2) continue;
+          throw error;
+        }
       }
-    }
-    throw new Error("Unable to append a conversation event after concurrent updates");
+      throw new Error("Unable to append a conversation event after concurrent updates");
+    });
   }
 
   async events(owner: OwnerScope, subjectId: string, conversationId: string, turnId: string, after = 0): Promise<QaseyConversationEvent[]> {
@@ -359,6 +362,21 @@ export class PrismaQaseyConversationRepository implements QaseyConversationRepos
   }
 
   async close(): Promise<void> {}
+
+  private async withAppendLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.appendTails.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const tail = previous.catch(() => undefined).then(() => gate);
+    this.appendTails.set(key, tail);
+    await previous.catch(() => undefined);
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.appendTails.get(key) === tail) this.appendTails.delete(key);
+    }
+  }
 }
 
 function conversationTitle(message: string): string {
