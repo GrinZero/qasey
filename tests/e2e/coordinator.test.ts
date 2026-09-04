@@ -313,6 +313,15 @@ describe("E2E coordinator", () => {
       `publish-draft-pull-request:${createHash("sha256").update(repairedPatch).digest("hex")}`,
     ]);
     expect(latest).toMatchObject({ status: "awaiting_qa" });
+
+    const rerun = await coordinator.rerun(owner, run.id);
+    expect(rerun).toMatchObject({
+      status: "repairing",
+      amendments: [{ feedback: "Repair the test setup" }],
+    });
+    expect(rerun.artifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: `${rerun.id}:patch`, sha256: createHash("sha256").update(repairedPatch).digest("hex") }),
+    ]));
   });
 });
 

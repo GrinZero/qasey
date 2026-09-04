@@ -398,16 +398,26 @@ export class E2ECoordinator {
     const previous = await this.requireRun(owner, runId);
     const { pullRequestUrl: _pullRequestUrl, error: _error, ...reusable } = previous;
     const now = new Date().toISOString();
+    const rerunId = randomUUID();
+    const executionBriefArtifacts = previous.executionBrief
+      ? previous.artifacts.filter(item => item.id.endsWith(":execution-brief"))
+      : [];
+    let artifacts = executionBriefArtifacts;
+    let status: E2ERun["status"] = "queued";
+    if (previous.amendments.length > 0 && previous.artifacts.some(item => item.id === `${previous.id}:patch`)) {
+      const patch = await this.artifacts.loadPatch(owner, previous.id);
+      artifacts = [...executionBriefArtifacts, await this.artifacts.savePatch(owner, rerunId, patch)];
+      status = "repairing";
+    }
     const rerun: E2ERun = {
       ...reusable,
-      id: randomUUID(),
+      id: rerunId,
       requestId: randomUUID(),
-      status: "queued",
+      status,
       revision: 1,
       createdAt: now,
       updatedAt: now,
-      artifacts: previous.executionBrief ? previous.artifacts.filter(item => item.id.endsWith(":execution-brief")) : [],
-      amendments: [],
+      artifacts,
       codeTaskIds: [],
       branch: `qasey/${randomUUID()}`,
     };
