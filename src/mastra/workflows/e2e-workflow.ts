@@ -287,7 +287,20 @@ export async function createAndStartE2ERun(
 
 export async function rerunE2E(mastra: Mastra, owner: OwnerScope, runId: string, requestContext: RequestContext, resourceId?: string): Promise<E2ERun> {
   await e2ePreflight.assertReady(owner, webE2EConfigurationFromSkill());
+  const previous = await runRepository.get(owner, runId);
+  if (!previous) throw new Error(`Run ${runId} not found`);
+  const changeSet = await caseHubRepository.getChangeSet(owner, previous.changeSetId);
+  if (!changeSet) throw new Error(`Case Hub change set ${previous.changeSetId} not found`);
+  if (!["failed", "blocked_product", "blocked_environment", "verifying"].includes(changeSet.status)) {
+    throw new Error(`E2E rerun requires a failed or blocked Change Set, received ${changeSet.status}`);
+  }
   const created = await e2eCoordinator.rerun(owner, runId);
+  const latestChangeSet = await caseHubRepository.getChangeSet(owner, changeSet.id);
+  if (!latestChangeSet) throw new Error(`Case Hub change set ${changeSet.id} not found after rerun creation`);
+  await caseHubRepository.updateChangeSet(owner, latestChangeSet.id, latestChangeSet.revision, {
+    status: "verifying",
+    runId: created.id,
+  });
   const workflow = mastra.getWorkflow("qasey-e2e-lifecycle");
   const run = await workflow.createRun({ runId: created.id, ...(resourceId ? { resourceId } : {}) });
   try {

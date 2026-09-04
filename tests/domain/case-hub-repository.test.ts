@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { freezeE2EContext, InMemoryCaseHubRepository } from "../../packages/domain/src/index.ts";
+import { assertChangeSetTransition, freezeE2EContext, InMemoryCaseHubRepository } from "../../packages/domain/src/index.ts";
 
 const owner = { applicationId: "qasey", tenantId: "tenant-1" };
 const repository = { owner: "example", repository: "web", cloneUrl: "https://example.com/web.git", baseRef: "main", allowedPaths: ["e2e"], skillsPaths: [] };
 
 describe("Case Hub repository", () => {
+  it("allows an explicit rerun to reopen a failed Change Set", () => {
+    expect(() => assertChangeSetTransition("failed", "verifying")).not.toThrow();
+  });
+
   it("maps request_changes verdicts to the persisted changes_requested status", async () => {
     const hub = new InMemoryCaseHubRepository(() => new Date("2026-09-04T00:00:00.000Z"));
     const requirement = freezeE2EContext({

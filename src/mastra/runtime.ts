@@ -502,12 +502,15 @@ function e2eTools() {
         if (!previous) throw new Error(`Run ${runId} not found`);
         const changeSet = await caseHubRepository.getChangeSet(owner, previous.changeSetId);
         if (!changeSet) throw new Error(`Case Hub change set ${previous.changeSetId} not found`);
-        if (changeSet.status === "blocked_product" || changeSet.status === "blocked_environment") {
+        if (changeSet.status === "blocked_product" || changeSet.status === "blocked_environment" || changeSet.status === "failed") {
           await caseHubRepository.updateChangeSet(owner, changeSet.id, changeSet.revision, { status: "verifying" });
         } else if (changeSet.status !== "verifying") {
           throw new Error(`Case Hub result rerun requires a blocked Change Set, received ${changeSet.status}`);
         }
         const created = await e2eCoordinator.rerun(owner, runId);
+        const latestChangeSet = await caseHubRepository.getChangeSet(owner, changeSet.id);
+        if (!latestChangeSet) throw new Error(`Case Hub change set ${changeSet.id} not found after rerun creation`);
+        await caseHubRepository.updateChangeSet(owner, latestChangeSet.id, latestChangeSet.revision, { runId: created.id });
         if (!mastra) throw new Error("Mastra runtime is required to start the E2E workflow");
         const resourceId = getRuntimeContext(requestContext)["qasey-context"].actor.id;
         const workflowRun = await mastra.getWorkflow("qasey-e2e-lifecycle").createRun({ runId: created.id, resourceId });

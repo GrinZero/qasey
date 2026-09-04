@@ -4,7 +4,7 @@ import "playwright-core";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname, extname, resolve, sep } from "node:path";
+import { dirname, resolve, sep } from "node:path";
 import { z } from "zod";
 import { CaseHubResultReviewInputSchema, CreateCaseHubChangeSetSchema, CreateE2ERunRequestSchema, type CaseHubChangeSet, type CaseHubResult, type OwnerScope, type QaseyConversationEvent } from "../../../../packages/contracts/src/index.ts";
 import { ConversationBusyError, ConversationTurnClosedError, freezeE2EContext, normalizeJiraWebhook } from "../../../../packages/domain/src/index.ts";
@@ -22,6 +22,7 @@ import { runtimeReadiness } from "../../../platform/storage/readiness.ts";
 import { productionSignals } from "../../../platform/observability/production-signals.ts";
 import { devRuntimeTunnelServerEnabled } from "../../../../packages/adapters/src/config.ts";
 import { assertWebE2EAutomationPaths, webE2EConfigurationFromSkill } from "../../../platform/code-task/e2e-repository-skill.ts";
+import { traceViewerContentType, traceViewerRelativePath } from "../../../platform/e2e/trace-viewer.ts";
 import { conversationEventStreamResponse, conversationTurnsToUIMessages } from "./ui-message.ts";
 import { publicToolCallPresentation, publicToolResultPresentation } from "./slack-progress.ts";
 import {
@@ -254,17 +255,6 @@ function playwrightTraceViewerRoot(): string {
   const playwrightCorePackage = nodeRequire.resolve("playwright-core/package.json");
   traceViewerRoot = resolve(dirname(playwrightCorePackage), "lib/vite/traceViewer");
   return traceViewerRoot;
-}
-
-function traceViewerContentType(path: string): string {
-  const extension = extname(path).toLowerCase();
-  if (extension === ".html") return "text/html; charset=utf-8";
-  if (extension === ".js") return "application/javascript; charset=utf-8";
-  if (extension === ".css") return "text/css; charset=utf-8";
-  if (extension === ".svg") return "image/svg+xml";
-  if (extension === ".webmanifest") return "application/manifest+json";
-  if (extension === ".ttf") return "font/ttf";
-  return "application/octet-stream";
 }
 
 function validGitHubSignature(rawBody: string, signature: string | undefined): boolean {
@@ -828,7 +818,8 @@ export const apiRoutes = [
   registerApiRoute("/v1/case-hub/trace-viewer/*", {
     method: "GET",
     handler: async c => {
-      const relativePath = c.req.param("*") || "index.html";
+      const relativePath = traceViewerRelativePath(c.req.url);
+      if (!relativePath) return c.json({ error: "not_found" }, 404);
       if (relativePath === "ping") return c.body("");
       const root = playwrightTraceViewerRoot();
       const target = resolve(root, relativePath);
@@ -839,7 +830,7 @@ export const apiRoutes = [
       c.header("cache-control", relativePath === "index.html" || relativePath === "sw.bundle.js" ? "no-cache" : "public, max-age=31536000, immutable");
       c.header("service-worker-allowed", "/v1/case-hub/trace-viewer/");
       if (relativePath === "index.html") {
-        c.header("content-security-policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' blob:; worker-src 'self' blob:");
+        c.header("content-security-policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' blob:; worker-src 'self' blob:; frame-src 'self' data: blob:");
       }
       return c.body(content);
     },

@@ -622,7 +622,7 @@ const CHANGE_SET_TRANSITIONS: Record<CaseHubChangeSetStatus, readonly CaseHubCha
   blocked_environment: ["verifying", "cancelled", "abandoned"],
   final_verifying: ["ready_to_merge", "awaiting_review", "failed", "cancelled", "abandoned"],
   ready_to_merge: ["merged", "abandoned"],
-  merged: [], failed: [], cancelled: [], abandoned: [],
+  merged: [], failed: ["verifying"], cancelled: [], abandoned: [],
 };
 
 export function assertChangeSetTransition(from: CaseHubChangeSetStatus, to?: CaseHubChangeSetStatus): void {
