@@ -270,7 +270,7 @@ export class E2ECoordinator {
       ? await this.options.effects.execute({
           owner,
           runId: run.id,
-          stepId: "publish-draft-pull-request",
+          stepId: `publish-draft-pull-request:${patchRef.sha256 ?? verifierAttempt}`,
           businessKey: run.branch ?? run.id,
           request: {
             baseSha: run.baseSha,

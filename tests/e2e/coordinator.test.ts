@@ -242,6 +242,7 @@ describe("E2E coordinator", () => {
     const initialPatch = "diff --git a/e2e/initial.spec.ts b/e2e/initial.spec.ts";
     const repairedPatch = "diff --git a/e2e/repaired.spec.ts b/e2e/repaired.spec.ts";
     const runner = fakeRunner(submitted, [], [initialPatch, repairedPatch]);
+    const effectSteps: string[] = [];
     const coordinator = new E2ECoordinator(repository, artifacts(), broker(), {
       maxRepairs: 2,
       reviewBaseUrl: "https://qasey.test",
@@ -251,6 +252,12 @@ describe("E2E coordinator", () => {
           E2E_LOGIN_EMAIL: "operator@example.test",
           E2E_LOGIN_PASSWORD: "redacted-password",
         })),
+      },
+      effects: {
+        execute: vi.fn(async input => {
+          effectSteps.push(input.stepId);
+          return (await input.operation("test-idempotency-key")).result;
+        }),
       },
     });
     const run = await coordinator.create(owner, createInput());
@@ -301,6 +308,10 @@ describe("E2E coordinator", () => {
     expect(patchRefs).toHaveLength(1);
     expect(patchRefs[0]?.sha256).toBe(createHash("sha256").update(repairedPatch).digest("hex"));
     expect(submitted.at(-1)?.inputPatchRef).toEqual(patchRefs[0]);
+    expect(effectSteps).toEqual([
+      `publish-draft-pull-request:${createHash("sha256").update(initialPatch).digest("hex")}`,
+      `publish-draft-pull-request:${createHash("sha256").update(repairedPatch).digest("hex")}`,
+    ]);
     expect(latest).toMatchObject({ status: "awaiting_qa" });
   });
 });
