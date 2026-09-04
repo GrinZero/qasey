@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { createBrowserCsrfMiddleware } from "../../src/platform/http/browser-csrf.ts";
 
 const middleware = createBrowserCsrfMiddleware({ publicBaseUrl: "https://qasey.example.com/base" });
+const middlewareWithInternalAlias = createBrowserCsrfMiddleware({
+  publicBaseUrl: "https://qasey.example.com/base",
+  additionalTrustedOrigins: ["http://qasey:4111"],
+});
 
 describe("browser CSRF middleware", () => {
   it.each(["GET", "HEAD", "OPTIONS"])("allows safe browser method %s without Origin", async method => {
@@ -14,6 +18,12 @@ describe("browser CSRF middleware", () => {
   it.each(["POST", "PUT", "PATCH", "DELETE"])("allows same-origin browser method %s", async method => {
     const { context, next } = request({ method, origin: "https://qasey.example.com", user: { id: "user-1" } });
     await middleware(context as never, next);
+    expect(next).toHaveBeenCalledOnce();
+  });
+
+  it("allows an explicitly configured exact internal test origin", async () => {
+    const { context, next } = request({ method: "POST", origin: "http://qasey:4111", user: { id: "user-1" } });
+    await middlewareWithInternalAlias(context as never, next);
     expect(next).toHaveBeenCalledOnce();
   });
 

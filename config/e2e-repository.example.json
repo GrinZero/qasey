@@ -27,6 +27,7 @@
           "id": "web",
           "root": "web",
           "testRoot": "web/tests/e2e",
+          "testFileSuffixes": [".spec.ts"],
           "config": "web/playwright.config.ts",
           "playwrightProject": "chromium"
         }

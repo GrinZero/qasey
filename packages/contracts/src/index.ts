@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { UIMessage } from "ai";
 
 export const OwnerScopeSchema = z.object({
   applicationId: z.string().min(1),
@@ -38,6 +39,165 @@ export const QaseyRequestContextSchema = z.object({
   attachments: z.array(AttachmentRefSchema).default([]),
 });
 export type QaseyRequestContext = z.infer<typeof QaseyRequestContextSchema>;
+
+export const QaseyConversationSchema = z.object({
+  applicationId: z.literal("qasey"),
+  tenantId: z.string().min(1),
+  id: z.string().uuid(),
+  subjectId: z.string().min(1),
+  title: z.string().trim().min(1).max(120),
+  activeTurnId: z.string().uuid().optional(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+}).strict();
+export type QaseyConversation = z.infer<typeof QaseyConversationSchema>;
+
+export const QaseyConversationTurnStatusSchema = z.enum(["running", "completed", "failed"]);
+export const QaseyConversationTurnSchema = z.object({
+  applicationId: z.literal("qasey"),
+  tenantId: z.string().min(1),
+  id: z.string().uuid(),
+  conversationId: z.string().uuid(),
+  clientMessageId: z.string().uuid(),
+  userMessage: z.string().trim().min(1).max(100_000),
+  assistantText: z.string().default(""),
+  status: QaseyConversationTurnStatusSchema,
+  agentRunId: z.string().uuid().optional(),
+  linkedRunId: z.string().uuid().optional(),
+  error: z.string().max(2_000).optional(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+}).strict();
+export type QaseyConversationTurn = z.infer<typeof QaseyConversationTurnSchema>;
+
+export const QaseyConversationEventTypeSchema = z.enum([
+  "accepted", "assistant.delta", "progress", "tool.started", "tool.finished", "run.linked", "completed", "failed",
+]);
+export type QaseyConversationEventType = z.infer<typeof QaseyConversationEventTypeSchema>;
+export const QaseyConversationEventSchema = z.object({
+  applicationId: z.literal("qasey"),
+  tenantId: z.string().min(1),
+  conversationId: z.string().uuid(),
+  turnId: z.string().uuid(),
+  sequence: z.number().int().positive(),
+  type: QaseyConversationEventTypeSchema,
+  payload: z.record(z.string(), z.unknown()),
+  occurredAt: z.iso.datetime(),
+}).strict();
+export type QaseyConversationEvent = z.infer<typeof QaseyConversationEventSchema>;
+
+export const QaseyUIMessageMetadataSchema = z.object({
+  conversationId: z.string().uuid(),
+  turnId: z.string().uuid(),
+  createdAt: z.iso.datetime(),
+  latestSequence: z.number().int().nonnegative(),
+  linkedRunId: z.string().uuid().optional(),
+}).strict();
+export type QaseyUIMessageMetadata = z.infer<typeof QaseyUIMessageMetadataSchema>;
+
+export const QaseyProgressDataSchema = z.object({
+  sequence: z.number().int().positive(),
+  title: z.string().min(1).max(100),
+  detail: z.string().max(1_200),
+  status: z.enum(["working", "waiting", "blocked", "completed", "failed"]),
+  milestone: z.string().max(64).optional(),
+  next: z.string().max(500).optional(),
+}).strict();
+export type QaseyProgressData = z.infer<typeof QaseyProgressDataSchema>;
+
+export const QaseyRunDataSchema = z.object({
+  runId: z.string().uuid(),
+}).strict();
+export type QaseyRunData = z.infer<typeof QaseyRunDataSchema>;
+
+export const QaseyCursorDataSchema = z.object({
+  sequence: z.number().int().positive(),
+}).strict();
+export type QaseyCursorData = z.infer<typeof QaseyCursorDataSchema>;
+
+export type QaseyUIDataTypes = {
+  progress: QaseyProgressData;
+  run: QaseyRunData;
+  cursor: QaseyCursorData;
+};
+export type QaseyUIMessage = UIMessage<QaseyUIMessageMetadata, QaseyUIDataTypes>;
+
+export const QaseyPublicToolInputSchema = z.object({
+  summary: z.string().trim().min(1).max(500),
+}).strict();
+export type QaseyPublicToolInput = z.infer<typeof QaseyPublicToolInputSchema>;
+
+export const QaseyPublicToolOutputSchema = z.object({
+  summary: z.string().trim().min(1).max(500),
+}).strict();
+export type QaseyPublicToolOutput = z.infer<typeof QaseyPublicToolOutputSchema>;
+
+const QaseyUITextPartSchema = z.object({
+  type: z.literal("text"),
+  text: z.string(),
+  state: z.enum(["streaming", "done"]).optional(),
+}).passthrough();
+const QaseyUIProgressPartSchema = z.object({
+  type: z.literal("data-progress"),
+  id: z.string().min(1).optional(),
+  data: QaseyProgressDataSchema,
+}).strict();
+const QaseyUIRunPartSchema = z.object({
+  type: z.literal("data-run"),
+  id: z.string().min(1).optional(),
+  data: QaseyRunDataSchema,
+}).strict();
+const QaseyUICursorPartSchema = z.object({
+  type: z.literal("data-cursor"),
+  id: z.string().min(1).optional(),
+  data: QaseyCursorDataSchema,
+}).strict();
+const QaseyUIDynamicToolBaseSchema = z.object({
+  type: z.literal("dynamic-tool"),
+  toolName: z.string().min(1).max(256),
+  toolCallId: z.string().min(1).max(256),
+  title: z.string().min(1).max(100).optional(),
+  providerExecuted: z.boolean().optional(),
+  // AI SDK's stream reducer materializes this key with `undefined` while
+  // replacing an input part with its result. No raw input is accepted here.
+  rawInput: z.never().optional(),
+});
+const QaseyUIDynamicToolPartSchema = z.discriminatedUnion("state", [
+  QaseyUIDynamicToolBaseSchema.extend({
+    state: z.literal("input-available"),
+    input: QaseyPublicToolInputSchema,
+    output: z.never().optional(),
+    errorText: z.never().optional(),
+    preliminary: z.never().optional(),
+  }).strict(),
+  QaseyUIDynamicToolBaseSchema.extend({
+    state: z.literal("output-available"),
+    input: QaseyPublicToolInputSchema,
+    output: QaseyPublicToolOutputSchema,
+    errorText: z.never().optional(),
+    preliminary: z.boolean().optional(),
+  }).strict(),
+  QaseyUIDynamicToolBaseSchema.extend({
+    state: z.literal("output-error"),
+    input: QaseyPublicToolInputSchema,
+    errorText: z.string().min(1).max(500),
+    output: z.never().optional(),
+    preliminary: z.never().optional(),
+  }).strict(),
+]);
+
+export const QaseyUIMessageSchema = z.object({
+  id: z.string().min(1),
+  role: z.enum(["user", "assistant"]),
+  metadata: QaseyUIMessageMetadataSchema,
+  parts: z.array(z.union([
+    QaseyUITextPartSchema,
+    QaseyUIProgressPartSchema,
+    QaseyUIRunPartSchema,
+    QaseyUICursorPartSchema,
+    QaseyUIDynamicToolPartSchema,
+  ])),
+}).strict();
 
 export const AgentProgressInputSchema = z.object({
   milestone: z.string().trim().min(2).max(64).regex(/^[a-z][a-z0-9_-]*$/u),
@@ -318,6 +478,11 @@ export const CaseHubChangeSetSchema = z.object({
   projectCode: CaseHubProjectCodeSchema,
   requirement: RequirementSnapshotSchema,
   caseVersionIds: z.array(z.string().uuid()).min(1),
+  candidateCaseSequenceRange: z.object({
+    start: z.number().int().positive(),
+    end: z.number().int().positive(),
+  }).strict().refine(value => value.end >= value.start, "Candidate Case sequence range must be ordered").optional(),
+  caseIdsFinalized: z.boolean().default(false),
   planHash: z.string().regex(/^[a-f0-9]{64}$/u),
   status: CaseHubChangeSetStatusSchema,
   revision: z.number().int().positive(),

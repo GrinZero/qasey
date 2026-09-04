@@ -16,7 +16,8 @@ import type { E2ERun, QaseyRequestContext } from "../../packages/contracts/src/i
 import { AgentProgressSession, freezeE2EContext } from "../../packages/domain/src/index.ts";
 import type { ToolsInput } from "@mastra/core/agent";
 import {
-  InMemoryCaseHubRepository, InMemoryRunRepository, PrismaCaseHubRepository, PrismaRunRepository,
+  InMemoryCaseHubRepository, InMemoryQaseyConversationRepository, InMemoryRunRepository,
+  PrismaCaseHubRepository, PrismaQaseyConversationRepository, PrismaRunRepository,
 } from "../../packages/domain/src/index.ts";
 import { assertOpenAICompatibleToolSchemas, createGitHubClient, GitHubPublisher, loadConfig, QaseyMcpCatalog, JiraClient, ReadConnectorCatalog, resolveCredentialKeyring } from "../../packages/adapters/src/index.ts";
 import {
@@ -29,7 +30,7 @@ import { runtimeReadiness } from "../platform/storage/readiness.ts";
 import { InMemorySandboxLeaseStore, PrismaSandboxLeaseStore } from "../platform/workspace/sandbox-lease-store.ts";
 import { SandboxPoolClient } from "../platform/workspace/sandbox-client.ts";
 import { PooledSandboxCodeTaskRunnerProvider } from "../platform/code-task/pooled-sandbox-runner.ts";
-import { webE2EConfigurationFromSkill } from "../platform/code-task/e2e-repository-skill.ts";
+import { assertWebE2EAutomationPaths, webE2EConfigurationFromSkill } from "../platform/code-task/e2e-repository-skill.ts";
 import { resolveBuildMetadata } from "../platform/e2e/build-metadata.ts";
 import { E2EFixtureLeaseService } from "../platform/e2e/fixture-service.ts";
 import { E2EPreflightService } from "../platform/e2e/preflight.ts";
@@ -77,6 +78,9 @@ export const runRepository = applicationDatabase ? new PrismaRunRepository(appli
 export const caseHubRepository = applicationDatabase
   ? new PrismaCaseHubRepository(applicationDatabase.client)
   : new InMemoryCaseHubRepository();
+export const conversationRepository = applicationDatabase
+  ? new PrismaQaseyConversationRepository(applicationDatabase.client)
+  : new InMemoryQaseyConversationRepository();
 export const failureInboxStore = applicationDatabase
   ? new PrismaFailureInboxStore(applicationDatabase.client)
   : new InMemoryFailureInboxStore();
@@ -135,6 +139,7 @@ runtimeReadiness.register("mastra-storage", async () => {
 if (applicationDatabase) runtimeReadiness.register("application-database", () => applicationDatabase.healthCheck());
 runtimeReadiness.register("run-repository", () => runRepository.healthCheck?.() ?? Promise.resolve());
 runtimeReadiness.register("case-hub-repository", () => caseHubRepository.healthCheck?.() ?? Promise.resolve());
+runtimeReadiness.register("conversation-repository", () => conversationRepository.healthCheck?.() ?? Promise.resolve());
 runtimeReadiness.register("failure-inbox", () => failureInboxStore.healthCheck?.() ?? Promise.resolve());
 runtimeReadiness.register("effect-receipts", () => effectReceiptStore.healthCheck?.() ?? Promise.resolve());
 runtimeReadiness.register("channel-delivery-inbox", () => channelDeliveryInbox.healthCheck?.() ?? Promise.resolve());
@@ -231,19 +236,22 @@ export function initializeQaseyInfrastructure(): Promise<void> {
     applicationDatabase?.init(),
     runRepository.init?.(),
     caseHubRepository.init?.(),
+    conversationRepository.init?.(),
     failureInboxStore.init?.(),
     effectReceiptStore.init?.(),
     channelDeliveryInbox.init?.(),
     sandboxLeaseStore?.init(),
     externalConnectionStore.init?.(),
     mcpCatalog.init(),
-  ]).then(() => undefined);
+  ]).then(async () => {
+    await conversationRepository.failStale(new Date(Date.now() - config.QASEY_AGENT_TIMEOUT_MS * 2));
+  });
   return infrastructureInitialization;
 }
 
 export async function closeQaseyInfrastructure(): Promise<void> {
   const resources: Array<{ close(): Promise<void> }> = [
-    mcpCatalog, externalConnectionStore, effectReceiptStore, failureInboxStore, artifactStore, channelDeliveryInbox, caseHubRepository, runRepository, runtimeStore.storage,
+    mcpCatalog, externalConnectionStore, effectReceiptStore, failureInboxStore, artifactStore, channelDeliveryInbox, conversationRepository, caseHubRepository, runRepository, runtimeStore.storage,
     ...(sandboxLeaseStore ? [sandboxLeaseStore] : []),
     ...(applicationDatabase ? [applicationDatabase] : []),
   ];
@@ -427,6 +435,7 @@ function e2eTools() {
         const threadId = String(requestContext.get(MASTRA_THREAD_ID_KEY) ?? sessionId);
         const taskRunId = String(requestContext.get("taskId") ?? requestContext.get("executionId") ?? requestId);
         const webE2EConfiguration = webE2EConfigurationFromSkill();
+        assertWebE2EAutomationPaths(input.proposals, webE2EConfiguration.automationPathPolicy);
         const preflight = await e2ePreflight.assertReady(owner, webE2EConfiguration);
         const actorId = getRuntimeContext(requestContext)["qasey-context"].actor.id;
         const requirement = freezeE2EContext(input.requirement, { sessionId, threadId, taskRunId, requestId, resourceId });

@@ -6,6 +6,7 @@ const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 export interface BrowserCsrfOptions {
   publicBaseUrl: string;
+  additionalTrustedOrigins?: readonly string[];
 }
 
 /**
@@ -15,7 +16,8 @@ export interface BrowserCsrfOptions {
  * Bearer-token and signed service traffic retain their non-browser contract.
  */
 export function createBrowserCsrfMiddleware(options: BrowserCsrfOptions): MiddlewareFunction {
-  const expectedOrigin = new URL(options.publicBaseUrl).origin;
+  const expectedOrigins = new Set([options.publicBaseUrl, ...(options.additionalTrustedOrigins ?? [])]
+    .map(value => new URL(value).origin));
   return async (context, next) => {
     if (SAFE_METHODS.has(context.req.method.toUpperCase())) return next();
 
@@ -28,7 +30,7 @@ export function createBrowserCsrfMiddleware(options: BrowserCsrfOptions): Middle
     if (!browserAuthenticated) return next();
 
     const suppliedOrigin = context.req.header("origin");
-    if (suppliedOrigin === expectedOrigin) return next();
+    if (suppliedOrigin && expectedOrigins.has(suppliedOrigin)) return next();
 
     context.header("cache-control", "no-store");
     context.header("vary", "Origin");

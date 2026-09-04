@@ -7,7 +7,7 @@ import { RedisServerCache } from "@mastra/redis";
 import { RedisStreamsPubSub } from "@mastra/redis-streams";
 import Redis from "ioredis";
 import { QASEY_TRACE_REQUEST_CONTEXT_KEYS } from "./applications/qasey/observability.ts";
-import { applicationDatabase, closeQaseyInfrastructure, config, createMastraRuntimeStorage, credentialKeyring, e2eFixtureLeaseService, externalConnectionStore, failureInboxStore, initializeQaseyInfrastructure, runRepository, sandboxPoolClient } from "./runtime.ts";
+import { applicationDatabase, closeQaseyInfrastructure, config, conversationRepository, createMastraRuntimeStorage, credentialKeyring, e2eFixtureLeaseService, externalConnectionStore, failureInboxStore, initializeQaseyInfrastructure, runRepository, sandboxPoolClient } from "./runtime.ts";
 import { createQaseyApplication } from "./applications/qasey/application.ts";
 import * as e2eModule from "./workflows/e2e-workflow.ts";
 import * as scorerModule from "./scorers/eval-scorers.ts";
@@ -49,6 +49,7 @@ import { TriggerProviderRegistry } from "../platform/triggers/trigger-provider-r
 import { SlackTriggerProvider } from "../platform/triggers/slack-trigger-provider.ts";
 import { StaleRunReconciler } from "../platform/recovery/failure-inbox.ts";
 import { ReconcilerLoop } from "../platform/recovery/reconciler-loop.ts";
+import { StaleConversationReconciler } from "../platform/recovery/conversation-reconciler.ts";
 import { InMemoryOrganizationStore, PrismaOrganizationStore } from "../platform/auth/organization-store.ts";
 import { createBrowserCsrfMiddleware } from "../platform/http/browser-csrf.ts";
 import { createRequestTelemetryMiddleware } from "../platform/http/request-telemetry.ts";
@@ -85,6 +86,7 @@ function organizationSlug(tenantId: string): string {
 
 const EXPENSIVE_ROUTE_IDS = new Set([
   "qasey-task",
+  "qasey-conversation-message",
   "run-create",
   "run-rerun",
   "run-verdict",
@@ -267,14 +269,27 @@ const passwordAuth = new PasswordAuthService({
 });
 await seedServiceRolePermissions(permissionService, config.QASEY_SINGLE_TENANT_ID ?? "trusted-ingress");
 const staleRunReconciler = new StaleRunReconciler(runRepository, failureInboxStore, config.QASEY_RUN_HEARTBEAT_TIMEOUT_MS);
-const runReconcilerLoop = config.QASEY_DEPLOYMENT_MODE === "standalone" || config.MASTRA_WORKERS === "orchestration"
+const reconciliationEnabled = config.QASEY_DEPLOYMENT_MODE === "standalone" || config.MASTRA_WORKERS === "orchestration";
+const runReconcilerLoop = reconciliationEnabled
   ? new ReconcilerLoop(
       () => staleRunReconciler.runOnce().then(() => undefined),
       config.QASEY_RUN_RECONCILER_INTERVAL_MS,
       error => console.error(JSON.stringify({ event: "run.reconciler.failed", message: error.message })),
     ).start()
   : undefined;
+const staleConversationReconciler = new StaleConversationReconciler(
+  conversationRepository,
+  config.QASEY_AGENT_TIMEOUT_MS * 2,
+);
+const conversationReconcilerLoop = reconciliationEnabled
+  ? new ReconcilerLoop(
+      () => staleConversationReconciler.runOnce().then(() => undefined),
+      config.QASEY_CONVERSATION_RECONCILER_INTERVAL_MS,
+      error => console.error(JSON.stringify({ event: "conversation.reconciler.failed", message: error.message })),
+    ).start()
+  : undefined;
 if (runReconcilerLoop) runtimeReadiness.register("run-reconciler", () => runReconcilerLoop.healthCheck());
+if (conversationReconcilerLoop) runtimeReadiness.register("conversation-reconciler", () => conversationReconcilerLoop.healthCheck());
 const qaseyApplication = createQaseyApplication({
   e2eModule,
   scorerModule,
@@ -283,6 +298,9 @@ const qaseyApplication = createQaseyApplication({
 const qaseyCatalog = flattenApplicationRegistry([qaseyApplication]).catalog;
 const adminUiApplication = createAdminUiApplication({
   publicBaseUrl: config.QASEY_PUBLIC_BASE_URL,
+  ...(config.QASEY_ADDITIONAL_TRUSTED_ORIGINS ? {
+    additionalTrustedOrigins: config.QASEY_ADDITIONAL_TRUSTED_ORIGINS,
+  } : {}),
   applicationCatalog: qaseyCatalog,
   applications: [qaseyApplication],
   permissions: permissionService,
@@ -308,6 +326,7 @@ const adminUiApplication = createAdminUiApplication({
 const lifecycle = new LifecycleContainer();
 lifecycle.own({ close: closeQaseyInfrastructure });
 if (runReconcilerLoop) lifecycle.own(runReconcilerLoop);
+if (conversationReconcilerLoop) lifecycle.own(conversationReconcilerLoop);
 if (permissionStore.close) lifecycle.own({ close: () => permissionStore.close!() });
 if (apiTokenStore.close) lifecycle.own({ close: () => apiTokenStore.close!() });
 if (organizationStore.close) lifecycle.own({ close: () => organizationStore.close!() });
@@ -507,7 +526,12 @@ const sharedRuntime = createSharedMastraConfig({
         console.error(JSON.stringify({ event: "traffic.governance.store_error", operation }));
       },
     });
-    const browserCsrf = createBrowserCsrfMiddleware({ publicBaseUrl: config.QASEY_PUBLIC_BASE_URL });
+    const browserCsrf = createBrowserCsrfMiddleware({
+      publicBaseUrl: config.QASEY_PUBLIC_BASE_URL,
+      ...(config.QASEY_ADDITIONAL_TRUSTED_ORIGINS ? {
+        additionalTrustedOrigins: config.QASEY_ADDITIONAL_TRUSTED_ORIGINS,
+      } : {}),
+    });
     return config.NODE_ENV === "development"
       ? [requestBodyLimit, requestTelemetry, closeDevelopmentConnections, authorization, trafficGovernance, browserCsrf, applyStudioNetworkPolicy]
       : [requestBodyLimit, requestTelemetry, authorization, trafficGovernance, browserCsrf, applyStudioNetworkPolicy];

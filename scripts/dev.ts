@@ -164,46 +164,54 @@ async function waitForSandboxReady(child: ChildProcess): Promise<void> {
 }
 
 try {
-  const adminBuild = await run("pnpm", ["admin-ui:build"]);
-  if (adminBuild.code !== 0) {
-    process.exitCode = exitCode(adminBuild);
-  } else if (externalSandbox) {
-    forwardedSignal = undefined;
-    const mastra = spawnChild("pnpm", [
-      "exec",
-      "mastra",
-      "dev",
-      "--dir",
-      "src/mastra",
-      "--env",
-      ".devcontainer/mastra.env",
-    ], developmentEnv);
-    await waitForSpawn(mastra);
-    await lock.setChildPid(mastra.pid!);
-    const result = await waitForExit(mastra);
-    process.exitCode = forwardedSignal ? signalExitCode(forwardedSignal) : exitCode(result) || 1;
+  // The development container keeps node_modules in a named volume. Regenerate
+  // the client on every startup so schema edits from the bind-mounted checkout
+  // cannot leave that volume with a stale Prisma runtime.
+  const prismaGenerate = await run("pnpm", ["db:generate"]);
+  if (prismaGenerate.code !== 0) {
+    process.exitCode = exitCode(prismaGenerate);
   } else {
-    const runtimeBuild = await run("pnpm", ["exec", "tsup"]);
-    if (runtimeBuild.code !== 0) {
-      process.exitCode = exitCode(runtimeBuild);
+    const adminBuild = await run("pnpm", ["admin-ui:build"]);
+    if (adminBuild.code !== 0) {
+      process.exitCode = exitCode(adminBuild);
+    } else if (externalSandbox) {
+      forwardedSignal = undefined;
+      const mastra = spawnChild("pnpm", [
+        "exec",
+        "mastra",
+        "dev",
+        "--dir",
+        "src/mastra",
+        "--env",
+        ".devcontainer/mastra.env",
+      ], developmentEnv);
+      await waitForSpawn(mastra);
+      await lock.setChildPid(mastra.pid!);
+      const result = await waitForExit(mastra);
+      process.exitCode = forwardedSignal ? signalExitCode(forwardedSignal) : exitCode(result) || 1;
     } else {
-      const browserInstall = await run("pnpm", ["exec", "playwright", "install", "chromium"], developmentEnv);
-      if (browserInstall.code !== 0) {
-        process.exitCode = exitCode(browserInstall);
+      const runtimeBuild = await run("pnpm", ["exec", "tsup"]);
+      if (runtimeBuild.code !== 0) {
+        process.exitCode = exitCode(runtimeBuild);
       } else {
-        forwardedSignal = undefined;
-        const sandbox = spawnChild(process.execPath, ["dist/sandbox-runtime.mjs"], developmentEnv);
-        await waitForSpawn(sandbox);
-        await lock.setChildPid(sandbox.pid!);
-        await waitForSandboxReady(sandbox);
+        const browserInstall = await run("pnpm", ["exec", "playwright", "install", "chromium"], developmentEnv);
+        if (browserInstall.code !== 0) {
+          process.exitCode = exitCode(browserInstall);
+        } else {
+          forwardedSignal = undefined;
+          const sandbox = spawnChild(process.execPath, ["dist/sandbox-runtime.mjs"], developmentEnv);
+          await waitForSpawn(sandbox);
+          await lock.setChildPid(sandbox.pid!);
+          await waitForSandboxReady(sandbox);
 
-        const mastra = spawnChild("pnpm", ["exec", "mastra", "dev", "--dir", "src/mastra"], developmentEnv);
-        await waitForSpawn(mastra);
-        await lock.setChildPid(mastra.pid!);
+          const mastra = spawnChild("pnpm", ["exec", "mastra", "dev", "--dir", "src/mastra"], developmentEnv);
+          await waitForSpawn(mastra);
+          await lock.setChildPid(mastra.pid!);
 
-        const firstExit = await Promise.race([waitForExit(sandbox), waitForExit(mastra)]);
-        await stopChildren(forwardedSignal ?? "SIGTERM");
-        process.exitCode = forwardedSignal ? signalExitCode(forwardedSignal) : exitCode(firstExit) || 1;
+          const firstExit = await Promise.race([waitForExit(sandbox), waitForExit(mastra)]);
+          await stopChildren(forwardedSignal ?? "SIGTERM");
+          process.exitCode = forwardedSignal ? signalExitCode(forwardedSignal) : exitCode(firstExit) || 1;
+        }
       }
     }
   }

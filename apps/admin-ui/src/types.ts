@@ -41,6 +41,14 @@ export interface AgentApplication {
   accent: "indigo" | "teal" | "amber" | "coral" | "blue";
 }
 
+export interface QaseyConversation {
+  id: string;
+  title: string;
+  activeTurnId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type RunStatus =
   | "queued"
   | "preparing_workspace"
@@ -118,24 +126,6 @@ export interface ApiTokenRecord {
   revokedAt?: string;
 }
 
-export interface SandboxSessionState {
-  sessionId: string;
-  workspaceId: string;
-  generation: number;
-  ordinal: number;
-  lastActivityAt: string;
-  browser: { running: boolean; url?: string; title?: string };
-  desktop: {
-    running: boolean;
-    available: boolean;
-    display?: string;
-    width?: number;
-    height?: number;
-    recording?: boolean;
-    applications?: string[];
-  };
-}
-
 export type TriggerConnectionStatus = "awaiting_webhook" | "active" | "disabled" | "error";
 
 export interface TriggerConfigurationField {
@@ -189,3 +179,8 @@ export interface TriggerConnection {
   createdAt: string;
   updatedAt: string;
 }
+import { QaseyUIMessageSchema, type QaseyProgressData, type QaseyUIMessage as SharedQaseyUIMessage } from "@qasey/contracts";
+
+export type QaseyUIMessage = SharedQaseyUIMessage;
+export type { QaseyProgressData };
+export { QaseyUIMessageSchema };

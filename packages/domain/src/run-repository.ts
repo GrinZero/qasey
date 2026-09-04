@@ -309,5 +309,34 @@ function runFromRow(row: { payload: Prisma.JsonValue; revision: number }): E2ERu
   if (!row.payload || typeof row.payload !== "object" || Array.isArray(row.payload)) {
     throw new Error("Persisted run payload must be a JSON object");
   }
-  return E2ERunSchema.parse({ ...row.payload, revision: row.revision });
+  return E2ERunSchema.parse({ ...normalizePersistedRunPayload(row.payload), revision: row.revision });
+}
+
+/** Decode runs written before local test-file discovery policy left the sandbox protocol. */
+function normalizePersistedRunPayload(payload: Prisma.JsonObject): Prisma.JsonObject {
+  const normalized = structuredClone(payload);
+  stripLegacyTestFileSuffixes(normalized.playwrightVerification);
+
+  const repositoryExecution = jsonObject(normalized.repositoryExecution);
+  stripLegacyTestFileSuffixes(repositoryExecution?.verification);
+
+  const executionBrief = jsonObject(normalized.executionBrief);
+  const briefRepository = jsonObject(executionBrief?.repository);
+  stripLegacyTestFileSuffixes(briefRepository?.verification);
+  return normalized;
+}
+
+function stripLegacyTestFileSuffixes(value: Prisma.JsonValue | undefined): void {
+  const verification = jsonObject(value);
+  if (!verification || !Array.isArray(verification.projects)) return;
+  for (const value of verification.projects) {
+    const project = jsonObject(value);
+    if (project) delete project.testFileSuffixes;
+  }
+}
+
+function jsonObject(value: Prisma.JsonValue | undefined): Prisma.JsonObject | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Prisma.JsonObject
+    : undefined;
 }

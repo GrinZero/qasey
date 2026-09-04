@@ -7,3 +7,4 @@ export * from "./e2e-context.ts";
 export * from "./progress.ts";
 export * from "./agent-progress.ts";
 export * from "./case-hub-repository.ts";
+export * from "./conversation-repository.ts";

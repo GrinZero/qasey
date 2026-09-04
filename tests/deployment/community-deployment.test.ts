@@ -64,6 +64,7 @@ describe("community deployment", () => {
     expect(developmentCompose).toContain("condition: service_completed_successfully");
     expect(developmentCompose).toContain('command: ["sleep", "infinity"]');
     expect(developmentCompose).toContain("- .:/app");
+    expect(developmentCompose).toContain("qasey-dev-mastra:/app/.mastra");
     expect(developmentCompose).not.toContain("- .env.example");
     expect(developmentCompose).toContain("QASEY_SANDBOX_ENDPOINT_TEMPLATE: http://sandbox-{ordinal}:4120");
     expect(developmentCompose).not.toContain("GITHUB_TOKEN:");
@@ -76,11 +77,12 @@ describe("community deployment", () => {
     expect(dockerfile).toContain("ENV PNPM_CONFIG_STORE_DIR=/pnpm/store");
     expect(dockerfile).toContain("ENV pnpm_config_verify_deps_before_run=false");
     expect(dockerfile).toContain("/home/node/.cache/mastra");
-    expect(dockerfile).toContain("install -d -o node -g node -m 0750 /app/.qasey");
+    expect(dockerfile).toContain("install -d -o node -g node -m 0750 /app/.qasey /app/.mastra");
     expect(devScript).toContain('argument !== "--external-sandbox"');
     expect(devScript).toContain('"http://sandbox-{ordinal}:4120"');
     expect(devScript).toContain('".devcontainer/mastra.env"');
     expect(devScript).toContain('import "../src/load-env.ts"');
+    expect(devScript.indexOf('["db:generate"]')).toBeLessThan(devScript.indexOf('["admin-ui:build"]'));
     expect(mastraEnv).toContain("NODE_ENV=development");
     expect(mastraEnv).not.toMatch(/(?:KEY|PASSWORD|TOKEN)=\S+/u);
     expect(JSON.parse(manifest).scripts).toMatchObject({

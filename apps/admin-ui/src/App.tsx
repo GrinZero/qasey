@@ -16,7 +16,6 @@ import {
   EyeOff,
   FileSearch,
   FileText,
-  FolderOpen,
   Gauge,
   GitBranch,
   Inbox,
@@ -40,19 +39,34 @@ import {
   Sparkles,
   Square,
   TestTube2,
-  Terminal,
   Trash2,
   UserRound,
+  Wrench,
   X,
   XCircle,
 } from "lucide-react";
+import { useChat } from "@ai-sdk/react";
+import { isDynamicToolUIPart, type DynamicToolUIPart } from "ai";
+import {
+  QaseyCursorDataSchema,
+  QaseyProgressDataSchema,
+  QaseyPublicToolInputSchema,
+  QaseyPublicToolOutputSchema,
+  QaseyRunDataSchema,
+  QaseyUIMessageMetadataSchema,
+  QaseyUIMessageSchema,
+} from "@qasey/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { api, ApiError, errorMessage } from "./api";
 import { canRunQaseyTask } from "./catalog";
 import { adminPaths, legacyAdminPath, viewForAdminPath, type View } from "./routes";
 import { presentScope } from "./scopes";
-import type { AgentApplication, ApiTokenRecord, AuditRecord, AuthConfig, CaseHubCase, CaseHubCaseVersion, CaseHubChangeSet, CaseHubResult, CatalogEntry, OrganizationSelection, QaseyRun, RunStatus, SandboxSessionState, Session, TriggerConnection, TriggerConnectionStatus, TriggerProvider, TriggerTarget } from "./types";
+import { Conversation, ConversationContent, ConversationScrollButton } from "./components/ai-elements/conversation";
+import { Message, MessageContent, MessageResponse } from "./components/ai-elements/message";
+import { PromptInput } from "./components/ai-elements/prompt-input";
+import { QaseyChatTransport, type QaseyReconnectTarget } from "./qasey-chat-transport";
+import type { AgentApplication, ApiTokenRecord, AuditRecord, AuthConfig, CaseHubCase, CaseHubCaseVersion, CaseHubChangeSet, CaseHubResult, CatalogEntry, OrganizationSelection, QaseyConversation, QaseyProgressData, QaseyRun, QaseyUIMessage, RunStatus, Session, TriggerConnection, TriggerConnectionStatus, TriggerProvider, TriggerTarget } from "./types";
 
 type AuthState =
   | { kind: "loading" }
@@ -173,7 +187,6 @@ export function App() {
     { id: "qasey-cases", label: "Case Hub", icon: Library },
     { id: "qasey-runs", label: "测试运行", icon: Activity, badge: activeCount },
     { id: "qasey-review", label: "待我审阅", icon: ClipboardCheck, badge: reviewCount },
-    { id: "qasey-cua", label: "Ubuntu 工作台", icon: MonitorPlay },
   ];
   const qaseyActive = view?.startsWith("qasey-") ?? false;
   const currentLabel = [...platformNav, ...qaseyNav,
@@ -252,7 +265,6 @@ export function App() {
             <Route path={adminPaths["qasey-runs"]} element={<RunsView runs={runs} loading={loadingRuns} onRefresh={loadWorkspace} />} />
             <Route path={adminPaths["qasey-cases"]} element={<CaseHubView />} />
             <Route path={adminPaths["qasey-review"]} element={<QaReviewView onReviewQueueChanged={loadWorkspace} />} />
-            <Route path={adminPaths["qasey-cua"]} element={<CuaView subjectId={auth.session.subjectId} />} />
             <Route path={adminPaths.triggers} element={auth.session.isAdmin ? <TriggersView /> : <Navigate to={adminPaths["platform-home"]} replace />} />
             <Route path={adminPaths.access} element={auth.session.isAdmin ? <AccessView session={auth.session} /> : <Navigate to={adminPaths["platform-home"]} replace />} />
             <Route path="*" element={<NotFoundView onHome={() => openView("platform-home")} />} />
@@ -559,63 +571,365 @@ function ActivityView({ runs, loading, onRefresh }: { runs: QaseyRun[]; loading:
 }
 
 function Overview({ catalog, runs, loading, onRefresh, onOpenRuns }: { catalog: CatalogEntry[]; runs: QaseyRun[]; loading: boolean; onRefresh: () => Promise<void>; onOpenRuns: () => void }) {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [prompt, setPrompt] = useState(() => localStorage.getItem("qasey:draft") ?? "");
-  const [submitting, setSubmitting] = useState(false);
-  const [result, setResult] = useState("");
+  const [conversations, setConversations] = useState<QaseyConversation[]>([]);
+  const [conversation, setConversation] = useState<QaseyConversation | null>(null);
+  const [initialMessages, setInitialMessages] = useState<QaseyUIMessage[]>([]);
+  const [displayMessages, setDisplayMessages] = useState<QaseyUIMessage[]>([]);
+  const [pendingMessage, setPendingMessage] = useState<{ conversationId: string; id: string; text: string } | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [chatBusy, setChatBusy] = useState(false);
   const [error, setError] = useState("");
+  const [liveRun, setLiveRun] = useState<QaseyRun | null>(null);
   const taskAvailable = canRunQaseyTask(catalog);
-  const current = runs.find(run => activeStatuses.includes(run.status)) ?? runs[0];
+  const selectedId = new URLSearchParams(location.search).get("conversation") ?? "";
+  const assistantMessages = displayMessages.filter(message => message.role === "assistant");
+  const latestAssistant = assistantMessages.at(-1);
+  const linkedRunId = latestAssistant?.metadata?.linkedRunId
+    ?? latestAssistant?.parts.find(part => part.type === "data-run")?.data.runId;
+  const linkedRunCount = countLinkedRuns(assistantMessages);
+  const latestFailed = latestAssistant?.parts.some(part => part.type === "data-progress" && part.data.status === "failed") ?? false;
+  const current = liveRun ?? (linkedRunId ? runs.find(run => run.id === linkedRunId) : undefined);
 
   useEffect(() => { localStorage.setItem("qasey:draft", prompt); }, [prompt]);
 
-  const submit = async () => {
+  const loadConversations = useCallback(async () => {
+    const response = await api.listConversations();
+    setConversations(response.conversations);
+  }, []);
+
+  const loadConversation = useCallback(async (id: string) => {
+    const response = await api.getConversation(id);
+    setConversation(response.conversation);
+    setInitialMessages(response.messages);
+    setDisplayMessages(response.messages);
+  }, []);
+
+  useEffect(() => {
+    void loadConversations().catch(cause => setError(errorMessage(cause)));
+  }, [loadConversations]);
+
+  useEffect(() => {
+    if (!selectedId) {
+      setConversation(null);
+      setInitialMessages([]);
+      setDisplayMessages([]);
+      setPendingMessage(null);
+      setChatBusy(false);
+      return;
+    }
+    if (conversation?.id === selectedId) return;
+    void loadConversation(selectedId).catch(cause => setError(errorMessage(cause)));
+  }, [conversation?.id, loadConversation, selectedId]);
+
+  useEffect(() => {
+    if (!linkedRunId) { setLiveRun(null); return; }
+    setLiveRun(runs.find(run => run.id === linkedRunId) ?? null);
+    const controller = new AbortController();
+    void api.streamRun(linkedRunId, setLiveRun, controller.signal)
+      .catch(cause => { if (!(cause instanceof DOMException && cause.name === "AbortError")) setError(errorMessage(cause)); });
+    return () => controller.abort();
+  }, [linkedRunId, runs]);
+
+  const createConversation = async (message: string): Promise<void> => {
+    const created = (await api.createConversation()).conversation;
+    setConversation(created);
+    setInitialMessages([]);
+    setDisplayMessages([]);
+    setPendingMessage({ conversationId: created.id, id: crypto.randomUUID(), text: message });
+    navigate(`${adminPaths["qasey-overview"]}?conversation=${encodeURIComponent(created.id)}`);
+    await loadConversations();
+  };
+
+  const submitFirstMessage = async () => {
     const value = prompt.trim();
     if (!value) { setError("先描述需要分析的需求或问题。"); return; }
     if (!taskAvailable) { setError("当前账户无法运行 Qasey Task Workflow，请联系平台管理员。"); return; }
-    setSubmitting(true); setError(""); setResult("");
+    setCreating(true); setError("");
     try {
-      const response = await api.runQaseyTask(value);
-      setResult(extractAgentText(response));
       setPrompt("");
       localStorage.removeItem("qasey:draft");
+      await createConversation(value);
     } catch (cause) { setError(errorMessage(cause)); }
-    finally { setSubmitting(false); }
+    finally { setCreating(false); }
   };
 
+  const selectConversation = (id: string) => navigate(`${adminPaths["qasey-overview"]}?conversation=${encodeURIComponent(id)}`);
+  const newConversation = () => navigate(adminPaths["qasey-overview"]);
+  const refreshConversation = useCallback(async () => {
+    if (!conversation) return;
+    await Promise.all([loadConversations(), onRefresh()]);
+    const response = await api.getConversation(conversation.id);
+    setConversation(response.conversation);
+  }, [conversation, loadConversations, onRefresh]);
+
   return (
-    <>
-      <PageHeading eyebrow="QA 工作台" title="把需求变成可验证的结论" description="描述测试目标，Qasey 会读取相关上下文、识别风险并组织下一步。" />
-      <div className="overview-grid">
-        <section className="surface composer-card">
-          <div className="section-title"><div><span className="section-icon"><MessageSquareText size={18} /></span><div><h2>开始一项 QA 任务</h2><p>可以粘贴 Jira 链接、飞书文档或直接描述问题。</p></div></div><span className={taskAvailable ? "availability" : "availability availability--unavailable"}><i /> {loading ? "正在检查 Qasey" : taskAvailable ? "Qasey Workflow 就绪" : "Qasey Workflow 不可用"}</span></div>
-          <label className="sr-only" htmlFor="qa-prompt">QA 任务描述</label>
-          <textarea id="qa-prompt" value={prompt} onChange={event => { setPrompt(event.target.value); setError(""); }} placeholder="例如：请分析预约改期功能的需求，重点检查跨时区、员工冲突和通知补发…" rows={7} aria-describedby={error ? "prompt-error" : undefined} />
-          <div className="prompt-suggestions">
-            {[
-              "分析需求风险",
-              "设计测试场景",
-              "检查遗漏边界",
-            ].map(item => <button key={item} onClick={() => setPrompt(current => current ? `${current}\n${item}` : item)}>{item}</button>)}
+    <div className="conversation-page">
+      <PageHeading eyebrow="QA 工作台" title="与 Qasey 一起完成测试任务" description="每个任务保留独立上下文，分析、执行和审阅状态会持续回到同一条对话。" />
+      {error && <InlineError message={error} />}
+      <div className="conversation-workspace">
+        <aside className="surface conversation-list">
+          <button className="new-conversation" onClick={newConversation}><Plus size={16} />新建 QA 任务</button>
+          <div className="conversation-list-head"><span>任务会话</span><small>{conversations.length}</small></div>
+          <div className="conversation-list-items">
+            {conversations.map(item => <button key={item.id} className={item.id === conversation?.id ? "active" : ""} onClick={() => selectConversation(item.id)}><MessageSquareText size={16} /><span><strong>{item.title}</strong><small>{formatRelative(item.updatedAt)}</small></span>{item.activeTurnId && <LoaderCircle className="spin-slow" size={14} />}</button>)}
+            {!conversations.length && <p className="conversation-list-empty">还没有任务会话</p>}
           </div>
-          <div className="composer-footer">
-            <span>{prompt.length > 0 ? `已输入 ${prompt.length} 字` : "草稿会自动保存在此设备"}</span>
-            <button className="primary-button" onClick={submit} disabled={submitting || !prompt.trim()}>{submitting ? <LoaderCircle className="spin" size={17} /> : <Sparkles size={17} />}{submitting ? "正在分析…" : "开始分析"}</button>
-          </div>
-          {error && <p className="field-error" id="prompt-error" role="alert"><CircleAlert size={15} />{error}</p>}
-          {result && <div className="analysis-result" aria-live="polite"><div><CheckCircle2 size={17} /><strong>分析已完成</strong></div><p>{result}</p></div>}
+        </aside>
+        <section className="surface conversation-main">
+          <header><div><span className="section-icon"><MessageSquareText size={18} /></span><div><h2>{conversation?.title ?? "新 QA 任务"}</h2><p>{conversation ? "继续补充信息，Qasey 会记住当前任务上下文。" : "描述目标后将创建一条独立任务会话。"}</p></div></div><span className={taskAvailable ? "availability" : "availability availability--unavailable"}><i />{loading ? "检查中" : taskAvailable ? "Qasey 在线" : "不可用"}</span></header>
+          {conversation ? <QaseyChat
+            key={conversation.id}
+            conversation={conversation}
+            initialMessages={initialMessages}
+            prompt={prompt}
+            pendingMessage={pendingMessage?.conversationId === conversation.id ? pendingMessage : null}
+            taskAvailable={taskAvailable}
+            onPromptChange={value => { setPrompt(value); setError(""); }}
+            onPendingMessageSent={() => setPendingMessage(null)}
+            onMessagesChange={setDisplayMessages}
+            onBusyChange={setChatBusy}
+            onError={setError}
+            onFinished={refreshConversation}
+          /> : <>
+            <div className="conversation-messages" aria-live="polite"><div className="conversation-welcome"><Sparkles size={28} /><h3>从一个真实 QA 目标开始</h3><p>可以粘贴需求链接、描述风险，或让 Qasey 设计并执行测试场景。</p></div></div>
+            <PromptInput value={prompt} onValueChange={value => { setPrompt(value); setError(""); }} onSubmit={submitFirstMessage} disabled={creating} />
+          </>}
         </section>
-        <section className="surface evidence-card">
-          <div className="section-title compact"><div><span className="section-icon"><Activity size={18} /></span><div><h2>{current ? "当前证据轨" : "证据轨"}</h2><p>{current ? `${current.repository.owner}/${current.repository.repository}` : "运行开始后在这里追踪"}</p></div></div>{current && <StatusBadge status={current.status} />}</div>
-          {current ? <EvidenceRail run={current} /> : <EmptyRail />}
-          {current && <button className="text-button rail-action" onClick={onOpenRuns}>查看运行详情 <ArrowRight size={15} /></button>}
-        </section>
+        <aside className="surface conversation-context">
+          <div className="section-title compact"><div><span className="section-icon"><Activity size={18} /></span><div><h2>任务状态</h2><p>{current ? `${current.repository.owner}/${current.repository.repository}` : "尚未关联测试运行"}</p></div></div>{current && <StatusBadge status={current.status} />}</div>
+          {current ? <><EvidenceRail run={current} /><button className="text-button rail-action" onClick={onOpenRuns}>查看运行详情 <ArrowRight size={15} /></button></> : <EmptyRail />}
+          <div className="context-divider" />
+          <h3>当前会话</h3><dl><div><dt>消息轮次</dt><dd>{assistantMessages.length}</dd></div><div><dt>关联运行</dt><dd>{linkedRunCount}</dd></div><div><dt>状态</dt><dd>{chatBusy || conversation?.activeTurnId ? "处理中" : latestFailed ? "需要重试" : latestAssistant ? "可继续对话" : "等待开始"}</dd></div></dl>
+        </aside>
       </div>
-      <section className="surface recent-section">
-        <div className="list-heading"><div><h2>最近运行</h2><p>自动测试、修复与审阅进度</p></div><div><button className="icon-button bordered" onClick={() => void onRefresh()} disabled={loading} aria-label="刷新运行"><RefreshCw className={loading ? "spin" : ""} size={17} /></button><button className="text-button" onClick={onOpenRuns}>查看全部 <ArrowRight size={15} /></button></div></div>
-        <RunTable runs={runs.slice(0, 5)} loading={loading} />
-      </section>
-    </>
+    </div>
   );
+}
+
+function QaseyChat({ conversation, initialMessages, prompt, pendingMessage, taskAvailable, onPromptChange, onPendingMessageSent, onMessagesChange, onBusyChange, onError, onFinished }: {
+  conversation: QaseyConversation;
+  initialMessages: QaseyUIMessage[];
+  prompt: string;
+  pendingMessage: { conversationId: string; id: string; text: string } | null;
+  taskAvailable: boolean;
+  onPromptChange: (value: string) => void;
+  onPendingMessageSent: () => void;
+  onMessagesChange: (messages: QaseyUIMessage[]) => void;
+  onBusyChange: (busy: boolean) => void;
+  onError: (message: string) => void;
+  onFinished: () => Promise<void>;
+}) {
+  const initialReconnectTarget = useMemo(() => reconnectTargetFromMessages(conversation, initialMessages), [conversation, initialMessages]);
+  const reconnectTarget = useRef<QaseyReconnectTarget | undefined>(initialReconnectTarget);
+  const sentPendingId = useRef("");
+  const transport = useMemo(() => new QaseyChatTransport(conversation.id, () => reconnectTarget.current), [conversation.id]);
+  const { messages, status, error: chatError, sendMessage } = useChat<QaseyUIMessage>({
+    id: conversation.id,
+    messages: initialMessages,
+    transport,
+    generateId: () => crypto.randomUUID(),
+    resume: Boolean(conversation.activeTurnId),
+    messageMetadataSchema: QaseyUIMessageMetadataSchema,
+    dataPartSchemas: {
+      progress: QaseyProgressDataSchema,
+      run: QaseyRunDataSchema,
+      cursor: QaseyCursorDataSchema,
+      "data-progress": QaseyProgressDataSchema,
+      "data-run": QaseyRunDataSchema,
+      "data-cursor": QaseyCursorDataSchema,
+    } as never,
+    onData: part => {
+      if (part.type === "data-progress" && !QaseyProgressDataSchema.safeParse(part.data).success) throw new Error("进度消息格式无效。");
+      if (part.type === "data-run" && !QaseyRunDataSchema.safeParse(part.data).success) throw new Error("运行关联消息格式无效。");
+      if (part.type === "data-cursor") {
+        const cursor = QaseyCursorDataSchema.parse(part.data);
+        const turnId = reconnectTarget.current?.turnId ?? conversation.activeTurnId;
+        if (turnId) reconnectTarget.current = { ...reconnectTarget.current, turnId, after: cursor.sequence };
+      }
+    },
+    onFinish: event => {
+      if (!QaseyUIMessageSchema.safeParse(event.message).success) onError("Qasey 返回了无法识别的消息格式。");
+      void onFinished();
+    },
+    onError: cause => {
+      onError(errorMessage(cause));
+      void onFinished();
+    },
+  });
+  const busy = status === "submitted" || status === "streaming";
+
+  useEffect(() => {
+    onMessagesChange(messages);
+    reconnectTarget.current = reconnectTargetFromMessages(conversation, messages) ?? reconnectTarget.current;
+  }, [conversation, messages, onMessagesChange]);
+
+  useEffect(() => {
+    onBusyChange(busy);
+    return () => onBusyChange(false);
+  }, [busy, onBusyChange]);
+
+  useEffect(() => {
+    if (!pendingMessage || sentPendingId.current === pendingMessage.id) return;
+    sentPendingId.current = pendingMessage.id;
+    onPendingMessageSent();
+    void sendMessage({ id: pendingMessage.id, role: "user", parts: [{ type: "text", text: pendingMessage.text }] });
+  }, [onPendingMessageSent, pendingMessage, sendMessage]);
+
+  useEffect(() => {
+    if (chatError) onError(errorMessage(chatError));
+  }, [chatError, onError]);
+
+  const submit = async () => {
+    const value = prompt.trim();
+    if (!value) { onError("先描述需要分析的需求或问题。"); return; }
+    if (!taskAvailable) { onError("当前账户无法运行 Qasey Task Workflow，请联系平台管理员。"); return; }
+    onError("");
+    onPromptChange("");
+    localStorage.removeItem("qasey:draft");
+    await sendMessage({ id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text: value }] });
+  };
+
+  return <>
+    <Conversation aria-live="polite">
+      <ConversationContent>
+        {!messages.length && <div className="conversation-welcome"><Sparkles size={28} /><h3>从一个真实 QA 目标开始</h3><p>可以粘贴需求链接、描述风险，或让 Qasey 设计并执行测试场景。</p></div>}
+        {messages.map((message, index) => {
+          const onRetry = message.role === "assistant" ? () => {
+            const previous = messages.slice(0, index).findLast(item => item.role === "user");
+            const text = previous ? uiMessageText(previous) : "";
+            onPromptChange(text);
+            document.getElementById("qa-prompt")?.focus();
+          } : undefined;
+          return <QaseyChatMessage key={message.id} message={message} streaming={busy && index === messages.length - 1 && message.role === "assistant"} {...(onRetry ? { onRetry } : {})} />;
+        })}
+      </ConversationContent>
+      <ConversationScrollButton />
+    </Conversation>
+    <PromptInput value={prompt} onValueChange={onPromptChange} onSubmit={submit} disabled={busy} />
+  </>;
+}
+
+function QaseyChatMessage({ message, streaming, onRetry }: { message: QaseyUIMessage; streaming: boolean; onRetry?: () => void }) {
+  const [copied, setCopied] = useState(false);
+  const text = uiMessageText(message);
+  if (message.role === "user") return <article className="conversation-turn"><Message from="user"><Avatar label="我" /><MessageContent><span>你</span><p>{text}</p></MessageContent></Message></article>;
+  const progress = message.parts.filter((part): part is Extract<QaseyUIMessage["parts"][number], { type: "data-progress" }> => part.type === "data-progress");
+  const tools = message.parts.filter(isDynamicToolUIPart);
+  const failed = progress.findLast(part => part.data.status === "failed");
+  const copy = async () => {
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1_500);
+  };
+  return <article className="conversation-turn conversation-turn--assistant"><Message from="assistant"><span className="assistant-avatar"><Sparkles size={16} /></span><MessageContent><span>Qasey</span>{progress.length > 0 && <QaseyProgressPart progress={progress.map(part => part.data)} running={streaming} />}{tools.length > 0 && <QaseyToolParts tools={tools} />}{text && <MessageResponse mode={streaming ? "streaming" : "static"}>{text}</MessageResponse>}{streaming && !text && <p className="assistant-pending"><LoaderCircle className="spin" size={15} />正在整理回复…</p>}{failed && <div className="turn-error"><span><CircleAlert size={15} />{failed.data.detail}</span>{onRetry && <button type="button" onClick={onRetry}><RotateCcw size={14} />重试这条消息</button>}</div>}{text && <div className="message-actions"><button className="message-action" type="button" aria-label={copied ? "已复制" : "复制回复"} title={copied ? "已复制" : "复制回复"} onClick={() => void copy()}>{copied ? <Check size={14} /> : <Copy size={14} />}</button></div>}</MessageContent></Message></article>;
+}
+
+function QaseyProgressPart({ progress, running }: { progress: QaseyProgressData[]; running: boolean }) {
+  const latest = progress.at(-1);
+  return <details className="conversation-progress" open={running || latest?.status === "failed"}><summary>{running ? <LoaderCircle className="spin-slow" size={14} /> : latest?.status === "failed" ? <CircleAlert size={14} /> : <CheckCircle2 size={14} />}{latest?.title ?? "处理进度"}</summary>{progress.map(item => <p key={item.sequence}><strong>{item.title}</strong><span>{item.detail}</span></p>)}</details>;
+}
+
+function QaseyToolParts({ tools }: { tools: DynamicToolUIPart[] }) {
+  const views = tools.map(qaseyToolView);
+  const runningCount = views.filter(view => view.tone === "running").length;
+  const failedCount = views.filter(view => view.tone === "failed").length;
+  const completedCount = tools.length - runningCount - failedCount;
+  const activeToolIndex = views.findLastIndex(view => view.tone === "running");
+  const activeTool = activeToolIndex >= 0 ? tools[activeToolIndex] : undefined;
+  const headline = activeTool
+    ? `正在执行：${activeTool.title ?? "内部工具"}`
+    : failedCount > 0
+      ? `执行完成，${failedCount} 项需要注意`
+      : "本轮执行已完成";
+  const groups = groupConsecutiveTools(tools);
+  return <details className={`conversation-tools conversation-tools--${runningCount > 0 ? "running" : failedCount > 0 ? "failed" : "completed"}`}>
+    <summary aria-label={`${headline}，共 ${tools.length} 次工具调用`}>
+      <span className="conversation-tools-icon">{runningCount > 0 ? <LoaderCircle className="spin-slow" size={14} /> : failedCount > 0 ? <CircleAlert size={14} /> : <Wrench size={14} />}</span>
+      <span className="conversation-tools-heading"><strong>执行记录</strong><small>{headline}</small></span>
+      <span className="conversation-tools-summary">{tools.length} 次{completedCount > 0 && ` · ${completedCount} 完成`}{failedCount > 0 && ` · ${failedCount} 失败`}</span>
+      <ChevronRight className="conversation-tools-chevron" size={14} />
+    </summary>
+    <div>{groups.map(group => <QaseyToolPart key={group[0]?.toolCallId} tools={group} />)}</div>
+  </details>;
+}
+
+function groupConsecutiveTools(tools: DynamicToolUIPart[]): DynamicToolUIPart[][] {
+  const groups: DynamicToolUIPart[][] = [];
+  for (const tool of tools) {
+    const current = groups.at(-1);
+    const previous = current?.at(-1);
+    if (current && previous?.toolName === tool.toolName && previous.title === tool.title) current.push(tool);
+    else groups.push([tool]);
+  }
+  return groups;
+}
+
+function QaseyToolPart({ tools }: { tools: DynamicToolUIPart[] }) {
+  const views = tools.map(qaseyToolView);
+  const runningIndex = views.findLastIndex(view => view.tone === "running");
+  const failedIndex = views.findLastIndex(view => view.tone === "failed");
+  const representativeIndex = runningIndex >= 0 ? runningIndex : failedIndex >= 0 ? failedIndex : views.length - 1;
+  const tool = tools[representativeIndex]!;
+  const view = views[representativeIndex]!;
+  const groupedSummary = view.tone === "running"
+    ? `正在执行第 ${tools.length} 次，展开查看每次进度。`
+    : view.tone === "failed"
+      ? `${views.filter(item => item.tone === "failed").length} 次执行失败，展开查看每次结果。`
+      : `已连续完成 ${tools.length} 次，展开查看每次结果。`;
+  const row = <>
+    <div className="conversation-tool-icon">{toolStateIcon(view.tone)}</div>
+    <div className="conversation-tool-content"><div><strong>{tool.title ?? "执行内部工具"}{tools.length > 1 && <em>×{tools.length}</em>}</strong><code>{tool.toolName}</code></div><p>{tools.length > 1 ? groupedSummary : view.summary}</p></div>
+    <span className="conversation-tool-state">{view.status}</span>
+    {tools.length > 1 && <ChevronRight className="conversation-tool-group-chevron" size={13} />}
+  </>;
+  if (tools.length > 1) return <details className={`conversation-tool-group conversation-tool--${view.tone}`}>
+    <summary className="conversation-tool">{row}</summary>
+    <div>{tools.map(item => <QaseyToolPart key={item.toolCallId} tools={[item]} />)}</div>
+  </details>;
+  return <article className={`conversation-tool conversation-tool--${view.tone}`}>{row}</article>;
+}
+
+function qaseyToolView(tool: DynamicToolUIPart): { tone: "running" | "completed" | "failed"; status: string; summary: string } {
+  const input = QaseyPublicToolInputSchema.safeParse(tool.input);
+  const inputSummary = input.success ? input.data.summary : "工具正在执行。";
+  if (tool.state === "output-error") return { tone: "failed", status: "失败", summary: tool.errorText };
+  if (tool.state === "output-denied") return { tone: "failed", status: "未执行", summary: "工具调用未获批准。" };
+  if (tool.state === "output-available") {
+    const output = QaseyPublicToolOutputSchema.safeParse(tool.output);
+    return { tone: "completed", status: "完成", summary: output.success ? output.data.summary : "工具执行完成。" };
+  }
+  return { tone: "running", status: "执行中", summary: inputSummary };
+}
+
+function toolStateIcon(tone: "running" | "completed" | "failed") {
+  if (tone === "failed") return <CircleAlert size={14} />;
+  if (tone === "completed") return <Check size={14} />;
+  return <LoaderCircle className="spin-slow" size={14} />;
+}
+
+function reconnectTargetFromMessages(conversation: QaseyConversation, messages: QaseyUIMessage[]): QaseyReconnectTarget | undefined {
+  if (!conversation.activeTurnId) return undefined;
+  const assistant = messages.findLast(message => message.role === "assistant" && message.id === conversation.activeTurnId);
+  const cursor = assistant?.parts.findLast(part => part.type === "data-cursor");
+  return { turnId: conversation.activeTurnId, after: cursor?.data.sequence ?? assistant?.metadata?.latestSequence ?? 0, ...(assistant ? { message: assistant } : {}) };
+}
+
+function uiMessageText(message: QaseyUIMessage): string {
+  let text = "";
+  for (const part of message.parts) if (part.type === "text") text += part.text;
+  return text;
+}
+
+function countLinkedRuns(messages: QaseyUIMessage[]): number {
+  const runIds = new Set<string>();
+  for (const message of messages) {
+    const runId = message.metadata?.linkedRunId ?? message.parts.find(part => part.type === "data-run")?.data.runId;
+    if (runId) runIds.add(runId);
+  }
+  return runIds.size;
 }
 
 type CaseHubDetail = { case: CaseHubCase; versions: CaseHubCaseVersion[]; changeSets: CaseHubChangeSet[]; results: CaseHubResult[] };
@@ -645,14 +959,14 @@ function CaseHubView() {
   };
 
   return <>
-    <PageHeading eyebrow="Case Hub · 用例资产" title="Case Hub" description="查看每条 Case 的生效版本、历史提案、验收步骤和交付状态。人工结论仍在「待我审阅」完成。" action={<button className="secondary-button" onClick={() => void load()}><RefreshCw size={16} />刷新</button>} />
+    <PageHeading eyebrow="Case Hub · 正式用例资产" title="Case Hub" description="这里只展示人工审核通过且 Pull Request 已合并的正式用例。候选版本、失败记录和待审内容请在运行与审阅链路查看。" action={<button className="secondary-button" onClick={() => void load()}><RefreshCw size={16} />刷新</button>} />
     {error && <InlineError message={error} />}
     <section className="surface case-library">
       <div className="case-library-head">
         <div><span className="section-icon"><Library size={18} /></span><div><h2>用例库</h2><p>{cases.length} 条符合条件的 QASEY Case</p></div></div>
         <label className="case-search" htmlFor="case-hub-search"><Search size={17} /><span className="sr-only">搜索用例</span><input id="case-hub-search" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索 Case ID、标题或 Suite" /></label>
       </div>
-      <div className="case-table-scroll"><table className="case-table"><caption className="sr-only">Case Hub 用例</caption><thead><tr><th>Case</th><th>Suite</th><th>当前版本</th><th>最新进度</th><th>最近更新</th><th><span className="sr-only">操作</span></th></tr></thead><tbody>
+      <div className="case-table-scroll"><table className="case-table"><caption className="sr-only">Case Hub 用例</caption><thead><tr><th>Case</th><th>Suite</th><th>当前版本</th><th>正式交付</th><th>最近更新</th><th><span className="sr-only">操作</span></th></tr></thead><tbody>
         {cases.map(testCase => { const latestChangeSet = latestChangeSetForCase(testCase, changeSets); return <tr key={testCase.id}><td><button className="case-open" onClick={() => void open(testCase.id)}><span className="run-icon"><TestTube2 size={16} /></span><span><strong>{testCase.id}</strong><small>{testCase.title}</small></span></button></td><td>{testCase.suitePath}</td><td>{testCase.activeVersionId ? <span className="status-badge success">已生效</span> : <span className="status-badge">暂无</span>}</td><td>{latestChangeSet ? <ChangeSetBadge status={latestChangeSet.status} /> : <span className="status-badge">无交付记录</span>}</td><td className="updated">{formatRelative(testCase.updatedAt)}</td><td><button className="icon-button case-open-arrow" aria-label={`查看 ${testCase.id} 详情`} disabled={detailLoadingId === testCase.id} onClick={() => void open(testCase.id)}>{detailLoadingId === testCase.id ? <LoaderCircle className="spin" size={16} /> : <ChevronRight size={17} />}</button></td></tr>; })}
         {cases.length === 0 && <tr><td colSpan={6}><div className="case-empty"><Library size={23} /><strong>{query ? "没有匹配的用例" : "Case Hub 还是空的"}</strong><span>{query ? "换一个 Case ID、标题或 Suite 试试。" : "通过需求分析创建的用例会出现在这里。"}</span></div></td></tr>}
       </tbody></table></div>
@@ -823,8 +1137,8 @@ function VersionBadge({ version, changeSet }: { version: CaseHubCaseVersion; cha
 }
 
 function latestChangeSetForCase(testCase: CaseHubCase, changeSets: CaseHubChangeSet[]): CaseHubChangeSet | undefined {
-  const versionIds = new Set([...testCase.proposedVersionIds, ...(testCase.activeVersionId ? [testCase.activeVersionId] : [])]);
-  return changeSets.find(changeSet => changeSet.caseVersionIds.some(versionId => versionIds.has(versionId)));
+  if (!testCase.activeVersionId) return undefined;
+  return changeSets.find(changeSet => changeSet.status === "merged" && changeSet.caseVersionIds.includes(testCase.activeVersionId!));
 }
 
 function changeSetStatusLabel(status: string): string {
@@ -859,109 +1173,6 @@ function RunsView({ runs, loading, onRefresh }: { runs: QaseyRun[]; loading: boo
       </section>
     </>
   );
-}
-
-function CuaView({ subjectId }: { subjectId: string }) {
-  const [sessionId, setSessionId] = useState(`admin-${subjectId}`);
-  const [targetUrl, setTargetUrl] = useState("https://example.com");
-  const [mode, setMode] = useState<"desktop" | "browser">("desktop");
-  const [state, setState] = useState<SandboxSessionState | null>(null);
-  const [frameUrl, setFrameUrl] = useState("");
-  const [typing, setTyping] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const frameImage = useRef<HTMLImageElement>(null);
-  const running = mode === "desktop" ? state?.desktop.running : state?.browser.running;
-
-  const loadFrame = useCallback(async () => {
-    if (!running) return;
-    try {
-      const frame = mode === "desktop" ? await api.desktopFrame(sessionId) : await api.browserFrame(sessionId);
-      setFrameUrl(await blobDataUrl(frame.blob));
-      if (mode === "browser") setState(current => current ? { ...current, browser: { ...current.browser, ...(frame.url ? { url: frame.url } : {}), ...(frame.title ? { title: frame.title } : {}) } } : current);
-    } catch (cause) {
-      setError(errorMessage(cause));
-    }
-  }, [mode, running, sessionId]);
-
-  useEffect(() => {
-    if (!running) return;
-    void loadFrame();
-    const timer = window.setInterval(() => void loadFrame(), 900);
-    return () => window.clearInterval(timer);
-  }, [loadFrame, running]);
-
-  const start = async () => {
-    setBusy(true); setError("");
-    try {
-      setState(mode === "desktop"
-        ? await api.desktopStart(sessionId.trim(), { application: "browser", ...(targetUrl.trim() ? { url: targetUrl.trim() } : {}), recordVideo: true })
-        : await api.browserStart(sessionId.trim(), targetUrl.trim() || undefined));
-    }
-    catch (cause) { setError(errorMessage(cause)); }
-    finally { setBusy(false); }
-  };
-  const act = async (action: Record<string, unknown>) => {
-    setError("");
-    try {
-      setState(mode === "desktop"
-        ? await api.desktopAction(sessionId.trim(), action)
-        : await api.browserAction(sessionId.trim(), action));
-      await loadFrame();
-    }
-    catch (cause) { setError(errorMessage(cause)); }
-  };
-  const stop = async () => {
-    setBusy(true); setError("");
-    try {
-      if (mode === "desktop") setState(await api.desktopStop(sessionId.trim()));
-      else { await api.sandboxStop(sessionId.trim()); setState(null); }
-      setFrameUrl("");
-    }
-    catch (cause) { setError(errorMessage(cause)); }
-    finally { setBusy(false); }
-  };
-  const launch = async (application: "browser" | "terminal" | "editor" | "files") => {
-    setBusy(true); setError("");
-    try {
-      setState(await api.desktopApplication(sessionId.trim(), application, application === "browser" ? targetUrl.trim() || undefined : undefined));
-      await loadFrame();
-    } catch (cause) { setError(errorMessage(cause)); }
-    finally { setBusy(false); }
-  };
-  const clickFrame = (event: React.MouseEvent<HTMLButtonElement>) => {
-    const image = frameImage.current;
-    if (!image) return;
-    const bounds = image.getBoundingClientRect();
-    const x = (event.clientX - bounds.left) * (image.naturalWidth / bounds.width);
-    const y = (event.clientY - bounds.top) * (image.naturalHeight / bounds.height);
-    void act({ action: "click", x, y });
-  };
-  const clickFrameCenter = () => {
-    const image = frameImage.current;
-    if (image) void act({ action: "click", x: image.naturalWidth / 2, y: image.naturalHeight / 2 });
-  };
-
-  return <>
-    <PageHeading eyebrow="Computer use" title="Ubuntu 工作台" description="每个远程 sandbox 实例都是长期运行的 Ubuntu 环境；会话独占 GUI 桌面，并使用自己的持久 workspace 与 home。" />
-    {error && <InlineError message={error} />}
-    <div className="segmented cua-mode" role="tablist" aria-label="控制模式">
-      <button role="tab" aria-selected={mode === "desktop"} className={mode === "desktop" ? "active" : ""} disabled={Boolean(running)} onClick={() => { setMode("desktop"); setFrameUrl(""); }}>完整桌面</button>
-      <button role="tab" aria-selected={mode === "browser"} className={mode === "browser" ? "active" : ""} disabled={Boolean(running)} onClick={() => { setMode("browser"); setFrameUrl(""); }}>Playwright 浏览器</button>
-    </div>
-    <section className="surface cua-toolbar">
-      <label>会话 ID<input value={sessionId} disabled={Boolean(running)} onChange={event => setSessionId(event.target.value)} /></label>
-      <label>浏览器地址<input value={targetUrl} onChange={event => setTargetUrl(event.target.value)} onKeyDown={event => { if (event.key === "Enter") void (!running ? start() : mode === "browser" ? act({ action: "navigate", url: targetUrl }) : launch("browser")); }} /></label>
-      {!running ? <button className="primary-button" disabled={busy || !sessionId.trim()} onClick={() => void start()}>{busy ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}启动</button>
-        : <button className="secondary-button danger-text" disabled={busy} onClick={() => void stop()}><Square size={15} />停止</button>}
-    </section>
-    <section className="surface cua-stage">
-      <div className="cua-stage-head"><div><span className={running ? "health-dot" : "health-dot offline"} /><strong>{mode === "desktop" ? "Ubuntu Desktop" : state?.browser.title || "Sandbox browser"}</strong><small>{mode === "desktop" ? (state?.desktop.applications?.join(" · ") || "等待租用桌面") : state?.browser.url || "尚未启动"}</small></div>{state && <span>实例 {state.ordinal} · generation {state.generation}{mode === "desktop" && state.desktop.recording ? " · 正在录制" : ""}</span>}</div>
-      {mode === "desktop" && running && <div className="cua-appbar" aria-label="Ubuntu 应用"><button onClick={() => void launch("browser")} disabled={busy}><MonitorPlay size={15} />浏览器</button><button onClick={() => void launch("terminal")} disabled={busy}><Terminal size={15} />终端</button><button onClick={() => void launch("editor")} disabled={busy}><FileText size={15} />编辑器</button><button onClick={() => void launch("files")} disabled={busy}><FolderOpen size={15} />文件</button></div>}
-      <div className="cua-screen">{frameUrl ? <button className="cua-frame-button" onClick={clickFrame} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); clickFrameCenter(); } }} aria-label={`操作 Qasey sandbox ${mode === "desktop" ? "Ubuntu 桌面" : "浏览器"}画面`}><img ref={frameImage} src={frameUrl} alt={mode === "desktop" ? "Qasey Ubuntu desktop live view" : "Qasey sandbox browser live view"} /></button> : <div><MonitorPlay size={34} /><strong>启动后，实时画面会显示在这里</strong><span>{mode === "desktop" ? "可以操作浏览器、终端、编辑器和文件管理器。" : "点击画面可直接发送鼠标操作。"}</span></div>}</div>
-      {running && <div className={`cua-controls ${mode === "desktop" ? "desktop" : ""}`}>{mode === "browser" && <><button className="icon-button bordered" onClick={() => void act({ action: "back" })} aria-label="后退">←</button><button className="icon-button bordered" onClick={() => void act({ action: "forward" })} aria-label="前进">→</button><button className="icon-button bordered" onClick={() => void act({ action: "reload" })} aria-label="刷新"><RefreshCw size={15} /></button></>}<label className="cua-type-field"><span>键盘输入</span><input value={typing} onChange={event => setTyping(event.target.value)} placeholder="输入发送到当前焦点…" onKeyDown={event => { if (event.key === "Enter" && typing) { void act({ action: "type", text: typing }); setTyping(""); } }} /></label><button className="secondary-button" disabled={!typing} onClick={() => { void act({ action: "type", text: typing }); setTyping(""); }}>发送</button></div>}
-    </section>
-  </>;
 }
 
 const triggerStatusMeta: Record<TriggerConnectionStatus, { label: string; tone: string }> = {
@@ -1240,8 +1451,6 @@ function GoogleGlyph() { return <svg width="19" height="19" viewBox="0 0 24 24" 
 function displayName(session: Session): string { return session.displayName ?? session.email?.split("@")[0] ?? "QA Member"; }
 function compactId(value: string): string { return value.length > 12 ? `${value.slice(0,8)}…${value.slice(-4)}` : value; }
 function formatRelative(value: string): string { const seconds = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000)); if (seconds < 60) return "刚刚"; if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`; if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`; return shortDateFormatter.format(new Date(value)); }
-function blobDataUrl(blob: Blob): Promise<string> { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("浏览器画面格式无效。")); reader.onerror = () => reject(reader.error ?? new Error("无法读取浏览器画面。")); reader.readAsDataURL(blob); }); }
 function friendlySsoError(error: string): string { let decoded = error; try { decoded = decodeURIComponent(error); } catch { /* malformed OAuth errors remain safe to display generically */ } if (/domain|hosted/iu.test(decoded)) return "此 Google 账户不属于允许的组织，请切换工作账户。"; if (/expired|state/iu.test(decoded)) return "登录链接已失效，请重新开始登录。"; return "登录未完成，请重试；如果问题持续出现，请联系平台管理员。"; }
-function extractAgentText(response: Record<string, unknown>): string { if (typeof response.text === "string") return response.text; const message = response.message; if (message && typeof message === "object" && "content" in message && typeof message.content === "string") return message.content; return "Qasey 已完成处理。打开运行记录查看后续进度与证据。"; }
 function railDetail(run: QaseyRun, index: number): string { if (index === 0) return `Change Set ${run.changeSetId.slice(0, 8)}`; if (index === 3) return "Playwright"; if (index === 4) return `${run.artifacts.length} 项证据`; return index < statusMeta[run.status].step ? "已完成" : index === statusMeta[run.status].step ? statusMeta[run.status].label : "等待中"; }
 function countFor(runs: QaseyRun[], id: "all" | "active" | "review" | "done"): number { if (id === "all") return runs.length; if (id === "active") return runs.filter(run => activeStatuses.includes(run.status)).length; if (id === "review") return runs.filter(run => run.status === "awaiting_qa").length; return runs.filter(run => ["succeeded","failed","cancelled"].includes(run.status)).length; }

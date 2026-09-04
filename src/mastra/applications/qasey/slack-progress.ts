@@ -24,6 +24,42 @@ const SKILL_LABELS: Record<string, string> = {
   "git-repository-workspace": "Git 仓库工作区规范",
 };
 
+const HIDDEN_CHAT_TOOL_NAMES = new Set(["get_current_time", "qasey_report_progress"]);
+
+export interface QaseyPublicToolPresentation {
+  toolName: string;
+  title: string;
+  summary: string;
+}
+
+/**
+ * Produce the deliberately small, secret-free projection persisted in Qasey
+ * chat history. Raw tool input never crosses this boundary.
+ */
+export function publicToolCallPresentation(toolName: string, args: unknown): QaseyPublicToolPresentation | undefined {
+  if (HIDDEN_CHAT_TOOL_NAMES.has(toolName)) return undefined;
+  return {
+    toolName,
+    title: publicToolTitle(toolName),
+    summary: renderToolCall(toolName, args) ?? "正在执行内部工具…",
+  };
+}
+
+/** Raw tool output and errors are reduced to a bounded business summary. */
+export function publicToolResultPresentation(
+  toolName: string,
+  result: unknown,
+  args: unknown,
+  isError: boolean,
+): QaseyPublicToolPresentation | undefined {
+  if (HIDDEN_CHAT_TOOL_NAMES.has(toolName)) return undefined;
+  return {
+    toolName,
+    title: publicToolTitle(toolName),
+    summary: renderToolResult(toolName, result, args, isError) ?? defaultToolResultSummary(toolName, isError),
+  };
+}
+
 /**
  * A reaction acknowledges the request without turning an internal runtime
  * phase into a low-information thread reply. Reaction failures are cosmetic
@@ -174,6 +210,32 @@ function renderToolCall(toolName: string, args: unknown, taskTopic?: string): st
   }
 
   return statusLine(taskTopic ? `正在核对${taskTopic}的相关资料…` : "正在核对相关资料…");
+}
+
+function publicToolTitle(toolName: string): string {
+  if (toolName === "skill") return "加载任务规范";
+  if (toolName === "search_tools") return "查找可用工具";
+  if (toolName === "execute_typescript") return "并行核对资料";
+  if (toolName === "mastra_workspace_execute_command") return "检查代码工作区";
+  if (toolName.startsWith("github_")) return "读取 GitHub";
+  if (toolName.startsWith("jira_")) return "读取 Jira 需求";
+  if (toolName.startsWith("slack_")) return "检索 Slack 讨论";
+  if (toolName.startsWith("figma_")) return "读取 Figma 设计";
+  if (toolName.startsWith("lark_")) return "读取飞书文档";
+  if (/^(?:qaExperience_|qa_context_|qa_experience_)/.test(toolName)) return "检索 QA 历史经验";
+  if (toolName.startsWith("rag_") || toolName === "answer") return "检索知识库";
+  if (toolName === "case_hub_search_cases") return "查询已有用例";
+  if (toolName === "case_hub_create_change_set") return "启动测试执行";
+  if (toolName.startsWith("case_hub_")) return "读取 Case Hub";
+  if (toolName.startsWith("e2e_")) return "检查 E2E 运行";
+  return "执行内部工具";
+}
+
+function defaultToolResultSummary(toolName: string, isError: boolean): string {
+  if (isError) return "工具执行失败，Qasey 正在调整处理方式。";
+  if (toolName === "skill") return "任务规范已加载。";
+  if (toolName === "execute_typescript") return "并行资料核对完成。";
+  return "工具执行完成。";
 }
 
 function renderToolResult(

@@ -1,4 +1,4 @@
-import type { AgentApplication, ApiTokenRecord, AuditRecord, AuthConfig, AuthRedirect, CaseHubCase, CaseHubCaseVersion, CaseHubChangeSet, CaseHubResult, CatalogEntry, OrganizationSelection, QaseyRun, SandboxSessionState, Session, TriggerConnection, TriggerProvider, TriggerTarget } from "./types";
+import { QaseyUIMessageSchema, type AgentApplication, type ApiTokenRecord, type AuditRecord, type AuthConfig, type AuthRedirect, type CaseHubCase, type CaseHubCaseVersion, type CaseHubChangeSet, type CaseHubResult, type CatalogEntry, type OrganizationSelection, type QaseyConversation, type QaseyRun, type QaseyUIMessage, type Session, type TriggerConnection, type TriggerProvider, type TriggerTarget } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -39,17 +39,35 @@ async function requestJson<T>(
   return await response.json() as T;
 }
 
-async function requestBlob(url: string): Promise<{ blob: Blob; url?: string; title?: string }> {
-  const response = await fetch(url, { cache: "no-store" });
+async function streamEvents(
+  url: string,
+  init: RequestInit,
+  onEvent: (event: { type: "snapshot"; payload: { run: QaseyRun } }) => void,
+): Promise<void> {
+  const response = await fetch(url, { ...init, headers: { accept: "text/event-stream", ...(init.body ? { "content-type": "application/json" } : {}), ...init.headers } });
   if (!response.ok) {
+    const body = await response.json().catch(() => ({})) as Record<string, unknown>;
     if (response.status === 401) window.dispatchEvent(new Event("qasey:unauthorized"));
-    throw new ApiError("无法读取实时画面。", response.status);
+    throw new ApiError(typeof body.message === "string" ? body.message : "实时连接未能建立。", response.status);
   }
-  return {
-    blob: await response.blob(),
-    ...(response.headers.get("x-qasey-browser-url") ? { url: decodeURIComponent(response.headers.get("x-qasey-browser-url") ?? "") } : {}),
-    ...(response.headers.get("x-qasey-browser-title") ? { title: decodeURIComponent(response.headers.get("x-qasey-browser-title") ?? "") } : {}),
-  };
+  if (!response.body) throw new ApiError("浏览器不支持实时响应。", 500);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    const blocks = buffer.split("\n\n");
+    buffer = blocks.pop() ?? "";
+    for (const block of blocks) {
+      const eventName = block.split("\n").find(line => line.startsWith("event: "))?.slice(7);
+      const data = block.split("\n").filter(line => line.startsWith("data: ")).map(line => line.slice(6)).join("\n");
+      if (!eventName || !data) continue;
+      const parsed = JSON.parse(data) as Record<string, unknown>;
+      if (eventName === "snapshot") onEvent({ type: "snapshot", payload: parsed as { run: QaseyRun } });
+    }
+    if (done) break;
+  }
 }
 
 export const api = {
@@ -60,49 +78,29 @@ export const api = {
   ),
   catalog: () => requestJson<CatalogEntry[]>("/admin/api/catalog"),
   applications: () => requestJson<AgentApplication[]>("/admin/api/applications"),
+  listConversations: () => requestJson<{ conversations: QaseyConversation[] }>("/v1/qasey/conversations?limit=50"),
+  createConversation: () => requestJson<{ conversation: QaseyConversation }>("/v1/qasey/conversations", { method: "POST" }),
+  getConversation: async (id: string) => {
+    const response = await requestJson<{ conversation: QaseyConversation; messages: unknown[] }>(`/v1/qasey/conversations/${encodeURIComponent(id)}`);
+    return {
+      conversation: response.conversation,
+      messages: response.messages.map((message, index) => {
+        const parsed = QaseyUIMessageSchema.safeParse(message);
+        if (!parsed.success) throw new ApiError(`会话消息 ${index + 1} 的格式无效。`, 502);
+        return parsed.data as QaseyUIMessage;
+      }),
+    };
+  },
+  streamRun: (runId: string, onRun: (run: QaseyRun) => void, signal?: AbortSignal) =>
+    streamEvents(`/v1/case-hub/runs/${encodeURIComponent(runId)}/events`, signal ? { signal } : {}, event => { if (event.type === "snapshot") onRun(event.payload.run); }),
   listRuns: () => requestJson<{ runs: QaseyRun[] }>("/v1/case-hub/runs?limit=100"),
   listCases: (query = "") => requestJson<{ cases: CaseHubCase[] }>(`/v1/case-hub/cases?q=${encodeURIComponent(query)}`),
   getCase: (id: string) => requestJson<{ case: CaseHubCase; versions: CaseHubCaseVersion[]; changeSets: CaseHubChangeSet[]; results: CaseHubResult[] }>(`/v1/case-hub/cases/${encodeURIComponent(id)}`),
   listChangeSets: () => requestJson<{ changeSets: CaseHubChangeSet[] }>("/v1/case-hub/change-sets?limit=100"),
   getChangeSet: (id: string) => requestJson<{ changeSet: CaseHubChangeSet; versions: CaseHubCaseVersion[]; results: CaseHubResult[] }>(`/v1/case-hub/change-sets/${encodeURIComponent(id)}`),
   reviewCaseResult: (id: string, verdict: "approve" | "request_changes" | "product_bug" | "environment_issue", feedback?: string) => requestJson<{ result: CaseHubResult; changeSet: CaseHubChangeSet }>(`/v1/case-hub/results/${encodeURIComponent(id)}/review`, { method: "POST", body: JSON.stringify({ verdict, ...(feedback ? { feedback } : {}) }) }),
-  runQaseyTask: (prompt: string) => requestJson<Record<string, unknown>>(
-    "/v1/qasey/tasks",
-    { method: "POST", body: JSON.stringify({ prompt }) },
-  ),
   cancelRun: (runId: string) => requestJson<QaseyRun>(`/v1/case-hub/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
   rerun: (runId: string) => requestJson<QaseyRun>(`/v1/case-hub/runs/${encodeURIComponent(runId)}/rerun`, { method: "POST" }),
-  sandboxState: (sessionId: string) => requestJson<SandboxSessionState>(
-    `/v1/sandbox-sessions/${encodeURIComponent(sessionId)}`,
-  ),
-  browserStart: (sessionId: string, url?: string) => requestJson<SandboxSessionState>(
-    `/v1/sandbox-sessions/${encodeURIComponent(sessionId)}/browser/start`,
-    { method: "POST", body: JSON.stringify({ ...(url ? { url } : {}) }) },
-  ),
-  browserAction: (sessionId: string, action: Record<string, unknown>) => requestJson<SandboxSessionState>(
-    `/v1/sandbox-sessions/${encodeURIComponent(sessionId)}/browser/action`,
-    { method: "POST", body: JSON.stringify(action) },
-  ),
-  browserFrame: (sessionId: string) => requestBlob(`/v1/sandbox-sessions/${encodeURIComponent(sessionId)}/browser/frame`),
-  desktopStart: (sessionId: string, input: { application?: "none" | "browser" | "terminal" | "editor" | "files"; url?: string; recordVideo?: boolean } = {}) => requestJson<SandboxSessionState>(
-    `/v1/sandbox-sessions/${encodeURIComponent(sessionId)}/desktop/start`,
-    { method: "POST", body: JSON.stringify(input) },
-  ),
-  desktopAction: (sessionId: string, action: Record<string, unknown>) => requestJson<SandboxSessionState & { result?: unknown }>(
-    `/v1/sandbox-sessions/${encodeURIComponent(sessionId)}/desktop/action`,
-    { method: "POST", body: JSON.stringify(action) },
-  ),
-  desktopApplication: (sessionId: string, application: "browser" | "terminal" | "editor" | "files", url?: string) => requestJson<SandboxSessionState>(
-    `/v1/sandbox-sessions/${encodeURIComponent(sessionId)}/desktop/app`,
-    { method: "POST", body: JSON.stringify({ application, ...(url ? { url } : {}) }) },
-  ),
-  desktopFrame: (sessionId: string) => requestBlob(`/v1/sandbox-sessions/${encodeURIComponent(sessionId)}/desktop/frame`),
-  desktopStop: (sessionId: string) => requestJson<SandboxSessionState>(
-    `/v1/sandbox-sessions/${encodeURIComponent(sessionId)}/desktop/stop`, { method: "POST" },
-  ),
-  sandboxStop: (sessionId: string) => requestJson<{ stopped: true }>(
-    `/v1/sandbox-sessions/${encodeURIComponent(sessionId)}/stop`, { method: "POST" },
-  ),
   audit: () => requestJson<{ records: AuditRecord[] }>("/admin/api/audit"),
   apiTokens: () => requestJson<{ tokens: ApiTokenRecord[]; availableScopes: string[] }>("/admin/api/tokens"),
   createApiToken: (input: { name: string; scopes: string[]; expiresAt?: string }) =>

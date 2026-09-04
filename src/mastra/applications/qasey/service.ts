@@ -2,6 +2,8 @@ import { RequestContext } from "@mastra/core/request-context";
 import type { Mastra } from "@mastra/core/mastra";
 import type { DurableAgentStreamResult } from "@mastra/core/agent/durable";
 import type { ChunkType } from "@mastra/core/stream";
+import { toAISdkStream } from "@mastra/ai-sdk";
+import type { UIMessageChunk } from "ai";
 import { z } from "zod";
 import {
   AgentProgressReportSchema,
@@ -93,6 +95,7 @@ export type QaseyAgentRuntimeEvent =
 
 export interface QaseyExecutionEvents {
   onPhase?: (event: { runId: string; phase: "agent" | "workflow" | "finalizing" }) => void | Promise<void>;
+  onTextDelta?: (event: { runId: string; text: string }) => void | Promise<void>;
   onAgentRuntimeEvent?: (event: QaseyAgentRuntimeEvent) => void | Promise<void>;
   onAgentProgress?: (event: AgentProgressReport & { runId: string }) => void | Promise<void>;
   onIteration?: (event: {
@@ -300,17 +303,20 @@ export async function runQaseyAgentPhase(
   if (!getFullOutput) throw new TypeError("Agent stream did not expose getFullOutput");
   let result: unknown;
   try {
-    let step = 0;
-    let stepText = "";
-    for await (const chunk of stream.fullStream) {
-      if (chunk.type === "step-start") stepText = "";
-      if (chunk.type === "text-delta") stepText = `${stepText}${chunk.payload.text}`.slice(0, 2_000);
-      let event = agentRuntimeEventFromChunk(runId, step, chunk);
-      if (event?.type === "step-start") step = event.step;
-      if (event?.type === "step-finish" && !event.text && stepText.trim()) event = { ...event, text: stepText };
-      if (event) await options.events?.onAgentRuntimeEvent?.(event);
-      if (event?.type === "step-finish") stepText = "";
-    }
+    const source = readableStreamFromAsyncIterable(stream.fullStream);
+    const [runtimeBranch, publicBranch] = source.tee();
+    const publicStream = toAISdkStream(publicBranch as never, {
+      from: "agent",
+      version: "v6",
+      sendStart: false,
+      sendFinish: false,
+      sendReasoning: false,
+      sendSources: false,
+    }) as ReadableStream<UIMessageChunk>;
+    await Promise.all([
+      consumeAgentRuntimeBranch(runtimeBranch, runId, options.events),
+      consumePublicTextBranch(publicStream, runId, options.events),
+    ]);
     result = await getFullOutput();
   } finally {
     stream.cleanup?.();
@@ -325,6 +331,57 @@ export async function runQaseyAgentPhase(
     completionState: inspectAgentCompletion(completedResult),
     progress: agentProgress,
   };
+}
+
+async function consumeAgentRuntimeBranch(
+  stream: ReadableStream<ChunkType>,
+  runId: string,
+  events: QaseyExecutionEvents | undefined,
+): Promise<void> {
+  let step = 0;
+  let stepText = "";
+  const reader = stream.getReader();
+  while (true) {
+    const { done, value: chunk } = await reader.read();
+    if (done) break;
+    if (chunk.type === "step-start") stepText = "";
+    if (chunk.type === "text-delta") stepText = `${stepText}${chunk.payload.text}`.slice(0, 2_000);
+    let event = agentRuntimeEventFromChunk(runId, step, chunk);
+    if (event?.type === "step-start") step = event.step;
+    if (event?.type === "step-finish" && !event.text && stepText.trim()) event = { ...event, text: stepText };
+    if (event) await events?.onAgentRuntimeEvent?.(event);
+    if (event?.type === "step-finish") stepText = "";
+  }
+}
+
+async function consumePublicTextBranch(
+  stream: ReadableStream<UIMessageChunk>,
+  runId: string,
+  events: QaseyExecutionEvents | undefined,
+): Promise<void> {
+  const reader = stream.getReader();
+  while (true) {
+    const { done, value: chunk } = await reader.read();
+    if (done) break;
+    if (chunk.type === "text-delta" && chunk.delta) {
+      await events?.onTextDelta?.({ runId, text: chunk.delta });
+    }
+  }
+}
+
+function readableStreamFromAsyncIterable<T>(source: AsyncIterable<T>): ReadableStream<T> {
+  if (source instanceof ReadableStream) return source;
+  const iterator = source[Symbol.asyncIterator]();
+  return new ReadableStream<T>({
+    async pull(controller) {
+      const next = await iterator.next();
+      if (next.done) controller.close();
+      else controller.enqueue(next.value);
+    },
+    async cancel(reason) {
+      await iterator.return?.(reason);
+    },
+  });
 }
 
 function recordModelUsage(tenantId: string | undefined, result: unknown): void {

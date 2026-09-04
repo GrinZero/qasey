@@ -7,10 +7,40 @@ import {
   E2EProjectSkillPathSchema,
   E2ETestEnvironmentSchema,
   RepositoryProfileSchema,
+  type CaseHubCaseProposal,
   type ChangedProjectPlaywrightVerification,
   type E2ETestEnvironment,
   type RepositoryProfile,
 } from "../../../packages/contracts/src/index.ts";
+
+const DEFAULT_TEST_FILE_SUFFIXES = [
+  ".spec.ts", ".spec.tsx", ".spec.mts", ".spec.mtsx", ".spec.cts", ".spec.ctsx", ".spec.js", ".spec.jsx", ".spec.mjs", ".spec.mjsx", ".spec.cjs", ".spec.cjsx",
+  ".test.ts", ".test.tsx", ".test.mts", ".test.mtsx", ".test.cts", ".test.ctsx", ".test.js", ".test.jsx", ".test.mjs", ".test.mjsx", ".test.cjs", ".test.cjsx",
+] as const;
+const RepositoryPlaywrightPathSchema = z.string().min(1).max(1_000)
+  .refine(value => !value.startsWith("/") && !value.startsWith("\\"), "Playwright verification paths must be relative")
+  .refine(value => !value.includes("\\"), "Playwright verification paths must use canonical POSIX separators")
+  .refine(value => value.split("/").every(segment => segment !== "." && segment !== ".." && segment.length > 0), "Playwright verification paths cannot contain dot or empty segments");
+const RepositoryPlaywrightProjectSchema = z.object({
+  id: z.string().regex(/^[a-z0-9-]+$/u).max(100),
+  root: RepositoryPlaywrightPathSchema,
+  testRoot: RepositoryPlaywrightPathSchema,
+  testFileSuffixes: z.array(z.string().regex(/^\.[A-Za-z0-9._-]+$/u).max(100)).min(1).max(32)
+    .default([...DEFAULT_TEST_FILE_SUFFIXES]),
+  config: RepositoryPlaywrightPathSchema,
+  playwrightProject: z.string().min(1).max(100),
+}).strict();
+const RepositoryPlaywrightVerificationSchema = z.object({
+  strategy: z.literal("changed-project-playwright"),
+  projects: z.array(RepositoryPlaywrightProjectSchema).min(1).max(20),
+}).strict().superRefine((value, context) => {
+  const verification = ChangedProjectPlaywrightVerificationSchema.safeParse(stripTestFileSuffixes(value));
+  if (!verification.success) {
+    for (const issue of verification.error.issues) {
+      context.addIssue({ code: "custom", path: issue.path, message: issue.message });
+    }
+  }
+});
 
 const RepositorySkillReferenceSchema = z.object({
   version: z.literal(1),
@@ -20,7 +50,7 @@ const RepositorySkillReferenceSchema = z.object({
       e2eAuthentication: E2EAuthenticationSchema,
     }).strict(),
     environment: E2ETestEnvironmentSchema,
-    verification: ChangedProjectPlaywrightVerificationSchema,
+    verification: RepositoryPlaywrightVerificationSchema,
     contextRepositories: z.array(z.unknown()).default([]),
   }).strict(),
   app: z.object({ status: z.literal("deferred"), target: z.object({ owner: z.string(), repository: z.string() }) }),
@@ -71,11 +101,27 @@ export interface WebE2EConfiguration {
   };
   environment: E2ETestEnvironment;
   verification: ChangedProjectPlaywrightVerification;
+  automationPathPolicy: WebE2EAutomationPathPolicy;
+}
+
+export interface WebE2EAutomationPathPolicy {
+  projects: Array<{ id: string; testRoot: string; testFileSuffixes: string[] }>;
 }
 
 export function webE2EConfigurationFromSkill(configFile?: string): WebE2EConfiguration {
   const snapshot = repositoryReference(configFile).web;
-  return { target: snapshot.target, environment: snapshot.environment, verification: snapshot.verification };
+  return {
+    target: snapshot.target,
+    environment: snapshot.environment,
+    verification: ChangedProjectPlaywrightVerificationSchema.parse(stripTestFileSuffixes(snapshot.verification)),
+    automationPathPolicy: {
+      projects: snapshot.verification.projects.map(project => ({
+        id: project.id,
+        testRoot: project.testRoot,
+        testFileSuffixes: project.testFileSuffixes,
+      })),
+    },
+  };
 }
 
 export function webE2ERepositoryFromSkill(configFile?: string): RepositoryProfile {
@@ -94,7 +140,8 @@ export interface WebE2EPlaywrightPlan {
 }
 
 export function webE2EPlaywrightPlans(changedPaths: string[], configFile?: string): WebE2EPlaywrightPlan[] {
-  const verification = webE2EConfigurationFromSkill(configFile).verification;
+  const configuration = webE2EConfigurationFromSkill(configFile);
+  const { verification } = configuration;
   const uncovered = changedPaths.filter(path => !verification.projects.some(project => isWithin(path, project.root)));
   if (uncovered.length > 0) {
     throw new Error(`Changed paths are not covered by a fixed Playwright project: ${uncovered.join(", ")}`);
@@ -105,12 +152,44 @@ export function webE2EPlaywrightPlans(changedPaths: string[], configFile?: strin
   if (affected.length === 0) {
     throw new Error(`No fixed Playwright project matches changed paths: ${changedPaths.join(", ") || "none"}`);
   }
-  return affected.map(project => ({
-    id: project.id,
-    config: project.config,
-    playwrightProject: project.playwrightProject,
-    testFiles: changedPaths.filter(path => isWithin(path, project.testRoot) && /\.(?:spec|test)\.[cm]?[jt]sx?$/u.test(path)),
-  }));
+  return affected.map(project => {
+    const policy = configuration.automationPathPolicy.projects.find(candidate => candidate.id === project.id);
+    if (!policy) throw new Error(`Playwright project ${project.id} has no local discovery policy`);
+    return {
+      id: project.id,
+      config: project.config,
+      playwrightProject: project.playwrightProject,
+      testFiles: changedPaths.filter(path => isWithin(path, project.testRoot) && policy.testFileSuffixes.some(suffix => path.endsWith(suffix))),
+    };
+  });
+}
+
+export function assertWebE2EAutomationPaths(
+  proposals: Pick<CaseHubCaseProposal, "automationPath">[],
+  policy: WebE2EAutomationPathPolicy,
+): void {
+  for (const proposal of proposals) {
+    const project = policy.projects.find(candidate => isWithin(proposal.automationPath, candidate.testRoot));
+    if (!project) {
+      throw new Error(`Case automationPath is outside the configured Playwright test roots: ${proposal.automationPath}`);
+    }
+    if (!project.testFileSuffixes.some(suffix => proposal.automationPath.endsWith(suffix))) {
+      throw new Error(
+        `Case automationPath is not discoverable by Playwright project ${project.id}: ${proposal.automationPath}; `
+        + `expected one of ${project.testFileSuffixes.join(", ")}`,
+      );
+    }
+  }
+}
+
+function stripTestFileSuffixes(verification: {
+  strategy: "changed-project-playwright";
+  projects: Array<z.infer<typeof RepositoryPlaywrightProjectSchema>>;
+}): ChangedProjectPlaywrightVerification {
+  return {
+    strategy: verification.strategy,
+    projects: verification.projects.map(({ testFileSuffixes: _testFileSuffixes, ...project }) => project),
+  };
 }
 
 function isWithin(path: string, root: string): boolean {

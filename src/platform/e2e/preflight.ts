@@ -258,4 +258,7 @@ function assertPlaywrightConfigContract(
   if (!/\bstorageState\b/u.test(source)) {
     throw new Error(`Playwright config ${configPath} must load storageState produced by authentication setup project ${setupProject}`);
   }
+  if (!/\b(?:video|trace)\s*:\s*["']on["']/u.test(source)) {
+    throw new Error(`Playwright config ${configPath} must retain video or trace evidence for passing tests`);
+  }
 }

@@ -55,6 +55,7 @@ export interface CaseHubRepository {
   listResults(owner: OwnerScope, changeSetId: string): Promise<CaseHubResult[]>;
   getResult(owner: OwnerScope, resultId: string): Promise<CaseHubResult | undefined>;
   reviewResult(owner: OwnerScope, resultId: string, reviewerId: string, input: unknown): Promise<CaseHubResult>;
+  finalizeApprovedCaseIds(owner: OwnerScope, changeSetId: string): Promise<CaseHubChangeSet>;
   activateApprovedVersions(owner: OwnerScope, changeSetId: string): Promise<void>;
   close?(): Promise<void>;
 }
@@ -63,6 +64,13 @@ export class CaseHubRevisionConflictError extends Error {
   readonly code = "case_hub_revision_conflict";
   constructor(readonly changeSetId: string) {
     super(`Case Hub change set ${changeSetId} revision conflict`);
+  }
+}
+
+export class CaseHubCaseSequenceConflictError extends Error {
+  readonly code = "case_hub_case_sequence_conflict";
+  constructor(readonly changeSetId: string, readonly expected: number, readonly actual: number) {
+    super(`Case Hub change set ${changeSetId} used candidate Case sequence ${expected}, but the next approved sequence is ${actual}; regenerate the Change Set`);
   }
 }
 
@@ -79,7 +87,15 @@ export class InMemoryCaseHubRepository implements CaseHubRepository {
 
   async createChangeSet(owner: OwnerScope, command: CreateCaseHubChangeSetCommand): Promise<CaseHubChangeSet> {
     const changeSetId = randomUUID();
-    const versions = command.proposals.map(proposal => this.buildVersion(owner, changeSetId, command, proposal));
+    const candidateStart = this.nextCommittedCaseSequence(owner);
+    let candidateSequence = candidateStart;
+    const versions = command.proposals.map(proposal => this.buildVersion(
+      owner,
+      changeSetId,
+      command,
+      proposal,
+      proposal.caseId ?? `QASEY-${candidateSequence++}`,
+    ));
     const now = this.now().toISOString();
     const changeSet = CaseHubChangeSetSchema.parse({
       ...owner,
@@ -87,6 +103,10 @@ export class InMemoryCaseHubRepository implements CaseHubRepository {
       projectCode: "QASEY",
       requirement: command.requirement,
       caseVersionIds: versions.map(version => version.id),
+      ...(candidateSequence > candidateStart ? {
+        candidateCaseSequenceRange: { start: candidateStart, end: candidateSequence - 1 },
+      } : {}),
+      caseIdsFinalized: candidateSequence === candidateStart,
       planHash: hashJson(versions.map(version => ({ caseId: version.caseId, contentHash: version.contentHash }))),
       status: "authoring",
       revision: 1,
@@ -135,6 +155,7 @@ export class InMemoryCaseHubRepository implements CaseHubRepository {
     return [...this.cases.entries()]
       .filter(([key]) => key.startsWith(ownerPrefix(owner)))
       .map(([, value]) => structuredClone(value))
+      .filter(value => Boolean(value.activeVersionId))
       .filter(value => !normalized || `${value.id} ${value.title} ${value.suitePath}`.toLowerCase().includes(normalized))
       .sort((left, right) => caseSequence(left.id) - caseSequence(right.id));
   }
@@ -211,6 +232,27 @@ export class InMemoryCaseHubRepository implements CaseHubRepository {
     return structuredClone(updated);
   }
 
+  async finalizeApprovedCaseIds(owner: OwnerScope, changeSetId: string): Promise<CaseHubChangeSet> {
+    const key = ownerKey(owner, changeSetId);
+    const changeSet = this.changeSets.get(key);
+    if (!changeSet) throw new Error(`Case Hub change set ${changeSetId} not found`);
+    if (changeSet.caseIdsFinalized) return structuredClone(changeSet);
+    await this.assertEveryVersionApproved(owner, changeSet);
+    const range = changeSet.candidateCaseSequenceRange;
+    if (!range) throw new Error(`Case Hub change set ${changeSetId} has no candidate Case sequence range`);
+    const next = this.nextCommittedCaseSequence(owner);
+    if (next !== range.start) throw new CaseHubCaseSequenceConflictError(changeSetId, range.start, next);
+    this.sequences.set(this.sequenceKey(owner), range.end + 1);
+    const updated = CaseHubChangeSetSchema.parse({
+      ...changeSet,
+      caseIdsFinalized: true,
+      revision: changeSet.revision + 1,
+      updatedAt: this.now().toISOString(),
+    });
+    this.changeSets.set(key, updated);
+    return structuredClone(updated);
+  }
+
   async activateApprovedVersions(owner: OwnerScope, changeSetId: string): Promise<void> {
     const [versions, results] = await Promise.all([
       this.versionsForChangeSet(owner, changeSetId), this.listResults(owner, changeSetId),
@@ -232,8 +274,7 @@ export class InMemoryCaseHubRepository implements CaseHubRepository {
 
   async close(): Promise<void> {}
 
-  private buildVersion(owner: OwnerScope, changeSetId: string, command: CreateCaseHubChangeSetCommand, proposal: CaseHubCaseProposal): CaseHubCaseVersion {
-    const caseId = proposal.caseId ?? this.nextCaseId(owner);
+  private buildVersion(owner: OwnerScope, changeSetId: string, command: CreateCaseHubChangeSetCommand, proposal: CaseHubCaseProposal, caseId: string): CaseHubCaseVersion {
     const currentVersions = [...this.versions.values()].filter(version => version.applicationId === owner.applicationId && version.tenantId === owner.tenantId && version.caseId === caseId);
     if (proposal.operation === "update" && currentVersions.length === 0) throw new Error(`Case ${caseId} not found`);
     const version = Math.max(0, ...currentVersions.map(item => item.version)) + 1;
@@ -251,7 +292,8 @@ export class InMemoryCaseHubRepository implements CaseHubRepository {
     this.versions.set(ownerKey(owner, version.id), version);
     const existing = this.cases.get(ownerKey(owner, version.caseId));
     this.cases.set(ownerKey(owner, version.caseId), CaseHubCaseSchema.parse(existing ? {
-      ...existing, title: version.title, suitePath: version.suitePath,
+      ...existing,
+      ...(existing.activeVersionId ? {} : { title: version.title, suitePath: version.suitePath }),
       proposedVersionIds: [...existing.proposedVersionIds, version.id], updatedAt: now,
     } : {
       ...owner, id: version.caseId, projectCode: "QASEY", suitePath: version.suitePath,
@@ -266,11 +308,20 @@ export class InMemoryCaseHubRepository implements CaseHubRepository {
       .sort((left, right) => left.version - right.version);
   }
 
-  private nextCaseId(owner: OwnerScope): string {
-    const key = `${ownerPrefix(owner)}QASEY`;
-    const sequence = this.sequences.get(key) ?? 1;
-    this.sequences.set(key, sequence + 1);
-    return `QASEY-${sequence}`;
+  private nextCommittedCaseSequence(owner: OwnerScope): number {
+    return this.sequences.get(this.sequenceKey(owner)) ?? 1;
+  }
+
+  private sequenceKey(owner: OwnerScope): string {
+    return `${ownerPrefix(owner)}QASEY`;
+  }
+
+  private async assertEveryVersionApproved(owner: OwnerScope, changeSet: CaseHubChangeSet): Promise<void> {
+    const results = await this.listResults(owner, changeSet.id);
+    for (const versionId of changeSet.caseVersionIds) {
+      const latest = results.filter(result => result.caseVersionId === versionId).at(-1);
+      if (latest?.reviewStatus !== "approved") throw new Error(`Case Version ${versionId} is not approved`);
+    }
   }
 }
 
@@ -290,17 +341,16 @@ export class PrismaCaseHubRepository implements CaseHubRepository {
       });
       const changeSetId = randomUUID();
       const versions: CaseHubCaseVersion[] = [];
+      const project = await transaction.qaseyCaseProject.findUniqueOrThrow({
+        where: { applicationId_tenantId_code: { ...owner, code: "QASEY" } },
+        select: { nextCaseSequence: true },
+      });
+      const candidateStart = project.nextCaseSequence;
+      let candidateSequence = candidateStart;
       for (const proposal of command.proposals) {
         let caseId = proposal.caseId;
         if (!caseId) {
-          const rows = await transaction.$queryRaw<Array<{ sequence: number }>>`
-            UPDATE qasey_case_projects
-            SET next_case_sequence = next_case_sequence + 1, updated_at = now()
-            WHERE application_id = ${owner.applicationId} AND tenant_id = ${owner.tenantId} AND code = 'QASEY'
-            RETURNING next_case_sequence - 1 AS sequence`;
-          const sequence = rows[0]?.sequence;
-          if (!sequence) throw new Error("Failed to allocate a Case Hub case id");
-          caseId = `QASEY-${sequence}`;
+          caseId = `QASEY-${candidateSequence++}`;
         }
         const previous = await transaction.qaseyCaseVersionRecord.findFirst({
           where: { ...owner, caseId }, orderBy: { version: "desc" }, select: { version: true },
@@ -319,6 +369,10 @@ export class PrismaCaseHubRepository implements CaseHubRepository {
       const changeSet = CaseHubChangeSetSchema.parse({
         ...owner, id: changeSetId, projectCode: "QASEY", requirement: command.requirement,
         caseVersionIds: versions.map(version => version.id),
+        ...(candidateSequence > candidateStart ? {
+          candidateCaseSequenceRange: { start: candidateStart, end: candidateSequence - 1 },
+        } : {}),
+        caseIdsFinalized: candidateSequence === candidateStart,
         planHash: hashJson(versions.map(version => ({ caseId: version.caseId, contentHash: version.contentHash }))),
         status: "authoring", revision: 1, repository: command.repository,
         ...(command.baseSha ? { baseSha: command.baseSha } : {}),
@@ -335,7 +389,8 @@ export class PrismaCaseHubRepository implements CaseHubRepository {
         });
         const previousCase = existing ? CaseHubCaseSchema.parse(existing.payload) : undefined;
         const caseRecord = CaseHubCaseSchema.parse(previousCase ? {
-          ...previousCase, title: version.title, suitePath: version.suitePath,
+          ...previousCase,
+          ...(previousCase.activeVersionId ? {} : { title: version.title, suitePath: version.suitePath }),
           proposedVersionIds: [...previousCase.proposedVersionIds, version.id], updatedAt: timestamp,
         } : {
           ...owner, id: version.caseId, projectCode: "QASEY", suitePath: version.suitePath,
@@ -344,7 +399,10 @@ export class PrismaCaseHubRepository implements CaseHubRepository {
         await transaction.qaseyCaseRecord.upsert({
           where: { applicationId_tenantId_id: { ...owner, id: version.caseId } },
           create: { ...owner, id: version.caseId, projectCode: "QASEY", suitePath: version.suitePath, title: version.title, payload: caseRecord as unknown as Prisma.InputJsonValue },
-          update: { suitePath: version.suitePath, title: version.title, payload: caseRecord as unknown as Prisma.InputJsonValue },
+          update: {
+            ...(previousCase?.activeVersionId ? {} : { suitePath: version.suitePath, title: version.title }),
+            payload: caseRecord as unknown as Prisma.InputJsonValue,
+          },
         });
         await transaction.qaseyCaseVersionRecord.create({ data: {
           ...owner, id: version.id, caseId: version.caseId, changeSetId, version: version.version,
@@ -383,7 +441,7 @@ export class PrismaCaseHubRepository implements CaseHubRepository {
     await this.ready();
     const normalized = query.trim();
     const rows = await this.prisma.qaseyCaseRecord.findMany({
-      where: { ...owner, ...(normalized ? { OR: [{ id: { contains: normalized, mode: "insensitive" } }, { title: { contains: normalized, mode: "insensitive" } }, { suitePath: { contains: normalized, mode: "insensitive" } }] } : {}) },
+      where: { ...owner, activeVersionId: { not: null }, ...(normalized ? { OR: [{ id: { contains: normalized, mode: "insensitive" } }, { title: { contains: normalized, mode: "insensitive" } }, { suitePath: { contains: normalized, mode: "insensitive" } }] } : {}) },
       orderBy: { createdAt: "asc" }, select: { payload: true },
     });
     return rows.map(row => CaseHubCaseSchema.parse(row.payload));
@@ -465,6 +523,54 @@ export class PrismaCaseHubRepository implements CaseHubRepository {
       }
     });
     return updated;
+  }
+  async finalizeApprovedCaseIds(owner: OwnerScope, changeSetId: string): Promise<CaseHubChangeSet> {
+    await this.ready();
+    return this.prisma.$transaction(async transaction => {
+      const row = await transaction.qaseyCaseChangeSetRecord.findUnique({
+        where: { applicationId_tenantId_id: { ...owner, id: changeSetId } },
+        select: { payload: true, revision: true },
+      });
+      if (!row) throw new Error(`Case Hub change set ${changeSetId} not found`);
+      const changeSet = CaseHubChangeSetSchema.parse({ ...(row.payload as object), revision: row.revision });
+      if (changeSet.caseIdsFinalized) return changeSet;
+      const results = await transaction.qaseyCaseResultRecord.findMany({
+        where: { ...owner, changeSetId },
+        orderBy: [{ caseVersionId: "asc" }, { attempt: "asc" }],
+        select: { payload: true },
+      });
+      const parsedResults = results.map(result => CaseHubResultSchema.parse(result.payload));
+      for (const versionId of changeSet.caseVersionIds) {
+        const latest = parsedResults.filter(result => result.caseVersionId === versionId).at(-1);
+        if (latest?.reviewStatus !== "approved") throw new Error(`Case Version ${versionId} is not approved`);
+      }
+      const range = changeSet.candidateCaseSequenceRange;
+      if (!range) throw new Error(`Case Hub change set ${changeSetId} has no candidate Case sequence range`);
+      const projects = await transaction.$queryRaw<Array<{ nextCaseSequence: number }>>`
+        SELECT next_case_sequence AS "nextCaseSequence"
+        FROM qasey_case_projects
+        WHERE application_id = ${owner.applicationId} AND tenant_id = ${owner.tenantId} AND code = 'QASEY'
+        FOR UPDATE`;
+      const next = projects[0]?.nextCaseSequence;
+      if (!next) throw new Error("Case Hub project sequence is unavailable");
+      if (next !== range.start) throw new CaseHubCaseSequenceConflictError(changeSetId, range.start, next);
+      await transaction.qaseyCaseProject.update({
+        where: { applicationId_tenantId_code: { ...owner, code: "QASEY" } },
+        data: { nextCaseSequence: range.end + 1 },
+      });
+      const updated = CaseHubChangeSetSchema.parse({
+        ...changeSet,
+        caseIdsFinalized: true,
+        revision: changeSet.revision + 1,
+        updatedAt: this.now().toISOString(),
+      });
+      const saved = await transaction.qaseyCaseChangeSetRecord.updateMany({
+        where: { ...owner, id: changeSetId, revision: changeSet.revision },
+        data: { revision: { increment: 1 }, payload: updated as unknown as Prisma.InputJsonValue },
+      });
+      if (saved.count !== 1) throw new CaseHubRevisionConflictError(changeSetId);
+      return updated;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }
   async activateApprovedVersions(owner: OwnerScope, changeSetId: string): Promise<void> {
     await this.ready();

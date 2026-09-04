@@ -1,13 +1,14 @@
 import { registerApiRoute } from "@mastra/core/server";
+import { RequestContext } from "@mastra/core/request-context";
 import "playwright-core";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, extname, resolve, sep } from "node:path";
 import { z } from "zod";
-import { CaseHubResultReviewInputSchema, CreateCaseHubChangeSetSchema, CreateE2ERunRequestSchema, type CaseHubChangeSet, type CaseHubResult, type OwnerScope } from "../../../../packages/contracts/src/index.ts";
-import { freezeE2EContext, normalizeJiraWebhook } from "../../../../packages/domain/src/index.ts";
-import { artifactStore, caseHubRepository, channelDeliveryInbox, config, e2eFixtureLeaseService, e2ePreflight, githubClient, jiraClient, runRepository, sandboxPoolClient } from "../../runtime.ts";
+import { CaseHubResultReviewInputSchema, CreateCaseHubChangeSetSchema, CreateE2ERunRequestSchema, type CaseHubChangeSet, type CaseHubResult, type OwnerScope, type QaseyConversationEvent } from "../../../../packages/contracts/src/index.ts";
+import { ConversationBusyError, ConversationTurnClosedError, freezeE2EContext, normalizeJiraWebhook } from "../../../../packages/domain/src/index.ts";
+import { artifactStore, caseHubRepository, channelDeliveryInbox, config, conversationRepository, e2eFixtureLeaseService, e2ePreflight, githubClient, jiraClient, runRepository, sandboxPoolClient } from "../../runtime.ts";
 import { ArtifactNotFoundError, ArtifactOwnershipError } from "../../../../packages/e2e/src/index.ts";
 import { cancelE2ERun, createAndStartE2ERun, rerunE2E, resumeE2EWithVerdict } from "../../workflows/e2e-workflow.ts";
 import { ownerScopeFromRequestContext } from "../../../platform/context/owner-scope.ts";
@@ -20,7 +21,9 @@ import { executeQasey } from "./service.ts";
 import { runtimeReadiness } from "../../../platform/storage/readiness.ts";
 import { productionSignals } from "../../../platform/observability/production-signals.ts";
 import { devRuntimeTunnelServerEnabled } from "../../../../packages/adapters/src/config.ts";
-import { webE2EConfigurationFromSkill } from "../../../platform/code-task/e2e-repository-skill.ts";
+import { assertWebE2EAutomationPaths, webE2EConfigurationFromSkill } from "../../../platform/code-task/e2e-repository-skill.ts";
+import { conversationEventStreamResponse, conversationTurnsToUIMessages } from "./ui-message.ts";
+import { publicToolCallPresentation, publicToolResultPresentation } from "./slack-progress.ts";
 import {
   bearerToken,
   DEV_RUNTIME_HEARTBEAT_MS,
@@ -41,6 +44,11 @@ const QaseyTaskRequestSchema = z.object({
   prompt: z.string().trim().min(1).max(100_000),
 }).strict();
 
+const QaseyConversationMessageSchema = z.object({
+  message: z.string().trim().min(1).max(100_000),
+  clientMessageId: z.string().uuid(),
+}).strict();
+
 function authenticatedUser(c: { get(key: "requestContext"): { get(key: string): unknown } }): PlatformBrowserUser | undefined {
   return c.get("requestContext").get("user") as PlatformBrowserUser | undefined;
 }
@@ -49,11 +57,173 @@ function owner(c: { get(key: "requestContext"): import("@mastra/core/request-con
   return ownerScopeFromRequestContext(c.get("requestContext"));
 }
 
+function conversationSubject(c: { get(key: "requestContext"): import("@mastra/core/request-context").RequestContext }): string {
+  return OAuthPrincipalSchema.parse(c.get("requestContext").get("platform-principal")).subjectId;
+}
+
 function errorBody(error: unknown, requestId: string) {
   const message = config.NODE_ENV === "production"
     ? "The request could not be completed. Use the request ID to inspect server logs."
     : error instanceof Error ? error.message : String(error);
   return { message, requestId };
+}
+
+function sseHeaders(): Record<string, string> {
+  return {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive",
+    "x-accel-buffering": "no",
+  };
+}
+
+function runEventResponse(ownerScope: OwnerScope, runId: string, signal: AbortSignal): Response {
+  const encoder = new TextEncoder();
+  const seen = new Set<string>();
+  let revision = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let closed = false;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        if (timer) clearTimeout(timer);
+        try { controller.close(); } catch { /* The client may have already disconnected. */ }
+      };
+      const poll = async () => {
+        if (closed) return;
+        try {
+          const [run, events] = await Promise.all([
+            runRepository.get(ownerScope, runId), runRepository.events(ownerScope, runId),
+          ]);
+          if (!run) { close(); return; }
+          if (run.revision !== revision) {
+            revision = run.revision;
+            controller.enqueue(encoder.encode(`event: snapshot\ndata: ${JSON.stringify({ run })}\n\n`));
+          }
+          for (const event of events) {
+            if (seen.has(event.id)) continue;
+            seen.add(event.id);
+            controller.enqueue(encoder.encode(`id: ${event.id}\nevent: run.event\ndata: ${JSON.stringify({ event })}\n\n`));
+          }
+          if (["succeeded", "failed", "cancelled"].includes(run.status)) { close(); return; }
+          timer = setTimeout(() => { void poll(); }, 500);
+          timer.unref?.();
+        } catch (error) {
+          controller.error(error);
+          close();
+        }
+      };
+      signal.addEventListener("abort", close, { once: true });
+      void poll();
+    },
+    cancel() {
+      closed = true;
+      if (timer) clearTimeout(timer);
+    },
+  });
+  return new Response(body, { headers: sseHeaders() });
+}
+
+async function executeConversationTurn(input: {
+  mastra: Parameters<typeof executeQasey>[0];
+  principal: z.infer<typeof OAuthPrincipalSchema>;
+  owner: OwnerScope;
+  conversationId: string;
+  turnId: string;
+  message: string;
+}): Promise<void> {
+  const requestId = crypto.randomUUID();
+  const requestContext = new RequestContext<Record<string, unknown>>();
+  requestContext.set("platform-principal", input.principal);
+  requestContext.set("identity", {
+    userId: input.principal.subjectId,
+    tenantId: input.principal.tenantId,
+    roles: [...input.principal.roles],
+    service: input.principal.service,
+  });
+  let linkedRunId: string | undefined;
+  const append = (type: Parameters<typeof conversationRepository.appendEvent>[4], payload?: Record<string, unknown>) =>
+    conversationRepository.appendEvent(input.owner, input.principal.subjectId, input.conversationId, input.turnId, type, payload);
+  try {
+    const response = await executeQasey(input.mastra, {
+      requestId,
+      channel: "api",
+      sessionId: input.conversationId,
+      chatInput: input.message,
+      actor: { id: input.principal.subjectId, tenantId: input.principal.tenantId },
+      source: {},
+      attachments: [],
+    }, {
+      requestContext,
+      events: {
+        onPhase: async event => {
+          if (event.phase === "agent") await append("progress", { title: "正在分析需求", detail: "Qasey 正在结合当前会话整理目标与上下文。", status: "working" });
+        },
+        onTextDelta: async event => { if (event.text) await append("assistant.delta", { text: event.text }); },
+        onAgentProgress: async event => {
+          await append("progress", {
+            milestone: event.milestone, title: event.title, detail: event.detail, status: event.status,
+            ...(event.next ? { next: event.next } : {}),
+          });
+        },
+        onAgentRuntimeEvent: async event => {
+          if (event.type === "tool-call") {
+            const presentation = publicToolCallPresentation(event.toolName, event.args);
+            if (presentation) {
+              await append("tool.started", {
+                toolCallId: event.toolCallId,
+                toolName: presentation.toolName,
+                title: presentation.title,
+                inputSummary: presentation.summary,
+              });
+            }
+          }
+          if (event.type === "tool-result") {
+            const presentation = publicToolResultPresentation(event.toolName, event.result, event.args, event.isError);
+            if (presentation) {
+              await append("tool.finished", {
+                toolCallId: event.toolCallId,
+                toolName: presentation.toolName,
+                title: presentation.title,
+                inputSummary: publicToolCallPresentation(event.toolName, event.args)?.summary ?? "正在执行内部工具…",
+                outputSummary: presentation.summary,
+                isError: event.isError,
+              });
+            }
+            if (event.toolName === "case_hub_create_change_set" && !event.isError) {
+              const runId = linkedRunIdFromToolResult(event.result);
+              if (runId && runId !== linkedRunId) {
+                linkedRunId = runId;
+                await append("run.linked", { runId });
+              }
+            }
+          }
+        },
+      },
+    });
+    await append("completed", { text: response.text, runId: response.runId });
+  } catch (error) {
+    const message = config.NODE_ENV === "production"
+      ? "Qasey 未能完成这轮处理，请重试。"
+      : error instanceof Error ? error.message : String(error);
+    try {
+      await append("failed", { message });
+    } catch (appendError) {
+      // A periodic recovery pass may have finalized an unresponsive turn while
+      // its underlying tool or model call was still unwinding.
+      if (!(appendError instanceof ConversationTurnClosedError)) throw appendError;
+    }
+  }
+}
+
+function linkedRunIdFromToolResult(result: unknown): string | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const run = (result as { run?: unknown }).run;
+  if (!run || typeof run !== "object") return undefined;
+  const id = (run as { id?: unknown }).id;
+  return typeof id === "string" && z.uuid().safeParse(id).success ? id : undefined;
 }
 
 function sandboxScope(c: { get(key: "requestContext"): import("@mastra/core/request-context").RequestContext; req: { param(name: string): string } }) {
@@ -371,6 +541,91 @@ export const apiRoutes = [
       }
     },
   }),
+  registerApiRoute("/v1/qasey/conversations", {
+    method: "GET",
+    handler: async c => c.json({
+      conversations: await conversationRepository.listConversations(
+        owner(c), conversationSubject(c), Number(c.req.query("limit") ?? 50),
+      ),
+    }),
+  }),
+  registerApiRoute("/v1/qasey/conversations", {
+    method: "POST",
+    handler: async c => c.json({
+      conversation: await conversationRepository.createConversation(owner(c), conversationSubject(c)),
+    }, 201),
+  }),
+  registerApiRoute("/v1/qasey/conversations/:conversationId", {
+    method: "GET",
+    handler: async c => {
+      const ownerScope = owner(c);
+      const subjectId = conversationSubject(c);
+      const conversation = await conversationRepository.getConversation(ownerScope, subjectId, c.req.param("conversationId"));
+      if (!conversation) return c.json({ error: "not_found" }, 404);
+      const turns = await conversationRepository.listTurns(ownerScope, subjectId, conversation.id);
+      const eventGroups = await Promise.all(turns.map(async turn => [
+        turn.id,
+        await conversationRepository.events(ownerScope, subjectId, conversation.id, turn.id),
+      ] as const));
+      return c.json({ conversation, messages: conversationTurnsToUIMessages(turns, new Map(eventGroups)) });
+    },
+  }),
+  registerApiRoute("/v1/qasey/conversations/:conversationId/messages", {
+    method: "POST",
+    handler: async c => {
+      const parsed = QaseyConversationMessageSchema.safeParse(await c.req.json());
+      if (!parsed.success) return c.json({ error: "validation_error", details: parsed.error.issues }, 400);
+      const ownerScope = owner(c);
+      const principal = OAuthPrincipalSchema.parse(c.get("requestContext").get("platform-principal"));
+      try {
+        const started = await conversationRepository.startTurn(
+          ownerScope, principal.subjectId, c.req.param("conversationId"),
+          parsed.data.clientMessageId, parsed.data.message,
+        );
+        if (started.created) {
+          void executeConversationTurn({
+            mastra: c.get("mastra"), principal, owner: ownerScope,
+            conversationId: started.turn.conversationId, turnId: started.turn.id, message: started.turn.userMessage,
+          });
+        }
+        return conversationEventStreamResponse({
+          repository: conversationRepository,
+          owner: ownerScope, subjectId: principal.subjectId,
+          conversationId: started.turn.conversationId, turn: started.turn,
+          signal: c.req.raw.signal,
+        });
+      } catch (error) {
+        if (error instanceof ConversationBusyError) return c.json({ error: error.code, message: "当前会话仍在处理中，请等待完成后再发送。" }, 409);
+        if (error instanceof Error && error.message.includes("not found")) return c.json({ error: "not_found" }, 404);
+        return c.json({ error: "conversation_turn_failed", ...errorBody(error, crypto.randomUUID()) }, 500);
+      }
+    },
+  }),
+  registerApiRoute("/v1/qasey/conversations/:conversationId/turns/:turnId/events", {
+    method: "GET",
+    handler: async c => {
+      const ownerScope = owner(c);
+      const subjectId = conversationSubject(c);
+      const conversationId = c.req.param("conversationId");
+      const turnId = c.req.param("turnId");
+      const turns = await conversationRepository.listTurns(ownerScope, subjectId, conversationId);
+      if (!turns.some(turn => turn.id === turnId)) return c.json({ error: "not_found" }, 404);
+      const headerSequence = Number(c.req.header("last-event-id") ?? 0);
+      const queryValue = c.req.query("after");
+      const querySequence = Number(queryValue);
+      const after = queryValue !== undefined && Number.isFinite(querySequence) && querySequence >= 0
+        ? querySequence
+        : Number.isFinite(headerSequence) && headerSequence >= 0 ? headerSequence : 0;
+      const turn = turns.find(item => item.id === turnId);
+      if (!turn) return c.json({ error: "not_found" }, 404);
+      return conversationEventStreamResponse({
+        repository: conversationRepository,
+        owner: ownerScope, subjectId, conversationId, turn,
+        after,
+        signal: c.req.raw.signal,
+      });
+    },
+  }),
   registerApiRoute("/v1/qasey/tasks", {
     method: "POST",
     handler: async c => {
@@ -410,11 +665,12 @@ export const apiRoutes = [
     method: "GET",
     handler: async c => {
       const caseRecord = await caseHubRepository.getCase(owner(c), c.req.param("caseId"));
-      if (!caseRecord) return c.json({ error: "not_found" }, 404);
-      const versions = await caseHubRepository.versionsForCase(owner(c), caseRecord.id);
+      if (!caseRecord?.activeVersionId) return c.json({ error: "not_found" }, 404);
+      const versions = (await caseHubRepository.versionsForCase(owner(c), caseRecord.id))
+        .filter(version => version.status === "active");
       const versionIds = new Set(versions.map(version => version.id));
       const changeSets = (await caseHubRepository.listChangeSets(owner(c), 500))
-        .filter(changeSet => changeSet.caseVersionIds.some(versionId => versionIds.has(versionId)));
+        .filter(changeSet => changeSet.status === "merged" && changeSet.caseVersionIds.some(versionId => versionIds.has(versionId)));
       const results = (await Promise.all(changeSets.map(changeSet => caseHubRepository.listResults(owner(c), changeSet.id)))).flat();
       return c.json({ case: caseRecord, versions, changeSets, results });
     },
@@ -451,6 +707,7 @@ export const apiRoutes = [
         resourceId: String(requestContext.get(MASTRA_RESOURCE_ID_KEY) ?? principal.subjectId),
       });
       try {
+        assertWebE2EAutomationPaths(parsed.data.proposals, webE2EConfiguration.automationPathPolicy);
         const preflight = await e2ePreflight.assertReady(owner(c), webE2EConfiguration);
         const changeSet = await caseHubRepository.createChangeSet(owner(c), {
           requirement,
@@ -515,7 +772,8 @@ export const apiRoutes = [
         }
         const results = await caseHubRepository.listResults(owner(c), changeSet.id);
         if (!allLatestResultsApproved(results)) return c.json({ result: reviewed, changeSet });
-        const finalVerifying = await caseHubRepository.updateChangeSet(owner(c), changeSet.id, changeSet.revision, { status: "final_verifying" });
+        const finalized = await caseHubRepository.finalizeApprovedCaseIds(owner(c), changeSet.id);
+        const finalVerifying = await caseHubRepository.updateChangeSet(owner(c), finalized.id, finalized.revision, { status: "final_verifying" });
         await resumeE2EWithVerdict(c.get("mastra"), owner(c), reviewed.runId, { verdict: "approve", reviewerId: principal.subjectId }, c.get("requestContext"));
         const ready = await caseHubRepository.updateChangeSet(owner(c), finalVerifying.id, finalVerifying.revision, { status: "ready_to_merge" });
         return c.json({ result: reviewed, changeSet: ready });
@@ -557,7 +815,15 @@ export const apiRoutes = [
   }),
   registerApiRoute("/v1/case-hub/runs/:runId/events", {
     method: "GET",
-    handler: async c => c.json({ events: await runRepository.events(owner(c), c.req.param("runId")) }),
+    handler: async c => {
+      const ownerScope = owner(c);
+      const runId = c.req.param("runId");
+      if (!await runRepository.get(ownerScope, runId)) return c.json({ error: "not_found" }, 404);
+      if (c.req.header("accept")?.includes("text/event-stream")) {
+        return runEventResponse(ownerScope, runId, c.req.raw.signal);
+      }
+      return c.json({ events: await runRepository.events(ownerScope, runId) });
+    },
   }),
   registerApiRoute("/v1/case-hub/trace-viewer/*", {
     method: "GET",
@@ -798,6 +1064,11 @@ const routePolicies: Record<string, { id: string; access: PrimitiveAccessPolicy;
   "POST /v1/dev-runtime-approvals/:approvalId": { id: "dev-runtime-approval", access: { permission: "qasey.channel.receive", audiences: ["channel"] }, public: true },
   "POST /webhooks/jira": { id: "jira-webhook", access: { permission: "qasey.channel.receive", audiences: ["channel"] } },
   "POST /webhooks/github": { id: "github-webhook", access: { permission: "qasey.channel.receive", audiences: ["channel"] }, public: true },
+  "GET /v1/qasey/conversations": { id: "qasey-conversation-list", access: { permission: "qasey.agent.execute", audiences: ["admin-ui", "api"] } },
+  "POST /v1/qasey/conversations": { id: "qasey-conversation-create", access: { permission: "qasey.agent.execute", audiences: ["admin-ui", "api"] } },
+  "GET /v1/qasey/conversations/:conversationId": { id: "qasey-conversation-read", access: { permission: "qasey.agent.execute", audiences: ["admin-ui", "api"] } },
+  "POST /v1/qasey/conversations/:conversationId/messages": { id: "qasey-conversation-message", access: { permission: "qasey.agent.execute", audiences: ["admin-ui", "api"] } },
+  "GET /v1/qasey/conversations/:conversationId/turns/:turnId/events": { id: "qasey-conversation-events", access: { permission: "qasey.agent.execute", audiences: ["admin-ui", "api"] } },
   "POST /v1/qasey/tasks": { id: "qasey-task", access: { permission: "qasey.agent.execute", audiences: ["admin-ui", "api"] } },
   "GET /v1/case-hub/runs": { id: "run-list", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
   "POST /v1/case-hub/runs": { id: "run-create", access: { permission: "qasey.runs.write", audiences: ["admin-ui", "api", "service"] } },

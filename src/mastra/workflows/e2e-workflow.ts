@@ -367,7 +367,7 @@ function collectPlaywrightSuites(payload: unknown, observed: Map<string, CaseExe
   if (Array.isArray(record.suites)) for (const suite of record.suites) collectPlaywrightSuites(suite, observed);
 }
 
-function collectPlaywrightTest(test: unknown, fallbackTitle: string, observed: Map<string, CaseExecutionObservation>): void {
+export function collectPlaywrightTest(test: unknown, fallbackTitle: string, observed: Map<string, CaseExecutionObservation>): void {
   if (!test || typeof test !== "object") return;
   const record = test as Record<string, unknown>;
   const annotations = Array.isArray(record.annotations) ? record.annotations : [];
@@ -377,7 +377,9 @@ function collectPlaywrightTest(test: unknown, fallbackTitle: string, observed: M
   if (!caseId) return;
   const results = Array.isArray(record.results) ? record.results.filter(result => result && typeof result === "object") as Record<string, unknown>[] : [];
   const statuses = results.map(result => String(result.status ?? ""));
-  const executionStatus: CaseExecutionObservation["executionStatus"] = statuses.some(status => ["failed", "timedOut", "interrupted"].includes(status))
+  const executionStatus: CaseExecutionObservation["executionStatus"] = results.length === 0
+    ? "blocked"
+    : statuses.some(status => ["failed", "timedOut", "interrupted"].includes(status))
     ? "failed"
     : statuses.length > 0 && statuses.every(status => status === "skipped") ? "skipped" : "passed";
   const durationMs = results.reduce((total, result) => total + (typeof result.duration === "number" ? result.duration : 0), 0);

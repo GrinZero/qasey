@@ -70,7 +70,8 @@ describe("shared runtime architecture boundaries", () => {
     expect(routeSource).not.toContain('getAgent("qasey-main").generate');
     expect(routeSource).toContain("executeQasey");
     expect(routeSource).not.toContain("runQaseyTaskWorkflow");
-    expect(adminApiSource).toContain('"/v1/qasey/tasks"');
+    expect(adminApiSource).toContain('"/v1/qasey/conversations"');
+    expect(adminApiSource).not.toContain('"/v1/qasey/tasks"');
     expect(adminApiSource).not.toContain("/studio/api/agents/");
   });
 

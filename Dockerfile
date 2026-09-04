@@ -45,7 +45,7 @@ RUN corepack enable pnpm \
   && test "$(pnpm --version)" = "11.21.0" \
   && install -d -o node -g node /home/node/.cache /home/node/.cache/node /home/node/.cache/mastra \
   && cp -a /root/.cache/node/corepack /home/node/.cache/node/corepack
-RUN install -d -o node -g node -m 0750 /app/.qasey \
+RUN install -d -o node -g node -m 0750 /app/.qasey /app/.mastra \
   && chown -R node:node /app /pnpm /home/node/.cache/node/corepack
 USER node
 CMD ["sleep", "infinity"]

@@ -135,6 +135,14 @@ async function runChecks(paths: string[]): Promise<CheckResult[]> {
     results.push(result);
     await emit("check.completed", `Fixed check ${check.id} ${result.passed ? "passed" : "failed"}`, { checkId: check.id, exitCode: result.exitCode });
   }
+  if (["web-e2e-author", "web-e2e-repair"].includes(profile.id)) {
+    const checkId = "playwright-discovery";
+    abortController.signal.throwIfAborted();
+    await emit("check.started", `Running internal check ${checkId}`, { checkId });
+    const result = await runPlaywrightDiscoveryCheck(paths);
+    results.push(result);
+    await emit("check.completed", `Internal check ${checkId} ${result.passed ? "passed" : "failed"}`, { checkId, exitCode: result.exitCode });
+  }
   return results;
 }
 
@@ -314,6 +322,52 @@ async function runPlaywrightCheck(paths: string[]): Promise<CheckResult> {
     summary: safeText(summaries.join("\n\n")),
     durationMs,
     artifacts,
+  };
+}
+
+async function runPlaywrightDiscoveryCheck(paths: string[]): Promise<CheckResult> {
+  const plans = playwrightPlans(paths);
+  await validateCaseMappings(paths);
+  const summaries: string[] = [];
+  let passed = true;
+  let exitCode = 0;
+  let durationMs = 0;
+  for (const plan of plans) {
+    abortController.signal.throwIfAborted();
+    const result = await runFixedCheckCommand({
+      executable: "pnpm",
+      args: [
+        "exec", "playwright", "test", ...plan.testFiles,
+        ...(plan.config ? [`--config=${plan.config}`] : []),
+        ...(plan.playwrightProject ? [`--project=${plan.playwrightProject}`] : []),
+        "--list",
+      ],
+      cwd: manifest.workspaceRoot,
+      env: fixedCheckEnvironment(manifest.checkRoot, spec),
+      timeoutMs: Math.min(spec.deadlineMs, 2 * 60_000),
+    });
+    passed &&= result.exitCode === 0;
+    if (exitCode === 0 && result.exitCode !== 0) exitCode = result.exitCode;
+    durationMs += result.durationMs;
+    const output = `${result.stdout}\n${result.stderr}`.trim();
+    summaries.push(`${plan.id}: ${safeText(output || "Playwright discovery completed")}`);
+  }
+  const summary = safeText(summaries.join("\n\n"), 20_000);
+  const logPath = join(manifest.artifactRoot, "playwright-discovery.log");
+  await writeFile(logPath, summary, { mode: 0o600 });
+  return {
+    id: "playwright-discovery",
+    passed,
+    exitCode,
+    summary,
+    durationMs,
+    artifacts: [{
+      id: `${spec.taskId}:playwright-discovery-log`,
+      kind: "log",
+      name: "playwright-discovery.log",
+      uri: sandboxUri(logPath),
+      contentType: "text/plain",
+    }],
   };
 }
 

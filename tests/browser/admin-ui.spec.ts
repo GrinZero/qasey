@@ -110,6 +110,10 @@ async function installAuthenticatedApiMocks(page: Page, diagnostics: BrowserDiag
       await json(route, { changeSets: [] });
       return;
     }
+    if (request.method() === "GET" && url.pathname === "/v1/qasey/conversations") {
+      await json(route, { conversations: [] });
+      return;
+    }
     if (url.pathname.startsWith("/admin/api/") || url.pathname.startsWith("/v1/")) {
       diagnostics.unexpectedApiRequests.push(`${request.method()} ${url.pathname}`);
       await route.fulfill({
@@ -155,9 +159,12 @@ test.beforeEach(async ({ page }) => {
   };
   diagnosticsByPage.set(page, diagnostics);
   page.on("pageerror", error => diagnostics.pageErrors.push(error.message));
-  page.on("requestfailed", request => diagnostics.failedRequests.push(
-    `${request.method()} ${new URL(request.url()).pathname}: ${request.failure()?.errorText ?? "unknown failure"}`,
-  ));
+  page.on("requestfailed", request => {
+    const path = new URL(request.url()).pathname;
+    const reason = request.failure()?.errorText ?? "unknown failure";
+    if (path.endsWith("/events") && reason.includes("ERR_ABORTED")) return;
+    diagnostics.failedRequests.push(`${request.method()} ${path}: ${reason}`);
+  });
   await installAuthenticatedApiMocks(page, diagnostics);
 });
 
@@ -272,7 +279,8 @@ test("authenticated user can open the platform and navigate the Qasey applicatio
 
   await page.getByRole("button", { name: /打开工作空间/u }).click();
   await expect(page).toHaveURL(/\/admin\/apps\/qasey$/u);
-  await expect(page.getByRole("heading", { name: "把需求变成可验证的结论" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "与 Qasey 一起完成测试任务" })).toBeVisible();
+  await expect(page.getByText("Ubuntu", { exact: true })).toHaveCount(0);
 
   await page.getByRole("button", { name: /^测试运行/u }).click();
   await expect(page).toHaveURL(/\/admin\/apps\/qasey\/runs$/u);
@@ -292,7 +300,7 @@ test("primary routes survive direct navigation and unknown paths render the 404 
     ["/admin", "工作交给 Agent，判断留给人"],
     ["/admin/inbox", "需要你的判断"],
     ["/admin/activity", "所有 Agent 的工作轨迹"],
-    ["/admin/apps/qasey", "把需求变成可验证的结论"],
+    ["/admin/apps/qasey", "与 Qasey 一起完成测试任务"],
     ["/admin/apps/qasey/runs", "追踪每一次验证"],
     ["/admin/apps/qasey/cases", "Case Hub"],
     ["/admin/apps/qasey/reviews", "待我审阅"],
@@ -308,51 +316,276 @@ test("primary routes survive direct navigation and unknown paths render the 404 
   await expect(page.getByText("找不到这个页面", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "返回平台首页" }).click();
   await expect(page).toHaveURL(/\/admin$/u);
+
+  await page.goto("/admin/apps/qasey/workspace");
+  await expect(page.getByRole("heading", { name: "页面不存在" })).toBeVisible();
 });
 
-test("case hub exposes the version archive and reports lifecycle status instead of a misleading proposal count", async ({ page }) => {
-  const firstVersionId = "11111111-1111-4111-8111-111111111111";
+test("Qasey streams a multi-turn conversation and restores it from the deep link", async ({ page }) => {
+  const conversationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const turnId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const linkedRunId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const occurredAt = "2026-09-04T04:00:00.000Z";
+  const conversation = { id: conversationId, title: "验证预约改期流程", createdAt: occurredAt, updatedAt: occurredAt };
+  const clientMessageId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const metadata = { conversationId, turnId, createdAt: occurredAt, latestSequence: 7, linkedRunId };
+  const messages = [
+    { id: clientMessageId, role: "user", metadata, parts: [{ type: "text", text: "验证预约改期流程" }] },
+    { id: turnId, role: "assistant", metadata, parts: [
+      { type: "data-progress", id: `${turnId}:progress:2`, data: { sequence: 2, title: "正在分析需求", detail: "结合当前会话整理目标。", status: "working" } },
+      { type: "dynamic-tool", toolCallId: "github-call-1", toolName: "github_get_pull_request_diff", title: "读取 GitHub", state: "output-available", input: { summary: "正在查看 example/sample-app #42 的代码改动…" }, output: { summary: "已读取 PR #42，发现 3 个文件变更…" } },
+      { type: "dynamic-tool", toolCallId: "github-call-2", toolName: "github_get_pull_request_diff", title: "读取 GitHub", state: "output-available", input: { summary: "正在补充读取 PR #42 的文件列表…" }, output: { summary: "已补充读取 PR #42 的文件列表。" } },
+      { type: "data-run", id: `${turnId}:run`, data: { runId: linkedRunId } },
+      { type: "text", text: "已找到关键风险。测试运行已启动。", state: "done" },
+      { type: "data-cursor", id: `${turnId}:cursor`, data: { sequence: 5 } },
+    ] },
+  ];
+  const streamParts = [
+    { type: "start", messageId: turnId, messageMetadata: { ...metadata, latestSequence: 0, linkedRunId: undefined } },
+    { type: "data-progress", id: `${turnId}:progress:2`, data: { sequence: 2, title: "正在分析需求", detail: "结合当前会话整理目标。", status: "working" } },
+    { type: "data-cursor", id: `${turnId}:cursor`, data: { sequence: 2 } },
+    { type: "tool-input-available", toolCallId: "github-call-1", toolName: "github_get_pull_request_diff", title: "读取 GitHub", input: { summary: "正在查看 example/sample-app #42 的代码改动…" }, dynamic: true },
+    { type: "data-cursor", id: `${turnId}:cursor`, data: { sequence: 3 } },
+    { type: "tool-output-available", toolCallId: "github-call-1", output: { summary: "已读取 PR #42，发现 3 个文件变更…" }, dynamic: true },
+    { type: "data-cursor", id: `${turnId}:cursor`, data: { sequence: 4 } },
+    { type: "text-start", id: `${turnId}:text:0` },
+    { type: "text-delta", id: `${turnId}:text:0`, delta: "已找到关键风险。测试运行已启动。" },
+    { type: "data-run", id: `${turnId}:run`, data: { runId: linkedRunId } },
+    { type: "data-cursor", id: `${turnId}:cursor`, data: { sequence: 7 } },
+    { type: "message-metadata", messageMetadata: metadata },
+    { type: "text-end", id: `${turnId}:text:0` },
+    { type: "finish", finishReason: "stop", messageMetadata: metadata },
+  ];
+  const linkedRun = { ...runs[0], id: linkedRunId };
+  let sent = false;
+
+  await page.route("**/*", async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === "/v1/qasey/conversations") {
+      await json(route, { conversations: sent ? [conversation] : [] });
+      return;
+    }
+    if (request.method() === "POST" && url.pathname === "/v1/qasey/conversations") {
+      await route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify({ conversation: { ...conversation, title: "新 QA 任务" } }) });
+      return;
+    }
+    if (request.method() === "GET" && url.pathname === `/v1/qasey/conversations/${conversationId}`) {
+      await json(route, { conversation, messages: sent ? messages : [] });
+      return;
+    }
+    if (request.method() === "POST" && url.pathname === `/v1/qasey/conversations/${conversationId}/messages`) {
+      const body = request.postDataJSON() as { message: string; clientMessageId: string };
+      expect(body.message).toBe("验证预约改期流程");
+      expect(body.clientMessageId).toMatch(/^[0-9a-f-]{36}$/u);
+      sent = true;
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        headers: { "cache-control": "no-cache" },
+        body: `${streamParts.map(part => `data: ${JSON.stringify(part)}\n\n`).join("")}data: [DONE]\n\n`,
+      });
+      return;
+    }
+    if (request.method() === "GET" && url.pathname === `/v1/case-hub/runs/${linkedRunId}/events`) {
+      await route.fulfill({ status: 200, contentType: "text/event-stream", body: `event: snapshot\ndata: ${JSON.stringify({ run: linkedRun })}\n\n` });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto("/admin/apps/qasey");
+  await page.getByLabel("发送给 Qasey").fill("验证预约改期流程");
+  await page.getByRole("button", { name: "发送" }).click();
+
+  await expect(page).toHaveURL(new RegExp(`/admin/apps/qasey\\?conversation=${conversationId}$`, "u"));
+  await expect(page.locator("summary").getByText("正在分析需求", { exact: true })).toBeVisible();
+  const toolSummary = page.locator(".conversation-tools > summary");
+  await expect(toolSummary).toContainText("执行记录");
+  const groupedToolSummary = page.locator(".conversation-tool-group > summary");
+  await expect(groupedToolSummary).toBeHidden();
+  await toolSummary.click();
+  await expect(groupedToolSummary).toContainText("读取 GitHub");
+  await expect(groupedToolSummary.locator("code")).toHaveText("github_get_pull_request_diff");
+  await groupedToolSummary.click();
+  await expect(page.getByText("已读取 PR #42，发现 3 个文件变更…", { exact: true })).toBeVisible();
+  await expect(page.getByText("已补充读取 PR #42 的文件列表。", { exact: true })).toBeVisible();
+  await expect(page.getByText("已找到关键风险。测试运行已启动。", { exact: true })).toBeVisible();
+  await expect(page.locator(".conversation-tool-group > div code")).toHaveCount(2);
+  await expect(page.getByText("example/sample-app", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "复制回复" })).toBeVisible();
+  await expect(page.getByText("Qasey 返回了无法识别的消息格式。")).toHaveCount(0);
+
+  await page.reload();
+  await expect(page.getByText("验证预约改期流程", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("已找到关键风险。测试运行已启动。", { exact: true })).toBeVisible();
+  const restoredToolSummary = page.locator(".conversation-tools > summary");
+  await expect(restoredToolSummary).toContainText("2 次");
+  await expect(page.locator(".conversation-tool-group")).toHaveCount(1);
+  await restoredToolSummary.click();
+  await expect(page.locator(".conversation-tool-content strong em")).toHaveText("×2");
+});
+
+test("Qasey keeps long conversation history inside the workspace scroll region", async ({ page }) => {
+  const conversationId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const occurredAt = "2026-09-04T04:30:00.000Z";
+  const conversations = Array.from({ length: 18 }, (_, index) => ({
+    id: index === 0 ? conversationId : `ffffffff-ffff-4fff-8fff-${(index + 1).toString().padStart(12, "0")}`,
+    title: index === 0 ? "长对话滚动验证" : `历史 QA 任务 ${index + 1}`,
+    createdAt: occurredAt,
+    updatedAt: occurredAt,
+  }));
+  const messages = Array.from({ length: 18 }, (_, index) => {
+    const turnId = `dddddddd-dddd-4ddd-8ddd-${(index + 1).toString().padStart(12, "0")}`;
+    const metadata = { conversationId, turnId, createdAt: occurredAt, latestSequence: 1 };
+    return [
+      { id: `user-${index}`, role: "user", metadata, parts: [{ type: "text", text: `第 ${index + 1} 轮测试需求` }] },
+      { id: turnId, role: "assistant", metadata, parts: [{ type: "text", text: `第 ${index + 1} 轮分析已经完成，保留足够内容用于验证历史消息滚动。`, state: "done" }] },
+    ];
+  }).flat();
+
+  await page.route("**/*", async route => {
+    const url = new URL(route.request().url());
+    if (route.request().method() === "GET" && url.pathname === "/v1/qasey/conversations") {
+      await json(route, { conversations });
+      return;
+    }
+    if (route.request().method() === "GET" && url.pathname === `/v1/qasey/conversations/${conversationId}`) {
+      await json(route, { conversation: conversations[0], messages });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`/admin/apps/qasey?conversation=${conversationId}`);
+  await expect(page.getByText("第 18 轮分析已经完成，保留足够内容用于验证历史消息滚动。", { exact: true })).toBeVisible();
+
+  const messageScroll = page.locator(".qasey-conversation-scroll");
+  const conversationList = page.locator(".conversation-list-items");
+  const composer = page.getByLabel("发送给 Qasey").locator("..");
+  const main = page.locator(".conversation-main");
+  await expect(messageScroll).toBeVisible();
+  await expect(conversationList).toBeVisible();
+
+  expect(await messageScroll.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true);
+  expect(await conversationList.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true);
+  const bounds = await Promise.all([
+    composer.boundingBox(),
+    main.boundingBox(),
+  ]);
+  expect(bounds[0]).not.toBeNull();
+  expect(bounds[1]).not.toBeNull();
+  expect(bounds[0]!.y + bounds[0]!.height).toBeLessThanOrEqual(bounds[1]!.y + bounds[1]!.height + 1);
+  expect(bounds[1]!.y + bounds[1]!.height).toBeLessThanOrEqual(900);
+});
+
+test("Qasey resumes an active turn after the persisted cursor without duplicating text", async ({ page }) => {
+  const conversationId = "11111111-aaaa-4111-8111-aaaaaaaaaaaa";
+  const turnId = "22222222-bbbb-4222-8222-bbbbbbbbbbbb";
+  const clientMessageId = "33333333-cccc-4333-8333-cccccccccccc";
+  const occurredAt = "2026-09-04T05:00:00.000Z";
+  const conversation = { id: conversationId, title: "恢复中的任务", activeTurnId: turnId, createdAt: occurredAt, updatedAt: occurredAt };
+  const initialMetadata = { conversationId, turnId, createdAt: occurredAt, latestSequence: 4 };
+  const initialMessages = [
+    { id: clientMessageId, role: "user", metadata: initialMetadata, parts: [{ type: "text", text: "继续检查支付回调" }] },
+    { id: turnId, role: "assistant", metadata: initialMetadata, parts: [
+      { type: "data-progress", id: `${turnId}:progress:2`, data: { sequence: 2, title: "正在检查回调", detail: "读取已有测试上下文。", status: "working" } },
+      { type: "text", text: "已经确认签名，", state: "streaming" },
+      { type: "dynamic-tool", toolCallId: "case-search-resume", toolName: "case_hub_search_cases", title: "查询已有用例", state: "input-available", input: { summary: "正在读取 Case Hub 用例与审核状态…" } },
+      { type: "data-cursor", id: `${turnId}:cursor`, data: { sequence: 4 } },
+    ] },
+  ];
+  let reconnectAfter = "";
+
+  await page.route("**/*", async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === "/v1/qasey/conversations") {
+      await json(route, { conversations: [conversation] });
+      return;
+    }
+    if (request.method() === "GET" && url.pathname === `/v1/qasey/conversations/${conversationId}`) {
+      await json(route, { conversation, messages: initialMessages });
+      return;
+    }
+    if (request.method() === "GET" && url.pathname === `/v1/qasey/conversations/${conversationId}/turns/${turnId}/events`) {
+      reconnectAfter = url.searchParams.get("after") ?? "";
+      const finalMetadata = { ...initialMetadata, latestSequence: 7 };
+      const parts = [
+        { type: "start", messageId: turnId, messageMetadata: initialMetadata },
+        { type: "tool-input-available", toolCallId: "case-search-resume", toolName: "case_hub_search_cases", title: "查询已有用例", input: { summary: "正在读取 Case Hub 用例与审核状态…" }, dynamic: true },
+        { type: "tool-output-available", toolCallId: "case-search-resume", output: { summary: "已读取 Case Hub 用例与审核状态…" }, dynamic: true },
+        { type: "data-cursor", id: `${turnId}:cursor`, data: { sequence: 5 } },
+        { type: "text-start", id: `${turnId}:text:4` },
+        { type: "text-delta", id: `${turnId}:text:4`, delta: "回放测试也通过了。" },
+        { type: "data-cursor", id: `${turnId}:cursor`, data: { sequence: 7 } },
+        { type: "text-end", id: `${turnId}:text:4` },
+        { type: "finish", finishReason: "stop", messageMetadata: finalMetadata },
+      ];
+      await route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        headers: { "x-vercel-ai-ui-message-stream": "v1" },
+        body: `${parts.map(part => `data: ${JSON.stringify(part)}\n\n`).join("")}data: [DONE]\n\n`,
+      });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto(`/admin/apps/qasey?conversation=${conversationId}`);
+  await expect(page.getByText("已经确认签名，回放测试也通过了。", { exact: true })).toBeVisible();
+  const restoredExecutionSummary = page.locator(".conversation-tools > summary");
+  await expect(restoredExecutionSummary).toContainText("本轮执行已完成");
+  await expect(page.getByText("case_hub_search_cases", { exact: true })).toHaveCount(1);
+  await restoredExecutionSummary.click();
+  await expect(page.getByText("已读取 Case Hub 用例与审核状态…", { exact: true })).toBeVisible();
+  expect(reconnectAfter).toBe("4");
+  await expect(page.getByText("已经确认签名，", { exact: true })).toHaveCount(0);
+});
+
+test("case hub exposes only merged active versions and ignores newer failed proposals", async ({ page }) => {
   const latestVersionId = "22222222-2222-4222-8222-222222222222";
+  const candidateVersionId = "11111111-1111-4111-8111-111111111111";
   const failedChangeSetId = "33333333-3333-4333-8333-333333333333";
   const readyChangeSetId = "44444444-4444-4444-8444-444444444444";
   const caseRecord = {
     id: "QASEY-1", suitePath: "Appointments / Reschedule", title: "Reschedule across time zones",
-    proposedVersionIds: [firstVersionId, latestVersionId], updatedAt: "2026-09-03T01:00:00.000Z",
+    activeVersionId: latestVersionId, proposedVersionIds: [candidateVersionId], updatedAt: "2026-09-03T01:00:00.000Z",
   };
   const changeSets = [
-    { id: readyChangeSetId, status: "ready_to_merge", revision: 4, caseVersionIds: [latestVersionId], pullRequestUrl: "https://example.test/pull/7", requirement: { goal: "Cover rescheduling", requirementSummary: "Validate rescheduling behavior." }, updatedAt: "2026-09-03T01:00:00.000Z" },
-    { id: failedChangeSetId, status: "failed", revision: 2, caseVersionIds: [firstVersionId], requirement: { goal: "Initial coverage", requirementSummary: "First attempt." }, updatedAt: "2026-09-02T01:00:00.000Z" },
+    { id: failedChangeSetId, status: "failed", revision: 2, caseVersionIds: [candidateVersionId], requirement: { goal: "Candidate update", requirementSummary: "A failed newer attempt." }, updatedAt: "2026-09-04T01:00:00.000Z" },
+    { id: readyChangeSetId, status: "merged", revision: 5, caseVersionIds: [latestVersionId], pullRequestUrl: "https://example.test/pull/7", requirement: { goal: "Cover rescheduling", requirementSummary: "Validate rescheduling behavior." }, updatedAt: "2026-09-03T01:00:00.000Z" },
   ];
   const versions = [
-    { id: firstVersionId, caseId: "QASEY-1", version: 1, suitePath: caseRecord.suitePath, title: caseRecord.title, description: "Initial proposal", priority: "P1", target: "web", preconditions: [], steps: [{ action: "Open the appointment", expected: ["Appointment details are visible"] }], tags: ["regression"], automationPath: "e2e/reschedule.spec.ts", contentHash: "a".repeat(64), status: "proposed", createdAt: "2026-09-02T01:00:00.000Z" },
-    { id: latestVersionId, caseId: "QASEY-1", version: 2, suitePath: caseRecord.suitePath, title: caseRecord.title, description: "Covers staff and customer time zones.", priority: "P1", target: "web", preconditions: ["An appointment exists in another time zone"], steps: [{ action: "Move the appointment by one hour", expected: ["The customer sees the local converted time", "The staff calendar has no conflict"] }], tags: ["regression", "timezone"], automationPath: "e2e/reschedule.spec.ts", contentHash: "b".repeat(64), status: "approved", createdAt: "2026-09-03T01:00:00.000Z" },
+    { id: latestVersionId, caseId: "QASEY-1", version: 2, suitePath: caseRecord.suitePath, title: caseRecord.title, description: "Covers staff and customer time zones.", priority: "P1", target: "web", preconditions: ["An appointment exists in another time zone"], steps: [{ action: "Move the appointment by one hour", expected: ["The customer sees the local converted time", "The staff calendar has no conflict"] }], tags: ["regression", "timezone"], automationPath: "e2e/reschedule.spec.ts", contentHash: "b".repeat(64), status: "active", createdAt: "2026-09-03T01:00:00.000Z" },
   ];
 
   await page.route("**/*", async route => {
     const url = new URL(route.request().url());
     if (route.request().method() === "GET" && url.pathname === "/v1/case-hub/cases") { await json(route, { cases: [caseRecord] }); return; }
     if (route.request().method() === "GET" && url.pathname === "/v1/case-hub/change-sets") { await json(route, { changeSets }); return; }
-    if (route.request().method() === "GET" && url.pathname === "/v1/case-hub/cases/QASEY-1") { await json(route, { case: caseRecord, versions, changeSets, results: [] }); return; }
+    if (route.request().method() === "GET" && url.pathname === "/v1/case-hub/cases/QASEY-1") { await json(route, { case: caseRecord, versions, changeSets: [changeSets[1]], results: [] }); return; }
     await route.fallback();
   });
 
   await page.goto("/admin/apps/qasey/cases");
-  await expect(page.getByRole("columnheader", { name: "最新进度" })).toBeVisible();
+  await expect(page.getByRole("columnheader", { name: "正式交付" })).toBeVisible();
   await expect(page.getByRole("columnheader", { name: "待生效提案" })).toHaveCount(0);
-  await expect(page.getByText("等待合并", { exact: true })).toBeVisible();
+  await expect(page.getByText("已合并", { exact: true })).toBeVisible();
+  await expect(page.getByText("执行失败", { exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: /^QASEY-1 Reschedule/u }).click();
 
   const dialog = page.getByRole("dialog", { name: /QASEY-1/u });
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByText("2 个版本", { exact: false })).toBeVisible();
+  await expect(dialog.getByText("1 个版本", { exact: false })).toBeVisible();
   await expect(dialog.getByRole("heading", { name: "Reschedule across time zones", exact: true })).toBeVisible();
   await expect(dialog.getByText("An appointment exists in another time zone", { exact: true })).toBeVisible();
   await expect(dialog.getByText("The customer sees the local converted time", { exact: false })).toBeVisible();
   await expect(dialog.getByRole("link", { name: "打开 Pull Request" })).toHaveAttribute("href", "https://example.test/pull/7");
 
-  await dialog.getByRole("button", { name: /v1/u }).click();
-  await expect(dialog.locator(".case-version-badges .status-badge")).toHaveText("执行失败");
-  await expect(dialog.getByText("Initial proposal", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: /v1/u })).toHaveCount(0);
 });
 
 test("multi-organization login requires an explicit tenant-safe selection before entering", async ({ page }) => {

@@ -39,6 +39,7 @@ manager, then recreate the affected service.
 | `QASEY_DEPLOYMENT_ID` | `NODE_ENV` | Stable, portable Redis namespace shared by every replica in one deployment. Required in production. |
 | `QASEY_INSTANCE_ID` | none | Unique process/replica identifier for metrics and incident attribution. Required in production; never use it to partition shared state. |
 | `QASEY_PUBLIC_BASE_URL` | `http://localhost:4111` | Browser-visible origin used for callbacks and same-origin checks. |
+| `QASEY_ADDITIONAL_TRUSTED_ORIGINS` | none | Optional comma-separated exact HTTP(S) origins for intentional internal browser/test aliases; wildcards and URL paths are rejected. |
 | `DATABASE_URL` | none | PostgreSQL connection for application and Mastra state; required in production. |
 | `OBSERVABILITY_DATABASE_URL` | local DuckDB in development; `DATABASE_URL` in standalone production | Optional separate Mastra observability PostgreSQL connection. |
 | `QASEY_OBSERVABILITY_DB_PATH` | `.qasey/observability.duckdb` | Development DuckDB path when no observability URL is supplied. |
@@ -126,6 +127,7 @@ organizations.
 | `QASEY_CODE_AGENT_MODEL` | `gpt-5.6-sol` | Model for isolated repository code tasks. |
 | `QASEY_CODE_AGENT_MAX_STEPS` | `80` | Maximum model steps per code task (`1..500`). |
 | `QASEY_AGENT_TIMEOUT_MS` | `3000000` | End-to-end Agent deadline. |
+| `QASEY_CONVERSATION_RECONCILER_INTERVAL_MS` | `30000` | Interval for marking abandoned conversation turns failed after twice the Agent deadline. |
 | `QASEY_INTENT_TIMEOUT_MS` | `60000` | Intent-routing deadline. |
 | `QASEY_MAX_REPAIRS` | `2` | Maximum E2E repair attempts (`0..5`). |
 | `QASEY_MEMORY_MESSAGE_TOKENS` | `30000` | Recent-message memory budget. |

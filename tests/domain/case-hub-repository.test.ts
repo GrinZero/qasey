@@ -5,6 +5,55 @@ const owner = { applicationId: "qasey", tenantId: "tenant-1" };
 const repository = { owner: "example", repository: "web", cloneUrl: "https://example.com/web.git", baseRef: "main", allowedPaths: ["e2e"], skillsPaths: [] };
 
 describe("Case Hub repository", () => {
+  it("keeps proposals out of the formal library and preserves active metadata until merge activation", async () => {
+    let now = new Date("2026-09-01T00:00:00.000Z");
+    const hub = new InMemoryCaseHubRepository(() => now);
+    const requirement = freezeE2EContext({
+      goal: "Govern formal cases", requirementSummary: "Only merged cases are searchable", inScope: ["web"], outOfScope: [], confirmedDecisions: [], constraints: [], assumptions: [], criticalFlows: ["search"], boundaryCases: [], negativeCases: [], testDataNeeds: [], repositoryFindings: [], blockingQuestions: [], evidenceRefs: [],
+    }, { sessionId: "s", threadId: "t", taskRunId: "task", requestId: "r", resourceId: "u" });
+    const created = await hub.createChangeSet(owner, {
+      requirement, repository, createdBy: "qa-1", proposals: [{
+        operation: "create", suitePath: "Appointments / Original", title: "Original active title", description: "", priority: "P1", preconditions: [],
+        steps: [{ action: "Submit", expected: ["The case is verified"] }], testData: {}, tags: [], automationPath: "e2e/formal-case.spec.ts", evidenceRefs: [],
+      }],
+    });
+    const [firstVersion] = await hub.versionsForChangeSet(owner, created.id);
+    expect(await hub.listCases(owner)).toEqual([]);
+    expect((await hub.getCase(owner, firstVersion!.caseId))?.activeVersionId).toBeUndefined();
+
+    const [result] = await hub.createPendingResults(owner, created.id, "11111111-1111-4111-8111-111111111111", [
+      { id: "video", kind: "video", name: `verifier/${firstVersion!.caseId}/video.webm`, uri: "file:///tmp/formal.webm" },
+    ]);
+    await hub.reviewResult(owner, result!.id, "qa-1", { verdict: "approve" });
+    expect(await hub.listCases(owner)).toEqual([]);
+
+    now = new Date("2026-09-01T01:00:00.000Z");
+    await hub.activateApprovedVersions(owner, created.id);
+    expect(await hub.listCases(owner)).toEqual([
+      expect.objectContaining({ id: firstVersion!.caseId, activeVersionId: firstVersion!.id, title: "Original active title", suitePath: "Appointments / Original" }),
+    ]);
+
+    const update = await hub.createChangeSet(owner, {
+      requirement, repository, createdBy: "qa-1", proposals: [{
+        operation: "update", caseId: firstVersion!.caseId, suitePath: "Appointments / Candidate", title: "Unmerged candidate title", description: "", priority: "P2", preconditions: [],
+        steps: [{ action: "Edit", expected: ["The candidate remains isolated"] }], testData: {}, tags: [], automationPath: "e2e/formal-case.spec.ts", evidenceRefs: [],
+      }],
+    });
+    const [candidate] = await hub.versionsForChangeSet(owner, update.id);
+    expect(await hub.listCases(owner)).toEqual([
+      expect.objectContaining({ activeVersionId: firstVersion!.id, title: "Original active title", suitePath: "Appointments / Original" }),
+    ]);
+
+    const [candidateResult] = await hub.createPendingResults(owner, update.id, "22222222-2222-4222-8222-222222222222", [
+      { id: "candidate-video", kind: "video", name: `verifier/${candidate!.caseId}/video.webm`, uri: "file:///tmp/candidate.webm" },
+    ]);
+    await hub.reviewResult(owner, candidateResult!.id, "qa-1", { verdict: "approve" });
+    await hub.activateApprovedVersions(owner, update.id);
+    expect(await hub.listCases(owner)).toEqual([
+      expect.objectContaining({ activeVersionId: candidate!.id, title: "Unmerged candidate title", suitePath: "Appointments / Candidate" }),
+    ]);
+  });
+
   it("allocates stable ids, immutable versions, attempts, and per-case reviews", async () => {
     const hub = new InMemoryCaseHubRepository(() => new Date("2026-09-01T00:00:00.000Z"));
     const requirement = freezeE2EContext({
@@ -36,6 +85,48 @@ describe("Case Hub repository", () => {
       .rejects.toThrow("A video or Playwright trace is required before approval");
     expect(first?.reviewStatus).toBe("pending");
     expect((await hub.versionsForCase(owner, version!.caseId))[0]?.status).toBe("proposed");
+  });
+
+  it("does not consume candidate Case numbers until every Case is approved", async () => {
+    const hub = new InMemoryCaseHubRepository(() => new Date("2026-09-01T00:00:00.000Z"));
+    const requirement = freezeE2EContext({
+      goal: "Keep Case ids dense", requirementSummary: "Rejected attempts do not consume ids", inScope: ["web"], outOfScope: [], confirmedDecisions: [], constraints: [], assumptions: [], criticalFlows: ["approve"], boundaryCases: [], negativeCases: [], testDataNeeds: [], repositoryFindings: [], blockingQuestions: [], evidenceRefs: [],
+    }, { sessionId: "s", threadId: "t", taskRunId: "task", requestId: "r", resourceId: "u" });
+    const proposal = (title: string) => ({
+      operation: "create" as const, suitePath: "Case Hub", title, description: "", priority: "P1" as const, preconditions: [],
+      steps: [{ action: "Run", expected: ["Evidence exists"] }], testData: {}, tags: [], automationPath: "e2e/dense-id.spec.ts", evidenceRefs: [],
+    });
+
+    const rejectedAttempt = await hub.createChangeSet(owner, {
+      requirement, repository, createdBy: "qa-1", proposals: [proposal("Rejected attempt")],
+    });
+    const [rejectedVersion] = await hub.versionsForChangeSet(owner, rejectedAttempt.id);
+    expect(rejectedVersion?.caseId).toBe("QASEY-1");
+
+    const acceptedAttempt = await hub.createChangeSet(owner, {
+      requirement, repository, createdBy: "qa-1", proposals: [proposal("Accepted case"), proposal("Second accepted case")],
+    });
+    const acceptedVersions = await hub.versionsForChangeSet(owner, acceptedAttempt.id);
+    expect(acceptedVersions.map(version => version.caseId).sort()).toEqual(["QASEY-1", "QASEY-2"]);
+    expect(acceptedAttempt).toMatchObject({
+      candidateCaseSequenceRange: { start: 1, end: 2 },
+      caseIdsFinalized: false,
+    });
+
+    await expect(hub.finalizeApprovedCaseIds(owner, acceptedAttempt.id)).rejects.toThrow(/not approved/u);
+    const results = await hub.createPendingResults(owner, acceptedAttempt.id, "33333333-3333-4333-8333-333333333333", [
+      { id: "video-1", kind: "video", name: "QASEY-1/video.webm", uri: "file:///tmp/1.webm" },
+      { id: "video-2", kind: "video", name: "QASEY-2/video.webm", uri: "file:///tmp/2.webm" },
+    ]);
+    for (const result of results) await hub.reviewResult(owner, result.id, "qa-1", { verdict: "approve" });
+    const finalized = await hub.finalizeApprovedCaseIds(owner, acceptedAttempt.id);
+    expect(finalized.caseIdsFinalized).toBe(true);
+    expect((await hub.finalizeApprovedCaseIds(owner, acceptedAttempt.id)).revision).toBe(finalized.revision);
+
+    const next = await hub.createChangeSet(owner, {
+      requirement, repository, createdBy: "qa-1", proposals: [proposal("Next case")],
+    });
+    expect((await hub.versionsForChangeSet(owner, next.id))[0]?.caseId).toBe("QASEY-3");
   });
 
   it("preserves unresolved blocking questions for the API lifecycle gate", async () => {

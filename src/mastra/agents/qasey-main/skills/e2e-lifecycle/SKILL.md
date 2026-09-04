@@ -21,7 +21,7 @@ System prompt 已识别的 intent 决定执行 `e2e_generate`、`e2e_rerun`、`e
 - Case Hub 是结构化用例的唯一真相源；Git 只保存 Playwright，不保存 Case YAML。
 - 有未解决的阻塞问题时先向用户澄清，不得启动 E2E。
 - 先用 `case_hub_search_cases` 查重，再把 create/update proposal 与 Requirement Snapshot 一次性交给 `case_hub_create_change_set`。
-- 每条 Case 必须有稳定 `QASEY-N` ID、完整步骤/预期、优先级、suite、tags 和 automationPath；更新必须引用现有 Case ID。
+- 每条 Case 必须有稳定 `QASEY-N` ID、完整步骤/预期、优先级、suite、tags 和 automationPath；automationPath 必须位于服务端配置的 testRoot 且匹配其 testFileSuffixes，更新必须引用现有 Case ID。
 - 确定性 lifecycle 负责 sandbox、Native Mastra author、有限 repair、fresh verifier、artifacts、Draft PR 和逐 Case Review。
 - 创建成功只表示 run 已进入 lifecycle，不表示代码、验证或 PR 已完成。
 

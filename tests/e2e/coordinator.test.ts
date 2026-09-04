@@ -200,6 +200,10 @@ describe("E2E coordinator", () => {
     await coordinator.execute(owner, run.id);
 
     expect(submitted.map(spec => spec.executionProfileId)).toEqual(["web-e2e-author", "web-e2e-verifier"]);
+    expect(submitted.map(spec => spec.fixedChecks)).toEqual([
+      [{ id: "repo-install" }],
+      [{ id: "repo-install" }, { id: "playwright" }],
+    ]);
     expect(submitted[0]?.playwrightVerification).toEqual(frozen?.executionBrief?.repository.verification);
     expect(frozen?.executionBrief?.repository.testEnvironment).toEqual({ id: "qasey-test", baseUrl: "https://e2e.example.test" });
     expect(submitted[1]?.playwrightVerification).toEqual(frozen?.executionBrief?.repository.verification);

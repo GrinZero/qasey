@@ -56,6 +56,7 @@ services:
       QASEY_INSTANCE_ID: local-compose-api-0
       QASEY_SINGLE_TENANT_ID: local
       QASEY_PUBLIC_BASE_URL: http://localhost:${QASEY_APP_PORT:-4111}
+      QASEY_ADDITIONAL_TRUSTED_ORIGINS: http://qasey:4111
       DATABASE_URL: postgresql://postgres:${QASEY_POSTGRES_PASSWORD:-postgres}@postgres:5432/qasey
       REDIS_HOST: redis
       REDIS_PORT: 6379

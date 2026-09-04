@@ -67,7 +67,7 @@ describe("same-origin Admin UI", () => {
     expect(adminUiHtml).not.toContain("/studio/api/agents/");
     expect(adminUiHtml).toContain("/v1/case-hub/runs");
     expect(adminUiHtml).not.toContain("/studio/api/workflows/");
-    expect(adminUiHtml).toContain("/v1/qasey/tasks");
+    expect(adminUiHtml).toContain("/v1/qasey/conversations");
     expect(app.routes?.find(route => route.id === "audit")?.access.permission).toBe("platform.audit.read");
   });
 
@@ -100,6 +100,7 @@ describe("same-origin Admin UI", () => {
     const passwordAuth = await passwordAuthFixture();
     const app = createAdminUiApplication({
       publicBaseUrl: "https://runtime.test",
+      additionalTrustedOrigins: ["http://qasey:4111"],
       applicationCatalog: [],
       permissions: new PermissionService(new InMemoryPermissionStore()),
       audit: new InMemoryAuditLog(),
@@ -113,6 +114,12 @@ describe("same-origin Admin UI", () => {
     }, "https://attacker.example.invalid");
     expect(crossOrigin.response.status).toBe(403);
     await expect(crossOrigin.response.json()).resolves.toMatchObject({ error: "forbidden" });
+
+    const internalOrigin = await invokePasswordRoute(app, "password-register", {
+      email: "internal@example.invalid",
+      password: "synthetic-password-phrase",
+    }, "http://qasey:4111");
+    expect(internalOrigin.response.status).toBe(201);
 
     const shortRegistration = await invokePasswordRoute(app, "password-register", {
       email: "short@example.invalid",

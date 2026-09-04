@@ -39,6 +39,7 @@ describe("shared runtime configuration", () => {
     const config = loadConfig({ NODE_ENV: "test" } as NodeJS.ProcessEnv);
     expect(config.QASEY_INTENT_TIMEOUT_MS).toBe(60_000);
     expect(config.QASEY_AGENT_TIMEOUT_MS).toBe(3_000_000);
+    expect(config.QASEY_CONVERSATION_RECONCILER_INTERVAL_MS).toBe(30_000);
     expect(config.QASEY_REQUEST_BODY_MAX_BYTES).toBe(1_048_576);
     expect(config.QASEY_STANDARD_TENANT_REQUESTS_PER_MINUTE).toBe(6_000);
     expect(config.QASEY_STANDARD_SUBJECT_REQUESTS_PER_MINUTE).toBe(600);
@@ -68,6 +69,21 @@ describe("shared runtime configuration", () => {
     expect(config.QASEY_SINGLE_TENANT_ID).toBeUndefined();
     expect(config.QASEY_PASSWORD_AUTH_ENABLED).toBe(true);
     expect(config.QASEY_PASSWORD_REGISTRATION_ENABLED).toBe(true);
+    expect(config.QASEY_ADDITIONAL_TRUSTED_ORIGINS).toBeUndefined();
+  });
+
+  it("accepts only canonical exact additional browser origins", () => {
+    expect(loadConfig({
+      NODE_ENV: "test",
+      QASEY_ADDITIONAL_TRUSTED_ORIGINS: "http://qasey:4111, https://e2e.example.test",
+    } as NodeJS.ProcessEnv).QASEY_ADDITIONAL_TRUSTED_ORIGINS).toEqual([
+      "http://qasey:4111",
+      "https://e2e.example.test",
+    ]);
+    expect(() => loadConfig({
+      NODE_ENV: "test",
+      QASEY_ADDITIONAL_TRUSTED_ORIGINS: "https://e2e.example.test/path",
+    } as NodeJS.ProcessEnv)).toThrow(/canonical HTTP\(S\) origins/u);
   });
 
   it("limits each production Sandbox replica to one untrusted session", () => {
