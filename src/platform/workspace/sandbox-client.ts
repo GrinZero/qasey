@@ -127,7 +127,10 @@ export class SandboxPoolClient {
   }
 
   sandbox(scope: SandboxLeaseScope): RemoteWorkspaceSandbox {
-    return new RemoteWorkspaceSandbox(() => this.session(scope));
+    return new RemoteWorkspaceSandbox(
+      () => this.session(scope),
+      () => this.release(scope),
+    );
   }
 
   async release(scope: SandboxLeaseScope): Promise<void> {
@@ -447,11 +450,18 @@ export class RemoteWorkspaceSandbox implements WorkspaceSandbox {
   readonly provider = "qasey-sandbox";
   status: SandboxInfo["status"] = "pending";
 
-  constructor(private readonly resolveSession: () => Promise<SandboxRuntimeSession>) {}
+  constructor(
+    private readonly resolveSession: () => Promise<SandboxRuntimeSession>,
+    private readonly releaseSession?: () => Promise<void>,
+  ) {}
 
   async start(): Promise<void> { await this.resolveSession(); this.status = "running"; }
   async stop(): Promise<void> { const session = await this.resolveSession(); await session.stop(); this.status = "stopped"; }
-  async destroy(): Promise<void> { await this.stop(); this.status = "destroyed"; }
+  async destroy(): Promise<void> {
+    if (this.releaseSession) await this.releaseSession();
+    else await this.stop();
+    this.status = "destroyed";
+  }
   async snapshot(): Promise<void> {}
   async isReady(): Promise<boolean> { return this.status === "running"; }
   getInstructions(): string { return "Commands run in a persistent Qasey session directory inside an isolated remote sandbox runtime."; }
