@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { InvalidRunTransitionError, InMemoryRunRepository, RunRevisionConflictError } from "../../packages/domain/src/index.ts";
 import {
@@ -233,6 +234,75 @@ describe("E2E coordinator", () => {
     expect(draftPr.markReady).toHaveBeenCalledTimes(1);
     expect(await repository.get(owner, run.id)).toMatchObject({ status: "succeeded" });
   });
+
+  it("replaces the persisted patch reference after a QA repair", async () => {
+    const owner = { applicationId: "qasey", tenantId: "tenant-1" };
+    const repository = new InMemoryRunRepository();
+    const submitted: CodeTaskSpec[] = [];
+    const initialPatch = "diff --git a/e2e/initial.spec.ts b/e2e/initial.spec.ts";
+    const repairedPatch = "diff --git a/e2e/repaired.spec.ts b/e2e/repaired.spec.ts";
+    const runner = fakeRunner(submitted, [], [initialPatch, repairedPatch]);
+    const coordinator = new E2ECoordinator(repository, artifacts(), broker(), {
+      maxRepairs: 2,
+      reviewBaseUrl: "https://qasey.test",
+      codeTasks: { forScope: vi.fn(async () => runner) },
+      authenticationSecrets: {
+        resolve: vi.fn(async () => ({
+          E2E_LOGIN_EMAIL: "operator@example.test",
+          E2E_LOGIN_PASSWORD: "redacted-password",
+        })),
+      },
+    });
+    const run = await coordinator.create(owner, createInput());
+    await coordinator.freezeExecutionBrief(owner, run.id, [{
+      id: "e7be1d8a-c291-4ac5-a966-ab26d9780ca8",
+      title: "accepted browser flow",
+      priority: "P1",
+      target: "web",
+      preconditions: [],
+      steps: [{ action: "open flow", expected: ["flow is visible"] }],
+      testData: {},
+      tags: [],
+      evidenceRefs: [],
+      unresolvedQuestions: [],
+    }], {
+      owner: "o",
+      repository: "r",
+      workspacePath: "target",
+      baseSha,
+      allowedPaths: ["e2e"],
+      skillPaths: [],
+      e2eSkillPath: ".agents/skills/e2e-testing/SKILL.md",
+      e2eAuthentication: {
+        strategy: "repository-playwright-setup",
+        setupPath: "e2e/auth.setup.ts",
+        setupProject: "setup",
+        requiredEnvironment: ["E2E_LOGIN_EMAIL", "E2E_LOGIN_PASSWORD"],
+      },
+      specGlobs: ["e2e/**/*.spec.ts"],
+      artifactGlobs: [],
+      verification: playwrightVerification,
+    });
+    const frozen = await repository.get(owner, run.id);
+    await repository.update(owner, run.id, frozen!.revision, { baseSha });
+    await coordinator.execute(owner, run.id);
+    await coordinator.verdict(owner, run.id, {
+      verdict: "request_changes",
+      reviewerId: "qa-1",
+      feedback: "Repair the test setup",
+      caseVersionId: "e7be1d8a-c291-4ac5-a966-ab26d9780ca8",
+    });
+
+    await coordinator.authorAndPersistPatch(owner, run.id, "Repair the test setup");
+    await coordinator.cleanVerifyAndPublish(owner, run.id, true);
+
+    const latest = await repository.get(owner, run.id);
+    const patchRefs = latest!.artifacts.filter(item => item.id === `${run.id}:patch`);
+    expect(patchRefs).toHaveLength(1);
+    expect(patchRefs[0]?.sha256).toBe(createHash("sha256").update(repairedPatch).digest("hex"));
+    expect(submitted.at(-1)?.inputPatchRef).toEqual(patchRefs[0]);
+    expect(latest).toMatchObject({ status: "awaiting_qa" });
+  });
 });
 
 function createInput() {
@@ -278,7 +348,10 @@ function artifacts(): ArtifactStore {
   return {
     savePatch: vi.fn(async (_owner, runId, content) => {
       patch = content;
-      return ref(`${runId}:patch`, "patch", "changes.patch", "file:///changes.patch");
+      return {
+        ...ref(`${runId}:patch`, "patch", "changes.patch", "file:///changes.patch"),
+        sha256: createHash("sha256").update(content).digest("hex"),
+      };
     }),
     loadPatch: vi.fn(async () => patch),
     saveContext: vi.fn(async (_owner, runId) => ref(`${runId}:execution-brief`, "report", "execution-brief.json", "file:///brief.json")),
@@ -298,10 +371,12 @@ function broker(): DraftPrBroker {
 function fakeRunner(
   submitted: CodeTaskSpec[],
   submittedSecrets: Array<Readonly<Record<string, string>> | undefined> = [],
+  patchContents = ["diff --git a/e2e/a.spec.ts b/e2e/a.spec.ts"],
 ): CodeTaskRunner {
   const specs = new Map<string, CodeTaskSpec>();
   const patchRef = ref("sandbox-patch", "patch", "changes.patch", "sandbox://changes.patch");
   const contentRef = ref("sandbox-content", "report", "a.spec.ts", "sandbox://a.spec.ts");
+  let patchReadIndex = 0;
   return {
     submit: vi.fn(async (spec, secrets) => {
       submitted.push(spec);
@@ -346,7 +421,7 @@ function fakeRunner(
     }),
     cancel: vi.fn(async () => undefined),
     artifact: vi.fn(async artifact => Buffer.from(artifact.id === patchRef.id
-      ? "diff --git a/e2e/a.spec.ts b/e2e/a.spec.ts"
+      ? patchContents[Math.min(patchReadIndex++, patchContents.length - 1)]!
       : "test('flow', async () => {});")),
   };
 }

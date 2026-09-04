@@ -5,6 +5,29 @@ const owner = { applicationId: "qasey", tenantId: "tenant-1" };
 const repository = { owner: "example", repository: "web", cloneUrl: "https://example.com/web.git", baseRef: "main", allowedPaths: ["e2e"], skillsPaths: [] };
 
 describe("Case Hub repository", () => {
+  it("maps request_changes verdicts to the persisted changes_requested status", async () => {
+    const hub = new InMemoryCaseHubRepository(() => new Date("2026-09-04T00:00:00.000Z"));
+    const requirement = freezeE2EContext({
+      goal: "Review a failed case", requirementSummary: "Request a repair", inScope: ["web"], outOfScope: [], confirmedDecisions: [], constraints: [], assumptions: [], criticalFlows: ["repair"], boundaryCases: [], negativeCases: [], testDataNeeds: [], repositoryFindings: [], blockingQuestions: [], evidenceRefs: [],
+    }, { sessionId: "s", threadId: "t", taskRunId: "task", requestId: "r", resourceId: "u" });
+    const changeSet = await hub.createChangeSet(owner, {
+      requirement, repository, createdBy: "qa-1", proposals: [{
+        operation: "create", suitePath: "Navigation", title: "Scroll navigation", description: "", priority: "P1", preconditions: [],
+        steps: [{ action: "Scroll", expected: ["Navigation reaches the end"] }], testData: {}, tags: [], automationPath: "tests/browser/navigation.e2e.spec.ts", evidenceRefs: [],
+      }],
+    });
+    const [result] = await hub.createPendingResults(owner, changeSet.id, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", [], undefined, [{
+      caseId: "QASEY-1", executionStatus: "failed", artifactNames: [],
+    }]);
+
+    const reviewed = await hub.reviewResult(owner, result!.id, "reviewer-1", {
+      verdict: "request_changes",
+      feedback: "补充稳定的滚动压力数据",
+    });
+
+    expect(reviewed.reviewStatus).toBe("changes_requested");
+  });
+
   it("keeps proposals out of the formal library and preserves active metadata until merge activation", async () => {
     let now = new Date("2026-09-01T00:00:00.000Z");
     const hub = new InMemoryCaseHubRepository(() => now);

@@ -219,7 +219,9 @@ export class InMemoryCaseHubRepository implements CaseHubRepository {
     if (review.verdict === "approve" && !current.artifacts.some(isQaReviewArtifact)) {
       throw new Error("A video or Playwright trace is required before approval");
     }
-    const reviewStatus = review.verdict === "approve" ? "approved" : review.verdict;
+    const reviewStatus = review.verdict === "approve"
+      ? "approved"
+      : review.verdict === "request_changes" ? "changes_requested" : review.verdict;
     const updated = CaseHubResultSchema.parse({
       ...current, reviewStatus, reviewerId, ...(review.feedback ? { feedback: review.feedback } : {}), reviewedAt: this.now().toISOString(),
     });
@@ -511,7 +513,10 @@ export class PrismaCaseHubRepository implements CaseHubRepository {
     if (review.verdict === "approve" && current.executionStatus !== "passed") throw new Error("Only passed results can be approved");
     if (review.verdict === "approve" && !current.artifacts.some(isQaReviewArtifact)) throw new Error("A video or Playwright trace is required before approval");
     const updated = CaseHubResultSchema.parse({
-      ...current, reviewStatus: review.verdict === "approve" ? "approved" : review.verdict,
+      ...current,
+      reviewStatus: review.verdict === "approve"
+        ? "approved"
+        : review.verdict === "request_changes" ? "changes_requested" : review.verdict,
       reviewerId, ...(review.feedback ? { feedback: review.feedback } : {}), reviewedAt: this.now().toISOString(),
     });
     await this.prisma.$transaction(async transaction => {

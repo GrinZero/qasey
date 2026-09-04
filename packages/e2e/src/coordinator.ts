@@ -193,10 +193,10 @@ export class E2ECoordinator {
       if (result.patchRef) {
         const patch = (await runner.artifact(result.patchRef)).toString("utf8");
         inputPatchRef = await this.artifacts.savePatch(owner, run.id, patch);
+        run = await this.upsertArtifact(owner, run, inputPatchRef);
       }
       if (result.status === "succeeded") {
         if (!inputPatchRef) throw new Error("Sandbox author succeeded without a patch");
-        if (!run.artifacts.some(item => item.id === inputPatchRef!.id)) run = await this.appendArtifacts(owner, run, [inputPatchRef]);
         return;
       }
       priorFailure = result.summary.slice(-8_000);
@@ -432,6 +432,12 @@ export class E2ECoordinator {
 
   private async appendArtifacts(owner: OwnerScope, run: E2ERun, artifacts: E2ERun["artifacts"]): Promise<E2ERun> {
     return this.repository.update(owner, run.id, run.revision, { artifacts: [...run.artifacts, ...artifacts] });
+  }
+
+  private async upsertArtifact(owner: OwnerScope, run: E2ERun, artifact: E2ERun["artifacts"][number]): Promise<E2ERun> {
+    return this.repository.update(owner, run.id, run.revision, {
+      artifacts: [...run.artifacts.filter(item => item.id !== artifact.id), artifact],
+    });
   }
 
   private async transition(owner: OwnerScope, run: E2ERun, status: E2ERun["status"], message: string): Promise<E2ERun> {
