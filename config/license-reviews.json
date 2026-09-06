@@ -3,10 +3,10 @@
   "reviews": [
     {
       "name": "@mastra/redis-streams",
-      "version": "0.3.0",
-      "pnpmLockIntegrity": "sha512-aFm8olMKjrWIj3JsugQjjhKTkwgbVcp1MFwWxVPY/MY4i48tlstZNMaWzzbkXMDTDevWEnb6MZApE7It4zkvWw==",
+      "version": "0.4.1",
+      "pnpmLockIntegrity": "sha512-CM49XhkTGCy6M3U3TsM/nCut4Fj3c9csbZ++Xf7KwjeU1dqSmW1iarG5+wqQm/znjE0rqeCvYbtkck6lpyqG5w==",
       "licenseFile": "LICENSE.md",
-      "licenseSha256": "2b16edbc165d42dee8248296cb22979a26930fad9efaef4ebe263698a416c19c",
+      "licenseSha256": "f0351b469d1548e547882f01d2486a90f6bd0ff3c89defec841bbf5641265776",
       "expectedLicense": "Apache-2.0",
       "repository": {
         "type": "git",

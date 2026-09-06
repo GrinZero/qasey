@@ -45,7 +45,7 @@ RUN corepack enable pnpm \
   && test "$(pnpm --version)" = "11.21.0" \
   && install -d -o node -g node /home/node/.cache /home/node/.cache/node /home/node/.cache/mastra \
   && cp -a /root/.cache/node/corepack /home/node/.cache/node/corepack
-RUN install -d -o node -g node -m 0750 /app/.qasey \
+RUN install -d -o node -g node -m 0750 /app/.qasey /app/.mastra \
   && chown -R node:node /app /pnpm /home/node/.cache/node/corepack
 USER node
 CMD ["sleep", "infinity"]
@@ -74,8 +74,6 @@ RUN pnpm exec tsx scripts/write-build-metadata.ts \
 # Prisma is retained because migrate is an explicit service image role.
 FROM dependencies AS service-dependencies
 COPY ci/create-service-runtime-manifest.mjs /tmp/create-service-runtime-manifest.mjs
-RUN install -d /service/patches
-COPY patches/@mastra__core@1.59.0.patch /service/patches/@mastra__core@1.59.0.patch
 RUN node /tmp/create-service-runtime-manifest.mjs \
       /app/package.json /app/pnpm-lock.yaml \
       /service/package.json /service/pnpm-lock.yaml \
@@ -90,8 +88,6 @@ RUN pnpm install --prod --frozen-lockfile
 # overrides, while excluding database, Slack, repository, and API connectors.
 FROM dependencies AS sandbox-dependencies
 COPY ci/create-service-runtime-manifest.mjs /tmp/create-service-runtime-manifest.mjs
-RUN install -d /sandbox/patches
-COPY patches/@mastra__core@1.59.0.patch /sandbox/patches/@mastra__core@1.59.0.patch
 RUN node /tmp/create-service-runtime-manifest.mjs \
       /app/package.json /app/pnpm-lock.yaml \
       /sandbox/package.json /sandbox/pnpm-lock.yaml \

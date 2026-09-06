@@ -1,8 +1,6 @@
-import { MessageList } from "@mastra/core/agent/message-list";
-import type { MastraDBMessage } from "@mastra/core/agent/message-list";
 import { Agent } from "@mastra/core/agent";
 import { RequestContext } from "@mastra/core/request-context";
-import { ToolCallFilter } from "@mastra/core/processors";
+import { ToolCallFilter, type Processor } from "@mastra/core/processors";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import { describe, expect, it, vi } from "vitest";
@@ -48,7 +46,7 @@ describe("qasey-main processors", () => {
     const processors = await resolveQaseyMainInputProcessors({
       requestContext: new RequestContext(),
     });
-    const guard = processors[0];
+    const guard = processors[0] as Processor;
 
     expect(() => guard?.processInputStep?.({
       requestContext: new RequestContext(),
@@ -64,85 +62,78 @@ describe("qasey-main processors", () => {
   });
 
   it("preserves compact model output in the prompt without mutating raw memory", async () => {
-    const rawResult = { content: "x".repeat(50_000) };
-    const message: MastraDBMessage = {
-      id: "message-1",
-      role: "assistant",
-      createdAt: new Date(),
-      content: {
-        format: 2,
-        parts: [{
-          type: "tool-invocation",
-          toolInvocation: {
-            state: "result",
-            toolCallId: "tool-call-1",
-            toolName: "github_get_file",
-            args: { path: "README.md" },
-            result: rawResult,
-          },
-          providerMetadata: {
-            mastra: { modelOutput: { type: "text", value: "compact result" } },
-          },
+    const filter = createQaseyContextProcessors(["github_get_file"])[0] as ToolCallFilter;
+    const prompt = [
+      {
+        role: "assistant",
+        content: [{
+          type: "tool-call",
+          toolCallId: "tool-call-1",
+          toolName: "github_get_file",
+          input: { path: "README.md" },
         }],
       },
-    };
-    const messageList = new MessageList();
-    messageList.add([message], "memory");
-    const filter = createQaseyContextProcessors(["github_get_file"])[0] as ToolCallFilter;
+      {
+        role: "tool",
+        content: [{
+          type: "tool-result",
+          toolCallId: "tool-call-1",
+          toolName: "github_get_file",
+          output: { type: "text", value: "compact result" },
+        }],
+      },
+    ] as const;
 
-    const filtered = await filter.processInput({
-      messages: [],
-      messageList,
-      abort: reason => { throw new Error(reason); },
+    const filtered = await filter.processLLMRequest({ prompt, state: {} } as never);
+
+    expect(filtered).toEqual({
+      prompt: [{
+        role: "assistant",
+        content: [{ type: "text", text: "github_get_file result:\ncompact result" }],
+      }],
     });
-
-    expect(filtered).toEqual([expect.objectContaining({
-      content: expect.objectContaining({
-        parts: [{ type: "text", text: "github_get_file result:\ncompact result" }],
-      }),
-    })]);
-    expect(messageList.get.all.db()[0]?.content.parts[0]).toMatchObject({
-      type: "tool-invocation",
-      toolInvocation: { result: rawResult },
+    expect(prompt[0].content[0]).toMatchObject({
+      type: "tool-call",
+      input: { path: "README.md" },
     });
   });
 
   it("never removes Skill control results that have no model projection", async () => {
-    const messageList = new MessageList();
-    messageList.add([{
-      id: "skill-result",
-      role: "assistant",
-      createdAt: new Date(),
-      content: {
-        format: 2,
-        parts: [{
-          type: "tool-invocation",
-          toolInvocation: {
-            state: "result",
-            toolCallId: "skill-call-1",
-            toolName: "skill",
-            args: { name: "qa-quick-query" },
-            result: "activated",
-          },
-        }],
-      },
-    }], "memory");
     const filter = createQaseyContextProcessors(["github_get_file"])[0] as ToolCallFilter;
+    const prompt = [
+      {
+        role: "assistant",
+        content: [
+          { type: "tool-call", toolCallId: "github-call-1", toolName: "github_get_file", input: {} },
+          { type: "tool-call", toolCallId: "skill-call-1", toolName: "skill", input: { name: "qa-quick-query" } },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          { type: "tool-result", toolCallId: "github-call-1", toolName: "github_get_file", output: "compact" },
+          { type: "tool-result", toolCallId: "skill-call-1", toolName: "skill", output: "activated" },
+        ],
+      },
+    ] as const;
 
-    const filtered = await filter.processInput({
-      messages: [],
-      messageList,
-      abort: reason => { throw new Error(reason); },
+    const filtered = await filter.processLLMRequest({ prompt, state: {} } as never);
+
+    expect(filtered).toEqual({
+      prompt: [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "github_get_file result:\ncompact" },
+            expect.objectContaining({ type: "tool-call", toolName: "skill" }),
+          ],
+        },
+        {
+          role: "tool",
+          content: [expect.objectContaining({ type: "tool-result", toolName: "skill", output: "activated" })],
+        },
+      ],
     });
-
-    expect(filtered).toEqual([expect.objectContaining({
-      content: expect.objectContaining({
-        parts: [expect.objectContaining({
-          type: "tool-invocation",
-          toolInvocation: expect.objectContaining({ toolName: "skill", result: "activated" }),
-        })],
-      }),
-    })]);
   });
 
   it("forces a text-only response when the wall-clock deadline approaches", async () => {
@@ -197,7 +188,7 @@ describe("qasey-main processors", () => {
     const discovery = vi.spyOn(mcpCatalog, "toolsForDiscovery").mockResolvedValue({});
 
     const processors = await resolveQaseyMainInputProcessors({ requestContext });
-    const directResult = await processors[2]!.processInputStep!({ tools: {} } as never) as {
+    const directResult = await (processors[2] as Processor).processInputStep!({ tools: {} } as never) as {
       tools: Record<string, unknown>;
     };
 

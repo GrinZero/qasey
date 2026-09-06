@@ -60,6 +60,9 @@ export const SandboxCodeTaskStartSchema = z.object({
 export const SandboxCodeTaskCancelSchema = z.object({
   reason: z.string().min(1).max(2_000),
 }).strict();
+export const SandboxCodeTaskReleaseResultSchema = z.object({
+  released: z.boolean(),
+}).strict();
 export const SandboxCodeTaskStateSchema = CodeTaskStateSchema;
 export const SandboxCodeTaskEventPageSchema = CodeTaskEventPageSchema;
 

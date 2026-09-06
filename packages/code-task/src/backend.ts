@@ -1,10 +1,25 @@
 import { createOpenAI } from "@ai-sdk/openai";
-import { Agent } from "@mastra/core/agent";
+import { Agent, type MastraLanguageModel } from "@mastra/core/agent";
+import { Mastra } from "@mastra/core/mastra";
+import type { ObservabilityExporter, TracingEvent } from "@mastra/core/observability";
+import { RequestContext } from "@mastra/core/request-context";
 import { LocalFilesystem, WORKSPACE_TOOLS, Workspace } from "@mastra/core/workspace";
+import { Observability } from "@mastra/observability";
 import { access, realpath, stat } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 import type { CodeTaskTraceContext } from "../../contracts/src/index.ts";
+import { qaseyE2EAuthorAgent } from "../../../src/mastra/agents/qasey-e2e-author/agent.ts";
+import { QASEY_E2E_AUTHOR_ID, QASEY_E2E_AUTHOR_MAX_STEPS } from "../../../src/mastra/agents/qasey-e2e-author/config.ts";
+import {
+  bindE2EAuthorRuntime,
+  type E2ECandidateValidationResult,
+} from "../../../src/mastra/agents/qasey-e2e-author/runtime-bindings.ts";
 import type { ExecutionProfile } from "./profiles.ts";
+
+export const QASEY_E2E_CODE_AUTHOR_ID = QASEY_E2E_AUTHOR_ID;
+export const QASEY_CODE_REVIEWER_ID = "qasey-code-reviewer";
+
+export type CandidateValidationResult = E2ECandidateValidationResult;
 
 export interface CodingAgentRequest {
   taskId: string;
@@ -14,6 +29,9 @@ export interface CodingAgentRequest {
   profile: ExecutionProfile;
   e2eSkillPath?: string;
   traceContext: CodeTaskTraceContext;
+  traceMetadata?: Record<string, string | number | boolean | undefined>;
+  validateCandidate?: () => Promise<CandidateValidationResult>;
+  onTracingEvent?: (event: TracingEvent) => Promise<void> | void;
   credentials?: {
     openaiApiKey?: string;
     openaiBaseUrl?: string;
@@ -31,14 +49,19 @@ export interface CodingAgentBackend {
 }
 
 /**
- * Native Mastra coding backend used inside one isolated CodeTask checkout.
+ * Registered Mastra coding backend used inside one isolated CodeTask checkout.
  *
  * Repository lifecycle, checks, and patch collection stay outside the model.
  * The Agent receives only contained filesystem tools; write tools are guarded
- * again at the Workspace boundary by the frozen allowedPaths contract.
+ * again at the Workspace boundary by the frozen allowedPaths contract. Each
+ * worker process owns a short-lived Mastra runtime, but E2E invocations use
+ * one registered Agent identity so traces, scorers, and quality metrics
+ * aggregate under a first-class E2E author rather than per-task Agent ids.
  */
 export class NativeMastraCodingBackend implements CodingAgentBackend {
   async run(request: CodingAgentRequest): Promise<CodingAgentResult> {
+    let observability: Observability | undefined;
+    let releaseE2EAuthorRuntime: (() => void) | undefined;
     const writablePaths = request.profile.writable ? normalizeAllowedPaths(request.allowedPaths) : [];
     const filesystem = new LocalFilesystem({
       basePath: request.workspaceRoot,
@@ -102,36 +125,68 @@ export class NativeMastraCodingBackend implements CodingAgentBackend {
           : {}),
       });
       const modelId = process.env.QASEY_CODE_AGENT_MODEL?.trim() || "gpt-5.6-sol";
-      const agent = new Agent({
-        id: `qasey-e2e-code-author-${request.taskId}`,
-        name: "Qasey E2E Code Author",
-        description: "Writes or reviews E2E implementation in one isolated repository checkout.",
+      const isE2EAuthor = request.profile.id === "web-e2e-author" || request.profile.id === "web-e2e-repair";
+      if (isE2EAuthor && !request.validateCandidate) {
+        throw new Error("qasey-e2e-author requires the controlled candidate validation binding");
+      }
+      const model = openai.responses(modelId);
+      const reviewer = !isE2EAuthor ? new Agent({
+        id: QASEY_CODE_REVIEWER_ID,
+        name: "Qasey Code Reviewer",
+        description: "Reviews code in one read-only isolated repository checkout.",
         model: openai.responses(modelId),
         workspace,
         instructions: [
           "You are Qasey's repository coding specialist, implemented as a native Mastra Agent.",
           "Activate and follow relevant repository-local Skills before changing files.",
-          ...(requiredSkill ? [
-            `The required project E2E Skill at ${request.e2eSkillPath} is authoritative for project routes, test-account roles, repository-owned authentication setup, data setup, and cleanup:`,
-            requiredSkill.instructions,
-          ] : []),
           "Inspect existing tests, page objects, helpers, and conventions before implementing.",
           "Use only Workspace filesystem tools. Repository checks run deterministically after you finish.",
           "Never read, print, or persist credentials. Never weaken assertions to hide a product or environment failure.",
-          "For Playwright, map exactly one test to each Case Hub case. Put the QASEY case id in the title and add qasey.case and qasey.version annotations using the frozen id and versionHash. Never use test.only or unapproved skip.",
-          "Use QASEY_E2E_BASE_URL for the test deployment. Authentication must use the repository's checked-in Playwright setup and declared environment contract; never synthesize cookies or storage state.",
-          request.profile.writable
-            ? `You may write only under: ${writablePaths.join(", ") || "no paths"}.`
-            : "This execution profile is read-only; do not modify files.",
+          "Review the frozen task context and report concrete findings without modifying the repository.",
+          "This execution profile is read-only; do not modify files.",
         ],
+      }) : undefined;
+      observability = new Observability({
+        configs: {
+          default: {
+            serviceName: "qasey-code-task",
+            requestContextKeys: ["e2eRunId", "codeTaskId", "attemptId", "executionProfile", "baseSha", "contextHash"],
+            exporters: [new CodeTaskTracingExporter(request.onTracingEvent)],
+          },
+        },
       });
-      const output = await agent.generate([
+      const runtime = new Mastra({
+        agents: { codeAgent: isE2EAuthor ? qaseyE2EAuthorAgent : reviewer! },
+        observability,
+        logger: false,
+        environment: process.env.NODE_ENV ?? "development",
+      });
+      const requestContext = new RequestContext<Record<string, unknown>>();
+      requestContext.set("codeTaskId", request.taskId);
+      for (const [key, value] of Object.entries(request.traceMetadata ?? {})) {
+        if (value !== undefined) requestContext.set(key, value);
+      }
+      if (isE2EAuthor) {
+        releaseE2EAuthorRuntime = bindE2EAuthorRuntime(requestContext, {
+          model: model as unknown as MastraLanguageModel,
+          workspace,
+          profileId: request.profile.id as "web-e2e-author" | "web-e2e-repair",
+          writablePaths,
+          ...(request.e2eSkillPath ? { requiredSkillPath: request.e2eSkillPath } : {}),
+          ...(requiredSkill ? { requiredSkillInstructions: requiredSkill.instructions } : {}),
+          validateCandidate: request.validateCandidate!,
+          validation: { calls: 0 },
+        });
+      }
+      const propagatedTracing = tracingOptions(request.traceContext);
+      const output = await runtime.getAgent("codeAgent").generate([
         `Execution profile: ${request.profile.id}`,
         `Frozen writable paths: ${writablePaths.join(", ") || "none"}`,
         "Complete only the immutable task context below.",
         request.context,
       ].join("\n\n"), {
         runId: request.taskId,
+        requestContext,
         maxSteps: codeAgentMaxSteps(),
         ...(request.abortSignal ? { abortSignal: request.abortSignal } : {}),
         providerOptions: {
@@ -141,15 +196,48 @@ export class NativeMastraCodingBackend implements CodingAgentBackend {
             store: false,
           },
         },
+        ...(propagatedTracing ? { tracingOptions: propagatedTracing } : {}),
       });
+      await observability.flush();
       return {
         summary: output.text || "Native Mastra coding task completed without a textual summary",
         backendRunId: output.runId ?? request.taskId,
       };
     } finally {
+      releaseE2EAuthorRuntime?.();
+      await observability?.shutdown().catch(() => undefined);
       await workspace.destroy().catch(() => undefined);
     }
   }
+}
+
+class CodeTaskTracingExporter implements ObservabilityExporter {
+  readonly name = "code-task-event-exporter";
+
+  constructor(private readonly sink?: (event: TracingEvent) => Promise<void> | void) {}
+
+  async exportTracingEvent(event: TracingEvent): Promise<void> { await this.sink?.(event); }
+  async flush(): Promise<void> {}
+  async shutdown(): Promise<void> {}
+}
+
+function tracingOptions(context: CodeTaskTraceContext): { traceId: string; parentSpanId?: string; metadata: Record<string, string> } | undefined {
+  const carried = codeTaskTraceIds(context);
+  if (!carried) return undefined;
+  return {
+    traceId: carried.traceId,
+    ...(carried.parentSpanId ? { parentSpanId: carried.parentSpanId } : {}),
+    metadata: { codeTaskTrace: "propagated" },
+  };
+}
+
+export function codeTaskTraceIds(context: CodeTaskTraceContext): { traceId: string; parentSpanId?: string } | undefined {
+  const traceparent = context.traceparent?.match(/^00-([a-f0-9]{32})-([a-f0-9]{16})-[a-f0-9]{2}$/iu);
+  const traceId = context.traceId ?? traceparent?.[1];
+  const parentSpanId = context.parentSpanId ?? traceparent?.[2];
+  if (!traceId || !/^[a-f0-9]{32}$/iu.test(traceId)) return undefined;
+  if (parentSpanId && !/^[a-f0-9]{16}$/iu.test(parentSpanId)) return { traceId };
+  return { traceId, ...(parentSpanId ? { parentSpanId } : {}) };
 }
 
 /**
@@ -240,8 +328,8 @@ function taskSkillPaths(context: string): string[] {
 }
 
 function codeAgentMaxSteps(): number {
-  const value = Number(process.env.QASEY_CODE_AGENT_MAX_STEPS || "80");
-  return Number.isInteger(value) && value >= 1 && value <= 500 ? value : 80;
+  const value = Number(process.env.QASEY_CODE_AGENT_MAX_STEPS || String(QASEY_E2E_AUTHOR_MAX_STEPS));
+  return Number.isInteger(value) && value >= 1 && value <= 500 ? value : QASEY_E2E_AUTHOR_MAX_STEPS;
 }
 
 export const nativeCodingBackendPolicy = {

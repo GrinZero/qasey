@@ -39,6 +39,7 @@ import {
 
 export function createAdminUiApplication(options: {
   publicBaseUrl: string;
+  additionalTrustedOrigins?: readonly string[];
   applicationCatalog: readonly CatalogEntry[];
   applications?: readonly { id: string; ui?: ApplicationUiManifest }[];
   permissions: PermissionService;
@@ -59,7 +60,8 @@ export function createAdminUiApplication(options: {
     ): Promise<E2ERun>;
   };
 }): AgentApplicationBundle {
-  const trustedOrigin = new URL(options.publicBaseUrl).origin;
+  const trustedOrigins = trustedBrowserOrigins(options.publicBaseUrl, options.additionalTrustedOrigins);
+  const trustedOrigin = trustedOrigins;
   const routes: OwnedApiRoute[] = [
     owned("shell", "platform.admin-ui.access", registerApiRoute("/admin", {
       method: "GET",
@@ -285,7 +287,7 @@ const PasswordRegistrationInputSchema = PasswordLoginInputSchema.extend({
 function passwordAuthRoutes(options: {
   passwordAuth: PasswordAuthService;
   googleOidc: GoogleOidcService;
-  trustedOrigin: string;
+  trustedOrigin: string | readonly string[];
 }): OwnedApiRoute[] {
   return [
     owned("password-register", "platform.auth.login", registerApiRoute("/auth/password/register", {
@@ -385,7 +387,7 @@ function apiTokenRoutes(options: {
   apiTokens: ApiTokenStore;
   applicationCatalog: readonly CatalogEntry[];
   audit: AuditLog;
-  trustedOrigin: string;
+  trustedOrigin: string | readonly string[];
 }): OwnedApiRoute[] {
   const availableScopes = availableApiTokenScopes(options.applicationCatalog);
   const scopeSet = new Set(availableScopes);
@@ -456,7 +458,7 @@ function organizationRoutes(options: {
   apiTokens?: ApiTokenStore;
   permissions: PermissionService;
   audit: AuditLog;
-  trustedOrigin: string;
+  trustedOrigin: string | readonly string[];
 }): OwnedApiRoute[] {
   return [
     owned("organization-members", "platform.members.read", registerApiRoute("/admin/api/organization/members", {
@@ -636,7 +638,7 @@ const ExternalConnectionCredentialsSchema = z.record(
 function externalConnectionRoutes(options: {
   connections: ExternalConnectionStore;
   audit: AuditLog;
-  trustedOrigin: string;
+  trustedOrigin: string | readonly string[];
 }): OwnedApiRoute[] {
   return [
     owned("external-connection-list", "platform.connections.read", registerApiRoute("/admin/api/connections", {
@@ -729,7 +731,7 @@ function externalConnectionRoutes(options: {
 
 async function externalConnectionMutation(
   c: any,
-  options: { connections: ExternalConnectionStore; audit: AuditLog; trustedOrigin: string },
+  options: { connections: ExternalConnectionStore; audit: AuditLog; trustedOrigin: string | readonly string[] },
   action: string,
   execute: (principal: OAuthPrincipal) => Promise<{
     connection: { id: string; provider: ExternalConnectionProvider; status: string; revision: number };
@@ -783,7 +785,7 @@ function failureRecoveryRoutes(options: {
     runtime: { mastra: Mastra; requestContext: RequestContext; actorId: string },
   ): Promise<E2ERun>;
   audit: AuditLog;
-  trustedOrigin: string;
+  trustedOrigin: string | readonly string[];
 }): OwnedApiRoute[] {
   return [
     owned("failure-inbox-list", "platform.failures.read", registerApiRoute("/admin/api/failures", {
@@ -924,7 +926,7 @@ export function availableApiTokenScopes(catalog: readonly CatalogEntry[]): reado
 function triggerRoutes(options: {
   triggerProviders: TriggerProviderRegistry;
   audit: AuditLog;
-  trustedOrigin: string;
+  trustedOrigin: string | readonly string[];
 }): OwnedApiRoute[] {
   const configuration = z.record(z.string(), z.string());
   const revision = z.number().int().positive();
@@ -1029,7 +1031,7 @@ function adminPrincipal(c: { get(key: string): unknown }): OAuthPrincipal {
 
 async function triggerMutation(
   c: any,
-  options: { audit: AuditLog; trustedOrigin: string },
+  options: { audit: AuditLog; trustedOrigin: string | readonly string[] },
   action: string,
   execute: (principal: OAuthPrincipal) => Promise<Record<string, unknown> & {
     connection?: { id: string; providerId: string; target?: { id: string } };
@@ -1102,9 +1104,9 @@ class CsrfOriginError extends Error {
   }
 }
 
-function rejectCrossOriginRequest(c: any, trustedOrigin: string): Response | undefined {
+function rejectCrossOriginRequest(c: any, trustedOrigins: string | readonly string[]): Response | undefined {
   try {
-    assertSameOrigin(c.req.raw, trustedOrigin);
+    assertSameOrigin(c.req.raw, trustedOrigins);
     return undefined;
   } catch (error) {
     if (!(error instanceof CsrfOriginError)) throw error;
@@ -1112,13 +1114,20 @@ function rejectCrossOriginRequest(c: any, trustedOrigin: string): Response | und
   }
 }
 
-export function assertSameOrigin(request: Request, trustedOrigin: string): void {
+export function assertSameOrigin(request: Request, trustedOrigin: string | readonly string[]): void {
   const origin = request.headers.get("origin");
   if (!origin) throw new CsrfOriginError();
   try {
-    if (new URL(origin).origin !== new URL(trustedOrigin).origin) throw new CsrfOriginError();
+    const supplied = new URL(origin).origin;
+    const trusted = (typeof trustedOrigin === "string" ? [trustedOrigin] : trustedOrigin)
+      .map(value => new URL(value).origin);
+    if (!trusted.includes(supplied)) throw new CsrfOriginError();
   } catch (error) {
     if (error instanceof CsrfOriginError) throw error;
     throw new CsrfOriginError();
   }
+}
+
+function trustedBrowserOrigins(publicBaseUrl: string, additional: readonly string[] = []): string[] {
+  return [...new Set([publicBaseUrl, ...additional].map(value => new URL(value).origin))];
 }

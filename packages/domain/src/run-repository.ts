@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { E2ERunSchema, type E2ERun, type OwnerScope, type RunEvent, type RunStatus } from "../../contracts/src/index.ts";
 
-export type RunPatch = Partial<Pick<E2ERun, "status" | "branch" | "baseSha" | "pullRequestUrl" | "error" | "artifacts" | "caseSnapshot" | "executionBrief" | "briefHash" | "repositoryExecution" | "traceId" | "amendments" | "codeTaskIds">>;
+export type RunPatch = Partial<Pick<E2ERun, "status" | "statusHistory" | "branch" | "baseSha" | "pullRequestUrl" | "error" | "artifacts" | "caseSnapshot" | "executionBrief" | "briefHash" | "repositoryExecution" | "traceId" | "amendments" | "codeTaskIds" | "automationPaths">>;
 
 export class RunRevisionConflictError extends Error {
   readonly name = "RunRevisionConflictError";
@@ -282,7 +282,7 @@ const allowedTransitions: Record<RunStatus, RunStatus[]> = {
   authoring: ["author_running", "cancelled", "failed"],
   author_running: ["repairing", "clean_verifying", "cancelled", "failed"],
   repairing: ["preparing_workspace", "author_running", "cancelled", "failed"],
-  clean_verifying: ["awaiting_qa", "cancelled", "failed"],
+  clean_verifying: ["repairing", "awaiting_qa", "cancelled", "failed"],
   awaiting_qa: ["repairing", "clean_verifying", "succeeded", "failed", "cancelled"],
   succeeded: [], failed: [], cancelled: [],
 };
@@ -309,5 +309,34 @@ function runFromRow(row: { payload: Prisma.JsonValue; revision: number }): E2ERu
   if (!row.payload || typeof row.payload !== "object" || Array.isArray(row.payload)) {
     throw new Error("Persisted run payload must be a JSON object");
   }
-  return E2ERunSchema.parse({ ...row.payload, revision: row.revision });
+  return E2ERunSchema.parse({ ...normalizePersistedRunPayload(row.payload), revision: row.revision });
+}
+
+/** Decode runs written before local test-file discovery policy left the sandbox protocol. */
+function normalizePersistedRunPayload(payload: Prisma.JsonObject): Prisma.JsonObject {
+  const normalized = structuredClone(payload);
+  stripLegacyTestFileSuffixes(normalized.playwrightVerification);
+
+  const repositoryExecution = jsonObject(normalized.repositoryExecution);
+  stripLegacyTestFileSuffixes(repositoryExecution?.verification);
+
+  const executionBrief = jsonObject(normalized.executionBrief);
+  const briefRepository = jsonObject(executionBrief?.repository);
+  stripLegacyTestFileSuffixes(briefRepository?.verification);
+  return normalized;
+}
+
+function stripLegacyTestFileSuffixes(value: Prisma.JsonValue | undefined): void {
+  const verification = jsonObject(value);
+  if (!verification || !Array.isArray(verification.projects)) return;
+  for (const value of verification.projects) {
+    const project = jsonObject(value);
+    if (project) delete project.testFileSuffixes;
+  }
+}
+
+function jsonObject(value: Prisma.JsonValue | undefined): Prisma.JsonObject | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Prisma.JsonObject
+    : undefined;
 }

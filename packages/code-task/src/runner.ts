@@ -23,6 +23,12 @@ export interface CodeTaskRunner {
   get(taskId: string): Promise<CodeTaskState>;
   events(taskId: string, after?: string): Promise<CodeTaskEventPage>;
   cancel(taskId: string, reason: string): Promise<void>;
+  /**
+   * Acknowledge that every durable artifact needed by the control plane has
+   * been copied out of the execution sandbox. Implementations may now remove
+   * every local attempt belonging to this logical task.
+   */
+  release(taskId: string): Promise<void>;
   artifact(ref: ArtifactRef): Promise<Buffer>;
 }
 

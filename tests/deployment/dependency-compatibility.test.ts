@@ -4,8 +4,8 @@ import { pathToFileURL } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-const providerUtilsAlias = "@ai-sdk/provider-utils-v5";
-const expectedProviderUtilsVersion = "4.0.48";
+const providerUtilsAlias = "@ai-sdk/provider-utils-v6";
+const expectedProviderUtilsVersion = "4.0.40";
 
 type MastraProviderUtilsCompatibilitySurface = {
   convertBase64ToUint8Array(value: string): Uint8Array;
@@ -34,8 +34,8 @@ async function loadMastraProviderUtilsAlias() {
   return { manifest, module };
 }
 
-describe("Mastra AI SDK compatibility override", () => {
-  it("resolves the reviewed replacement through Mastra's runtime alias", async () => {
+describe("Mastra AI SDK compatibility aliases", () => {
+  it("resolves the reviewed AI SDK v6 utility line through Mastra's runtime alias", async () => {
     const { manifest, module } = await loadMastraProviderUtilsAlias();
 
     expect(manifest).toMatchObject({
@@ -51,6 +51,13 @@ describe("Mastra AI SDK compatibility override", () => {
         isUrlSupported: expect.any(Function),
       }),
     );
+  });
+
+  it("no longer installs the legacy AI SDK v5 utility alias", async () => {
+    const requireFromMastraCore = createRequire(import.meta.resolve("@mastra/core"));
+
+    expect(() => requireFromMastraCore.resolve("@ai-sdk/provider-utils-v5"))
+      .toThrow(/Cannot find module/u);
   });
 
   it("preserves every provider-utils operation imported by Mastra core", async () => {

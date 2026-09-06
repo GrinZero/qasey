@@ -1,3 +1,7 @@
+import { evidenceStageState } from "./components/evidence-stage";
+import { CollaborationComposer } from "./components/collaboration-composer";
+import { type ConversationParticipant, MAIN_AGENT_ID, E2E_AGENT_ID } from "@qasey/contracts";
+import { E2EContextBanner, FocusedE2ETurn } from "./components/focused-e2e-turn";
 import {
   Activity,
   AppWindow,
@@ -16,7 +20,6 @@ import {
   EyeOff,
   FileSearch,
   FileText,
-  FolderOpen,
   Gauge,
   GitBranch,
   Inbox,
@@ -29,6 +32,9 @@ import {
   Menu,
   MessageSquareText,
   MonitorPlay,
+  Maximize2,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   Power,
   Play,
@@ -40,19 +46,38 @@ import {
   Sparkles,
   Square,
   TestTube2,
-  Terminal,
   Trash2,
   UserRound,
+  Wrench,
   X,
   XCircle,
 } from "lucide-react";
+import { useChat } from "@ai-sdk/react";
+import { isDynamicToolUIPart, type DynamicToolUIPart } from "ai";
+import {
+  QaseyCursorDataSchema,
+  QaseyCaseReviewDataSchema,
+  QaseyProgressDataSchema,
+  QaseyPublicToolInputSchema,
+  QaseyPublicToolOutputSchema,
+  QaseyRunDataSchema,
+  QaseyUIMessageMetadataSchema,
+  QaseyUIMessageSchema,
+} from "@qasey/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { api, ApiError, errorMessage } from "./api";
 import { canRunQaseyTask } from "./catalog";
 import { adminPaths, legacyAdminPath, viewForAdminPath, type View } from "./routes";
 import { presentScope } from "./scopes";
-import type { AgentApplication, ApiTokenRecord, AuditRecord, AuthConfig, CaseHubCase, CaseHubCaseVersion, CaseHubChangeSet, CaseHubResult, CatalogEntry, OrganizationSelection, QaseyRun, RunStatus, SandboxSessionState, Session, TriggerConnection, TriggerConnectionStatus, TriggerProvider, TriggerTarget } from "./types";
+import { Conversation, ConversationContent, ConversationScrollButton } from "./components/ai-elements/conversation";
+import { Message, MessageContent, MessageResponse } from "./components/ai-elements/message";
+import { PromptInput } from "./components/ai-elements/prompt-input";
+import { allowReviewNavigation } from "./components/review-navigation";
+import { SessionCaseDialog } from "./components/session-case-dialog";
+import { CaseReviewPanel } from "./components/case-review-panel";
+import { QaseyChatTransport, type QaseyReconnectTarget } from "./qasey-chat-transport";
+import type { AgentApplication, ApiTokenRecord, AuditRecord, AuthConfig, CaseHubCase, CaseHubCaseVersion, CaseHubChangeSet, CaseHubResult, CaseReviewItem, CaseReviewPlanDetail, CatalogEntry, OrganizationSelection, QaseyConversation, QaseyProgressData, QaseyRun, QaseyUIMessage, RunStatus, Session, TriggerConnection, TriggerConnectionStatus, TriggerProvider, TriggerTarget } from "./types";
 
 type AuthState =
   | { kind: "loading" }
@@ -173,7 +198,6 @@ export function App() {
     { id: "qasey-cases", label: "Case Hub", icon: Library },
     { id: "qasey-runs", label: "测试运行", icon: Activity, badge: activeCount },
     { id: "qasey-review", label: "待我审阅", icon: ClipboardCheck, badge: reviewCount },
-    { id: "qasey-cua", label: "Ubuntu 工作台", icon: MonitorPlay },
   ];
   const qaseyActive = view?.startsWith("qasey-") ?? false;
   const currentLabel = [...platformNav, ...qaseyNav,
@@ -182,13 +206,16 @@ export function App() {
   ].find(item => item.id === view)?.label ?? "平台首页";
 
   const logout = async () => {
+    if (!allowReviewNavigation()) return;
     try { await api.logout(); } finally { setAuth({ kind: "anonymous" }); }
   };
   const openView = (nextView: View) => {
+    if (!allowReviewNavigation()) return;
     navigate(adminPaths[nextView]);
     setMenuOpen(false);
   };
   const openApplication = (application: AgentApplication) => {
+    if (!allowReviewNavigation()) return;
     setMenuOpen(false);
     const legacyPath = legacyAdminPath(
       application.homePath.split("#", 1)[0] ?? application.homePath,
@@ -252,7 +279,6 @@ export function App() {
             <Route path={adminPaths["qasey-runs"]} element={<RunsView runs={runs} loading={loadingRuns} onRefresh={loadWorkspace} />} />
             <Route path={adminPaths["qasey-cases"]} element={<CaseHubView />} />
             <Route path={adminPaths["qasey-review"]} element={<QaReviewView onReviewQueueChanged={loadWorkspace} />} />
-            <Route path={adminPaths["qasey-cua"]} element={<CuaView subjectId={auth.session.subjectId} />} />
             <Route path={adminPaths.triggers} element={auth.session.isAdmin ? <TriggersView /> : <Navigate to={adminPaths["platform-home"]} replace />} />
             <Route path={adminPaths.access} element={auth.session.isAdmin ? <AccessView session={auth.session} /> : <Navigate to={adminPaths["platform-home"]} replace />} />
             <Route path="*" element={<NotFoundView onHome={() => openView("platform-home")} />} />
@@ -559,70 +585,421 @@ function ActivityView({ runs, loading, onRefresh }: { runs: QaseyRun[]; loading:
 }
 
 function Overview({ catalog, runs, loading, onRefresh, onOpenRuns }: { catalog: CatalogEntry[]; runs: QaseyRun[]; loading: boolean; onRefresh: () => Promise<void>; onOpenRuns: () => void }) {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [prompt, setPrompt] = useState(() => localStorage.getItem("qasey:draft") ?? "");
-  const [submitting, setSubmitting] = useState(false);
-  const [result, setResult] = useState("");
+  const [conversations, setConversations] = useState<QaseyConversation[]>([]);
+  const [conversation, setConversation] = useState<QaseyConversation | null>(null);
+  const [initialMessages, setInitialMessages] = useState<QaseyUIMessage[]>([]);
+  const [displayMessages, setDisplayMessages] = useState<QaseyUIMessage[]>([]);
+  const [pendingMessage, setPendingMessage] = useState<{ conversationId: string; id: string; text: string } | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [chatBusy, setChatBusy] = useState(false);
   const [error, setError] = useState("");
+  const [liveRun, setLiveRun] = useState<QaseyRun | null>(null);
+  const [sessionReviewPlans, setSessionReviewPlans] = useState<CaseReviewPlanDetail[]>([]);
+  const [conversationListCollapsed, setConversationListCollapsed] = useState(() => localStorage.getItem("qasey:conversation-list-collapsed") === "true");
   const taskAvailable = canRunQaseyTask(catalog);
-  const current = runs.find(run => activeStatuses.includes(run.status)) ?? runs[0];
+  const selectedId = new URLSearchParams(location.search).get("conversation") ?? "";
+  const assistantMessages = displayMessages.filter(message => message.role === "assistant");
+  const latestAssistant = assistantMessages.at(-1);
+  const focusedAssistant = assistantMessages.find(message => message.id === new URLSearchParams(location.search).get("turn"));
+  const runAssistant = focusedAssistant ?? assistantMessages.findLast(message => message.metadata?.linkedRunId || message.parts.some(part => part.type === "data-run")) ?? latestAssistant;
+  const linkedRunId = runAssistant?.metadata?.linkedRunId
+    ?? runAssistant?.parts.find(part => part.type === "data-run")?.data.runId;
+  const linkedRunCount = countLinkedRuns(assistantMessages);
+  const latestFailed = latestAssistant?.parts.some(part => part.type === "data-progress" && part.data.status === "failed") ?? false;
+  const current = liveRun ?? (linkedRunId ? runs.find(run => run.id === linkedRunId) : undefined);
 
   useEffect(() => { localStorage.setItem("qasey:draft", prompt); }, [prompt]);
 
-  const submit = async () => {
+  useEffect(() => { localStorage.setItem("qasey:conversation-list-collapsed", String(conversationListCollapsed)); }, [conversationListCollapsed]);
+
+  const loadConversations = useCallback(async () => {
+    const response = await api.listConversations();
+    setConversations(response.conversations);
+  }, []);
+
+  const loadConversation = useCallback(async (id: string) => {
+    const response = await api.getConversation(id);
+    setConversation(response.conversation);
+    setInitialMessages(response.messages);
+    setDisplayMessages(response.messages);
+  }, []);
+
+  useEffect(() => {
+    void loadConversations().catch(cause => setError(errorMessage(cause)));
+  }, [loadConversations]);
+
+  useEffect(() => {
+    if (!selectedId) {
+      setConversation(null);
+      setInitialMessages([]);
+      setDisplayMessages([]);
+      setPendingMessage(null);
+      setChatBusy(false);
+      setSessionReviewPlans([]);
+      return;
+    }
+    if (conversation?.id === selectedId) return;
+    void loadConversation(selectedId).catch(cause => setError(errorMessage(cause)));
+  }, [conversation?.id, loadConversation, selectedId]);
+
+  const loadSessionReviewPlans = useCallback(async () => {
+    if (!conversation) {
+      setSessionReviewPlans([]);
+      return;
+    }
+    const planIds = [...new Set(displayMessages.flatMap(message => message.parts
+      .filter((part): part is Extract<QaseyUIMessage["parts"][number], { type: "data-case-review" }> => part.type === "data-case-review")
+      .map(part => part.data.planId)))];
+    if (!planIds.length) {
+      setSessionReviewPlans([]);
+      return;
+    }
+    const details = await Promise.all(planIds.map(id => api.getReviewPlan(id)));
+    setSessionReviewPlans(details.filter(detail => detail.plan.conversationId === conversation.id));
+  }, [conversation, displayMessages]);
+
+  useEffect(() => {
+    void loadSessionReviewPlans().catch(cause => setError(errorMessage(cause)));
+  }, [loadSessionReviewPlans]);
+
+  useEffect(() => {
+    if (!linkedRunId) { setLiveRun(null); return; }
+    setLiveRun(runs.find(run => run.id === linkedRunId) ?? null);
+    const controller = new AbortController();
+    void api.streamRun(linkedRunId, setLiveRun, controller.signal)
+      .catch(cause => { if (!(cause instanceof DOMException && cause.name === "AbortError")) setError(errorMessage(cause)); });
+    return () => controller.abort();
+  }, [linkedRunId, runs]);
+
+  const createConversation = async (message: string): Promise<void> => {
+    const created = (await api.createConversation()).conversation;
+    setConversation(created);
+    setInitialMessages([]);
+    setDisplayMessages([]);
+    setPendingMessage({ conversationId: created.id, id: crypto.randomUUID(), text: message });
+    navigate(`${adminPaths["qasey-overview"]}?conversation=${encodeURIComponent(created.id)}`);
+    await loadConversations();
+  };
+
+  const submitFirstMessage = async () => {
     const value = prompt.trim();
     if (!value) { setError("先描述需要分析的需求或问题。"); return; }
     if (!taskAvailable) { setError("当前账户无法运行 Qasey Task Workflow，请联系平台管理员。"); return; }
-    setSubmitting(true); setError(""); setResult("");
+    setCreating(true); setError("");
     try {
-      const response = await api.runQaseyTask(value);
-      setResult(extractAgentText(response));
       setPrompt("");
       localStorage.removeItem("qasey:draft");
+      await createConversation(value);
     } catch (cause) { setError(errorMessage(cause)); }
-    finally { setSubmitting(false); }
+    finally { setCreating(false); }
   };
 
+  const selectConversation = (id: string) => allowReviewNavigation() && navigate(`${adminPaths["qasey-overview"]}?conversation=${encodeURIComponent(id)}`);
+  const newConversation = () => allowReviewNavigation() && navigate(adminPaths["qasey-overview"]);
+  const refreshConversation = useCallback(async () => {
+    if (!conversation) return;
+    await Promise.all([loadConversations(), onRefresh(), loadSessionReviewPlans()]);
+    const response = await api.getConversation(conversation.id);
+    setConversation(response.conversation);
+  }, [conversation, loadConversations, loadSessionReviewPlans, onRefresh]);
+
   return (
-    <>
-      <PageHeading eyebrow="QA 工作台" title="把需求变成可验证的结论" description="描述测试目标，Qasey 会读取相关上下文、识别风险并组织下一步。" />
-      <div className="overview-grid">
-        <section className="surface composer-card">
-          <div className="section-title"><div><span className="section-icon"><MessageSquareText size={18} /></span><div><h2>开始一项 QA 任务</h2><p>可以粘贴 Jira 链接、飞书文档或直接描述问题。</p></div></div><span className={taskAvailable ? "availability" : "availability availability--unavailable"}><i /> {loading ? "正在检查 Qasey" : taskAvailable ? "Qasey Workflow 就绪" : "Qasey Workflow 不可用"}</span></div>
-          <label className="sr-only" htmlFor="qa-prompt">QA 任务描述</label>
-          <textarea id="qa-prompt" value={prompt} onChange={event => { setPrompt(event.target.value); setError(""); }} placeholder="例如：请分析预约改期功能的需求，重点检查跨时区、员工冲突和通知补发…" rows={7} aria-describedby={error ? "prompt-error" : undefined} />
-          <div className="prompt-suggestions">
-            {[
-              "分析需求风险",
-              "设计测试场景",
-              "检查遗漏边界",
-            ].map(item => <button key={item} onClick={() => setPrompt(current => current ? `${current}\n${item}` : item)}>{item}</button>)}
+    <div className="conversation-page">
+      <PageHeading eyebrow="QA 工作台" title="与 Qasey 一起完成测试任务" description="每个任务保留独立上下文，分析、执行和审阅状态会持续回到同一条对话。" />
+      {error && <InlineError message={error} />}
+      <div className={`conversation-workspace${conversationListCollapsed ? " conversation-workspace--list-collapsed" : ""}`}>
+        <aside className={`surface conversation-list${conversationListCollapsed ? " conversation-list--collapsed" : ""}`}>
+          <div className="conversation-list-toolbar">
+            <button className="new-conversation" onClick={newConversation} aria-label="新建 QA 任务" title="新建 QA 任务"><Plus size={16} /><span>新建 QA 任务</span></button>
+            <button className="conversation-list-toggle" type="button" onClick={() => setConversationListCollapsed(value => !value)} aria-label={conversationListCollapsed ? "展开任务会话" : "收起任务会话"} title={conversationListCollapsed ? "展开任务会话" : "收起任务会话"}>{conversationListCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}</button>
           </div>
-          <div className="composer-footer">
-            <span>{prompt.length > 0 ? `已输入 ${prompt.length} 字` : "草稿会自动保存在此设备"}</span>
-            <button className="primary-button" onClick={submit} disabled={submitting || !prompt.trim()}>{submitting ? <LoaderCircle className="spin" size={17} /> : <Sparkles size={17} />}{submitting ? "正在分析…" : "开始分析"}</button>
+          <div className="conversation-list-head"><span>任务会话</span><small>{conversations.length}</small></div>
+          <div className="conversation-list-items">
+            {conversations.map(item => <button key={item.id} className={item.id === conversation?.id ? "active" : ""} onClick={() => selectConversation(item.id)} aria-label={item.title} title={conversationListCollapsed ? item.title : undefined}><MessageSquareText size={16} /><span><strong>{item.title}</strong><small>{formatRelative(item.updatedAt)}</small></span>{item.activeTurnId && <LoaderCircle className="spin-slow" size={14} />}</button>)}
+            {!conversations.length && <p className="conversation-list-empty">还没有任务会话</p>}
           </div>
-          {error && <p className="field-error" id="prompt-error" role="alert"><CircleAlert size={15} />{error}</p>}
-          {result && <div className="analysis-result" aria-live="polite"><div><CheckCircle2 size={17} /><strong>分析已完成</strong></div><p>{result}</p></div>}
+        </aside>
+        <section className="surface conversation-main">
+          <header><div><span className="section-icon"><MessageSquareText size={18} /></span><div><h2>{conversation?.title ?? "新 QA 任务"}</h2><p>{conversation ? "继续补充信息，Qasey 会记住当前任务上下文。" : "描述目标后将创建一条独立任务会话。"}</p></div></div><span className={taskAvailable ? "availability" : "availability availability--unavailable"}><i />{loading ? "检查中" : taskAvailable ? "Qasey 在线" : "不可用"}</span></header>
+          {conversation ? <QaseyChat
+            key={conversation.id}
+            conversation={conversation}
+            initialMessages={initialMessages}
+            prompt={prompt}
+            pendingMessage={pendingMessage?.conversationId === conversation.id ? pendingMessage : null}
+            taskAvailable={taskAvailable}
+            onPromptChange={value => { setPrompt(value); setError(""); }}
+            onPendingMessageSent={() => setPendingMessage(null)}
+            onMessagesChange={setDisplayMessages}
+            onBusyChange={setChatBusy}
+            onError={setError}
+            onFinished={refreshConversation}
+          /> : <>
+            <div className="conversation-messages" aria-live="polite"><div className="conversation-welcome"><Sparkles size={28} /><h3>从一个真实 QA 目标开始</h3><p>可以粘贴需求链接、描述风险，或让 Qasey 设计并执行测试场景。</p></div></div>
+            <PromptInput value={prompt} onValueChange={value => { setPrompt(value); setError(""); }} onSubmit={submitFirstMessage} disabled={creating} />
+          </>}
         </section>
-        <section className="surface evidence-card">
-          <div className="section-title compact"><div><span className="section-icon"><Activity size={18} /></span><div><h2>{current ? "当前证据轨" : "证据轨"}</h2><p>{current ? `${current.repository.owner}/${current.repository.repository}` : "运行开始后在这里追踪"}</p></div></div>{current && <StatusBadge status={current.status} />}</div>
-          {current ? <EvidenceRail run={current} /> : <EmptyRail />}
-          {current && <button className="text-button rail-action" onClick={onOpenRuns}>查看运行详情 <ArrowRight size={15} /></button>}
-        </section>
+        <aside className="surface conversation-context">
+          <div className="section-title compact"><div><span className="section-icon"><Activity size={18} /></span><div><h2>任务状态</h2><p>{current ? `${current.repository.owner}/${current.repository.repository}` : "尚未关联测试运行"}</p></div></div>{current && <StatusBadge status={current.status} />}</div>
+          {current ? <><EvidenceRail run={current} /><button className="text-button rail-action" onClick={onOpenRuns}>查看运行详情 <ArrowRight size={15} /></button></> : <EmptyRail compact={sessionReviewPlans.length > 0} />}
+          <div className="context-divider" />
+          <SessionCaseSummary key={conversation?.id ?? "empty"} plans={sessionReviewPlans} hasConversation={Boolean(conversation)} />
+          <div className="context-divider" />
+          <h3>当前会话</h3><dl><div><dt>消息轮次</dt><dd>{assistantMessages.length}</dd></div><div><dt>关联运行</dt><dd>{linkedRunCount}</dd></div><div><dt>状态</dt><dd>{chatBusy || conversation?.activeTurnId ? "处理中" : latestFailed ? "需要重试" : latestAssistant ? "可继续对话" : "等待开始"}</dd></div></dl>
+        </aside>
       </div>
-      <section className="surface recent-section">
-        <div className="list-heading"><div><h2>最近运行</h2><p>自动测试、修复与审阅进度</p></div><div><button className="icon-button bordered" onClick={() => void onRefresh()} disabled={loading} aria-label="刷新运行"><RefreshCw className={loading ? "spin" : ""} size={17} /></button><button className="text-button" onClick={onOpenRuns}>查看全部 <ArrowRight size={15} /></button></div></div>
-        <RunTable runs={runs.slice(0, 5)} loading={loading} />
-      </section>
-    </>
+    </div>
   );
+}
+
+function QaseyChat({ conversation, initialMessages, prompt, pendingMessage, taskAvailable, onPromptChange, onPendingMessageSent, onMessagesChange, onBusyChange, onError, onFinished }: {
+  conversation: QaseyConversation;
+  initialMessages: QaseyUIMessage[];
+  prompt: string;
+  pendingMessage: { conversationId: string; id: string; text: string } | null;
+  taskAvailable: boolean;
+  onPromptChange: (value: string) => void;
+  onPendingMessageSent: () => void;
+  onMessagesChange: (messages: QaseyUIMessage[]) => void;
+  onBusyChange: (busy: boolean) => void;
+  onError: (message: string) => void;
+  onFinished: () => Promise<void>;
+}) {
+  const chatLocation = useLocation();
+  const focusedTurnId = new URLSearchParams(chatLocation.search).get("turn");
+  const [messages, setMessages] = useState(initialMessages);
+  const [participants, setParticipants] = useState<ConversationParticipant[]>([{ agentId: MAIN_AGENT_ID, name: "Qasey", description: "主 Agent", introducedBy: "system", joinedAt: conversation.createdAt }]);
+  const [recipients, setRecipients] = useState<string[]>([]);
+  const [targetRunId, setTargetRunId] = useState<string>(() => new URLSearchParams(location.search).get("run") ?? "");
+  const associatedRuns = [...new Set(messages.flatMap(m => m.metadata?.linkedRunId ? [m.metadata.linkedRunId] : []))];
+  const [sending, setSending] = useState(false);
+  const sentPendingId = useRef("");
+  const retryRequest = useRef<{ signature: string; id: string } | null>(null);
+  const cursor = useRef(0);
+  const callbacks = useRef({ onMessagesChange, onError, onFinished });
+  useEffect(() => { callbacks.current = { onMessagesChange, onError, onFinished }; }, [onMessagesChange, onError, onFinished]);
+  const busy = messages.some(m => m.metadata?.collaborationStatus === "queued" || m.metadata?.collaborationStatus === "running");
+  useEffect(() => { onBusyChange(busy); }, [busy, onBusyChange]);
+  useEffect(() => {
+    const controller = new AbortController();
+    void api.streamConversation(conversation.id, cursor.current, snapshot => {
+      cursor.current = snapshot.revision;
+      setMessages(snapshot.messages); setParticipants(snapshot.participants);
+      callbacks.current.onMessagesChange(snapshot.messages);
+    }, controller.signal).catch(cause => {
+      if (!controller.signal.aborted) callbacks.current.onError(errorMessage(cause));
+    });
+    return () => controller.abort();
+  }, [conversation.id]);
+  const send = useCallback(async (id: string, text: string, selectedRecipients: string[]) => {
+    setSending(true);
+    try {
+      await api.sendCollaborationMessage(conversation.id, { message: text, clientMessageId: id,
+        recipientAgentIds: selectedRecipients.length ? selectedRecipients : [MAIN_AGENT_ID], ...(targetRunId ? { targetRunId } : {}) });
+      await callbacks.current.onFinished();
+    } catch (cause) { callbacks.current.onError(errorMessage(cause)); throw cause; }
+    finally { setSending(false); }
+  }, [conversation.id, targetRunId]);
+  useEffect(() => {
+    if (!pendingMessage || sentPendingId.current === pendingMessage.id) return;
+    sentPendingId.current = pendingMessage.id;
+    onPendingMessageSent();
+    void send(pendingMessage.id, pendingMessage.text, []).catch(() => onPromptChange(pendingMessage.text));
+  }, [onPendingMessageSent, onPromptChange, pendingMessage, send]);
+  const submit = async () => {
+    const value = prompt.trim();
+    if (!value || !taskAvailable) return;
+    onError("");
+    const signature = JSON.stringify([value, recipients, targetRunId]);
+    const request = retryRequest.current?.signature === signature ? retryRequest.current : { signature, id: crypto.randomUUID() };
+    retryRequest.current = request;
+    try { await send(request.id, value, recipients); retryRequest.current = null; onPromptChange(""); setRecipients([]); localStorage.removeItem("qasey:draft"); } catch { /* Keep the user's draft on failure. */ }
+  };
+  const generateE2E = async (planId: string, caseVersionIds: string[]) => {
+    await api.generateE2E(conversation.id, planId, caseVersionIds, crypto.randomUUID());
+    await onFinished();
+  };
+  const mention = (agentId: string, runId?: string) => {
+    if (runId) setTargetRunId(runId);
+    if (participants.some(p => p.agentId === agentId)) setRecipients(current => [...new Set([...current, agentId])]);
+    document.getElementById("qa-prompt")?.focus();
+  };
+  const focusedMessage = messages.find(message => message.role === "assistant" && message.id === focusedTurnId);
+  const focusedContext = focusedMessage?.metadata?.e2eContext;
+  return <>
+    {focusedContext && <E2EContextBanner context={focusedContext} />}
+    {focusedTurnId && !focusedMessage && !busy && <p className="review-feedback" role="status">未找到指定的任务消息，当前仍可查看原会话。</p>}
+    <Conversation aria-live="polite" initial={focusedTurnId ? false : "smooth"}>
+      <ConversationContent>
+        {!messages.length && <div className="conversation-welcome"><Sparkles size={28} /><h3>从一个真实 QA 目标开始</h3><p>可以粘贴需求链接、描述风险，或让 Qasey 设计并执行测试场景。</p></div>}
+        {messages.map((message, index) => {
+          const onRetry = message.role === "assistant" ? () => {
+            const previous = messages.slice(0, index).findLast(item => item.role === "user");
+            const text = previous ? uiMessageText(previous) : "";
+            onPromptChange(text);
+            document.getElementById("qa-prompt")?.focus();
+          } : undefined;
+          return <FocusedE2ETurn key={message.id} id={message.id} focused={message.role === "assistant" && message.id === focusedTurnId}><QaseyChatMessage message={message} onMention={mention} showRunCard={!messages.slice(index + 1).some(m => m.metadata?.messageKind === "execution" && m.metadata.linkedRunId === message.metadata?.linkedRunId)} streaming={message.metadata?.collaborationStatus === "running"} onGenerateE2E={generateE2E} onReviewChanged={onFinished} {...(onRetry ? { onRetry } : {})} /></FocusedE2ETurn>;
+        })}
+      </ConversationContent>
+      <ConversationScrollButton />
+    </Conversation>
+    {associatedRuns.length > 0 && <label className="conversation-target">关联 E2E 任务 <select aria-label="关联 E2E 任务" value={targetRunId} onChange={event => setTargetRunId(event.target.value)}><option value="">未指定（有歧义时由 Agent 询问）</option>{associatedRuns.map(id => <option key={id} value={id}>{id}</option>)}</select></label>}
+    <CollaborationComposer value={prompt} onChange={onPromptChange} participants={participants} recipients={recipients} onRecipients={setRecipients} onSubmit={submit} disabled={sending} />
+  </>;
+}
+
+function QaseyChatMessage({ message, streaming, onMention, showRunCard, onRetry, onGenerateE2E, onReviewChanged }: { message: QaseyUIMessage; streaming: boolean; onMention?: (id: string, runId?: string) => void; showRunCard?: boolean; onRetry?: () => void; onGenerateE2E: (planId: string, caseVersionIds: string[]) => Promise<void>; onReviewChanged: () => Promise<void> }) {
+  const [copied, setCopied] = useState(false);
+  const text = uiMessageText(message);
+  if (message.role === "user") return <article className="conversation-turn"><Message from="user"><Avatar label="我" /><MessageContent><span>你{message.metadata?.recipientAgentIds?.length ? ` → ${message.metadata.recipientAgentIds.map(id => id === E2E_AGENT_ID ? "@E2E Agent" : "@Qasey").join("、")}` : ""}</span><p>{text}</p></MessageContent></Message></article>;
+  const progress = message.parts.filter((part): part is Extract<QaseyUIMessage["parts"][number], { type: "data-progress" }> => part.type === "data-progress");
+  const tools = message.parts.filter(isDynamicToolUIPart);
+  const reviews = message.parts.filter((part): part is Extract<QaseyUIMessage["parts"][number], { type: "data-case-review" }> => part.type === "data-case-review");
+  const failed = progress.findLast(part => part.data.status === "failed");
+  const copy = async () => {
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1_500);
+  };
+  return <article className="conversation-turn conversation-turn--assistant"><Message from="assistant"><span className="assistant-avatar"><Sparkles size={16} /></span><MessageContent><div className="agent-message-heading"><button type="button" onClick={() => onMention?.(message.metadata?.authorAgentId ?? MAIN_AGENT_ID, message.metadata?.linkedRunId)}>{message.metadata?.authorAgentId === E2E_AGENT_ID ? "E2E Agent" : "Qasey"}</button>{message.metadata?.messageKind === "execution" && <span>执行状态</span>}{message.metadata?.messageKind === "handoff" && <span>协作交接</span>}{message.metadata?.messageKind !== "execution" && message.metadata?.collaborationStatus && <span>{({ queued: "等待回复", running: "正在处理", completed: "已回复", failed: "处理失败" })[message.metadata.collaborationStatus]}</span>}</div>{showRunCard && message.metadata?.linkedRunId && message.metadata.messageKind === "execution" && <ConversationRunCard runId={message.metadata.linkedRunId} />}{progress.length > 0 && <QaseyProgressPart progress={progress.map(part => part.data)} running={streaming} />}{tools.length > 0 && <QaseyToolParts tools={tools} />}{reviews.map(review => <CaseReviewPanel key={review.data.planId} planId={review.data.planId} compact onGenerate={(_, ids) => onGenerateE2E(review.data.planId, ids)} onChanged={onReviewChanged} />)}{text && <MessageResponse mode={streaming ? "streaming" : "static"}>{text}</MessageResponse>}{streaming && !text && <p className="assistant-pending"><LoaderCircle className="spin" size={15} />正在整理回复…</p>}{failed && <div className="turn-error"><span><CircleAlert size={15} />{failed.data.detail}</span>{onRetry && <button type="button" onClick={onRetry}><RotateCcw size={14} />重试这条消息</button>}</div>}{text && <div className="message-actions"><button className="message-action" type="button" aria-label={copied ? "已复制" : "复制回复"} title={copied ? "已复制" : "复制回复"} onClick={() => void copy()}>{copied ? <Check size={14} /> : <Copy size={14} />}</button></div>}</MessageContent></Message></article>;
+}
+
+function ConversationRunCard({ runId }: { runId: string }) {
+  const [run, setRun] = useState<QaseyRun | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [error, setError] = useState("");
+  const [cancelling, setCancelling] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    void api.streamRun(runId, setRun, controller.signal).catch(cause => { if (!controller.signal.aborted) setError(errorMessage(cause)); });
+    return () => controller.abort();
+  }, [runId]);
+  const cancel = async () => {
+    setCancelling(true);
+    try { setRun(await api.cancelRun(runId)); setError(""); }
+    catch (cause) { setError(errorMessage(cause)); }
+    finally { setCancelling(false); }
+  };
+  return <>{run && <div className="conversation-run-card"><StatusBadge status={run.status} /><span>{run.error ?? `${run.artifacts.length} 项执行证据`}</span>{activeStatuses.includes(run.status) && <button type="button" disabled={cancelling} onClick={() => void cancel()}>停止执行</button>}<button type="button" onClick={() => setExpanded(true)}>查看运行与证据</button>{run.status === "awaiting_qa" && <a href={adminPaths["qasey-review"]}>审核结果</a>}{run.pullRequestUrl && <a href={run.pullRequestUrl} target="_blank" rel="noreferrer">查看 PR</a>}</div>}{error && <p role="alert">{error}</p>}{expanded && run && <RunDetailDialog run={run} onClose={() => setExpanded(false)} />}</>;
+}
+
+function QaseyProgressPart({ progress, running }: { progress: QaseyProgressData[]; running: boolean }) {
+  const latest = progress.at(-1);
+  return <details className="conversation-progress" open={running || latest?.status === "failed"}><summary>{running ? <LoaderCircle className="spin-slow" size={14} /> : latest?.status === "failed" ? <CircleAlert size={14} /> : <CheckCircle2 size={14} />}{latest?.title ?? "处理进度"}</summary>{progress.map(item => <p key={item.sequence}><strong>{item.title}</strong><span>{item.detail}</span></p>)}</details>;
+}
+
+function QaseyToolParts({ tools }: { tools: DynamicToolUIPart[] }) {
+  const views = tools.map(qaseyToolView);
+  const runningCount = views.filter(view => view.tone === "running").length;
+  const failedCount = views.filter(view => view.tone === "failed").length;
+  const completedCount = tools.length - runningCount - failedCount;
+  const activeToolIndex = views.findLastIndex(view => view.tone === "running");
+  const activeTool = activeToolIndex >= 0 ? tools[activeToolIndex] : undefined;
+  const headline = activeTool
+    ? `正在执行：${activeTool.title ?? "内部工具"}`
+    : failedCount > 0
+      ? `执行完成，${failedCount} 项需要注意`
+      : "本轮执行已完成";
+  const groups = groupConsecutiveTools(tools);
+  return <details className={`conversation-tools conversation-tools--${runningCount > 0 ? "running" : failedCount > 0 ? "failed" : "completed"}`}>
+    <summary aria-label={`${headline}，共 ${tools.length} 次工具调用`}>
+      <span className="conversation-tools-icon">{runningCount > 0 ? <LoaderCircle className="spin-slow" size={14} /> : failedCount > 0 ? <CircleAlert size={14} /> : <Wrench size={14} />}</span>
+      <span className="conversation-tools-heading"><strong>执行记录</strong><small>{headline}</small></span>
+      <span className="conversation-tools-summary">{tools.length} 次{completedCount > 0 && ` · ${completedCount} 完成`}{failedCount > 0 && ` · ${failedCount} 失败`}</span>
+      <ChevronRight className="conversation-tools-chevron" size={14} />
+    </summary>
+    <div>{groups.map(group => <QaseyToolPart key={group[0]?.toolCallId} tools={group} />)}</div>
+  </details>;
+}
+
+function groupConsecutiveTools(tools: DynamicToolUIPart[]): DynamicToolUIPart[][] {
+  const groups: DynamicToolUIPart[][] = [];
+  for (const tool of tools) {
+    const current = groups.at(-1);
+    const previous = current?.at(-1);
+    if (current && previous?.toolName === tool.toolName && previous.title === tool.title) current.push(tool);
+    else groups.push([tool]);
+  }
+  return groups;
+}
+
+function QaseyToolPart({ tools }: { tools: DynamicToolUIPart[] }) {
+  const views = tools.map(qaseyToolView);
+  const runningIndex = views.findLastIndex(view => view.tone === "running");
+  const failedIndex = views.findLastIndex(view => view.tone === "failed");
+  const representativeIndex = runningIndex >= 0 ? runningIndex : failedIndex >= 0 ? failedIndex : views.length - 1;
+  const tool = tools[representativeIndex]!;
+  const view = views[representativeIndex]!;
+  const groupedSummary = view.tone === "running"
+    ? `正在执行第 ${tools.length} 次，展开查看每次进度。`
+    : view.tone === "failed"
+      ? `${views.filter(item => item.tone === "failed").length} 次执行失败，展开查看每次结果。`
+      : `已连续完成 ${tools.length} 次，展开查看每次结果。`;
+  const row = <>
+    <div className="conversation-tool-icon">{toolStateIcon(view.tone)}</div>
+    <div className="conversation-tool-content"><div><strong>{tool.title ?? "执行内部工具"}{tools.length > 1 && <em>×{tools.length}</em>}</strong><code>{tool.toolName}</code></div><p>{tools.length > 1 ? groupedSummary : view.summary}</p></div>
+    <span className="conversation-tool-state">{view.status}</span>
+    {tools.length > 1 && <ChevronRight className="conversation-tool-group-chevron" size={13} />}
+  </>;
+  if (tools.length > 1) return <details className={`conversation-tool-group conversation-tool--${view.tone}`}>
+    <summary className="conversation-tool">{row}</summary>
+    <div>{tools.map(item => <QaseyToolPart key={item.toolCallId} tools={[item]} />)}</div>
+  </details>;
+  return <article className={`conversation-tool conversation-tool--${view.tone}`}>{row}</article>;
+}
+
+function qaseyToolView(tool: DynamicToolUIPart): { tone: "running" | "completed" | "failed"; status: string; summary: string } {
+  const input = QaseyPublicToolInputSchema.safeParse(tool.input);
+  const inputSummary = input.success ? input.data.summary : "工具正在执行。";
+  if (tool.state === "output-error") return { tone: "failed", status: "失败", summary: tool.errorText };
+  if (tool.state === "output-denied") return { tone: "failed", status: "未执行", summary: "工具调用未获批准。" };
+  if (tool.state === "output-available") {
+    const output = QaseyPublicToolOutputSchema.safeParse(tool.output);
+    return { tone: "completed", status: "完成", summary: output.success ? output.data.summary : "工具执行完成。" };
+  }
+  return { tone: "running", status: "执行中", summary: inputSummary };
+}
+
+function toolStateIcon(tone: "running" | "completed" | "failed") {
+  if (tone === "failed") return <CircleAlert size={14} />;
+  if (tone === "completed") return <Check size={14} />;
+  return <LoaderCircle className="spin-slow" size={14} />;
+}
+
+function reconnectTargetFromMessages(conversation: QaseyConversation, messages: QaseyUIMessage[]): QaseyReconnectTarget | undefined {
+  if (!conversation.activeTurnId) return undefined;
+  const assistant = messages.findLast(message => message.role === "assistant" && message.id === conversation.activeTurnId);
+  const cursor = assistant?.parts.findLast(part => part.type === "data-cursor");
+  return { turnId: conversation.activeTurnId, after: cursor?.data.sequence ?? assistant?.metadata?.latestSequence ?? 0, ...(assistant ? { message: assistant } : {}) };
+}
+
+function uiMessageText(message: QaseyUIMessage): string {
+  let text = "";
+  for (const part of message.parts) if (part.type === "text") text += part.text;
+  return text;
+}
+
+function countLinkedRuns(messages: QaseyUIMessage[]): number {
+  const runIds = new Set<string>();
+  for (const message of messages) {
+    const runId = message.metadata?.linkedRunId ?? message.parts.find(part => part.type === "data-run")?.data.runId;
+    if (runId) runIds.add(runId);
+  }
+  return runIds.size;
 }
 
 type CaseHubDetail = { case: CaseHubCase; versions: CaseHubCaseVersion[]; changeSets: CaseHubChangeSet[]; results: CaseHubResult[] };
 
 function CaseHubView() {
+  const hubLocation = useLocation();
+  const requestedPlanId = new URLSearchParams(hubLocation.search).get("plan");
   const [cases, setCases] = useState<CaseHubCase[]>([]);
   const [changeSets, setChangeSets] = useState<CaseHubChangeSet[]>([]);
+  const [reviewPlans, setReviewPlans] = useState<CaseReviewPlanDetail[]>([]);
   const [selected, setSelected] = useState<CaseHubDetail | null>(null);
   const [detailLoadingId, setDetailLoadingId] = useState("");
   const [query, setQuery] = useState("");
@@ -630,12 +1007,18 @@ function CaseHubView() {
   const load = useCallback(async () => {
     setError("");
     try {
-      const [caseResponse, changeSetResponse] = await Promise.all([api.listCases(query), api.listChangeSets()]);
+      const [caseResponse, changeSetResponse, reviewResponse] = await Promise.all([api.listCases(query), api.listChangeSets(), api.listReviewPlans()]);
       setCases(caseResponse.cases);
       setChangeSets(changeSetResponse.changeSets);
+      setReviewPlans(reviewResponse.plans);
     } catch (cause) { setError(errorMessage(cause)); }
   }, [query]);
   useEffect(() => { void load(); }, [load]);
+
+  const visibleReviewPlans = useMemo(() => reviewPlans.filter(detail => detail.plan.status !== "cancelled" && (detail.plan.id === requestedPlanId || detail.items.some(item =>
+    item.status === "pending"
+    || (item.status === "approved" && item.publishedCaseVersionId && item.automationStatus !== "verified"),
+  ))), [reviewPlans, requestedPlanId]);
 
   const open = async (caseId: string) => {
     setDetailLoadingId(caseId); setError("");
@@ -645,15 +1028,16 @@ function CaseHubView() {
   };
 
   return <>
-    <PageHeading eyebrow="Case Hub · 用例资产" title="Case Hub" description="查看每条 Case 的生效版本、历史提案、验收步骤和交付状态。人工结论仍在「待我审阅」完成。" action={<button className="secondary-button" onClick={() => void load()}><RefreshCw size={16} />刷新</button>} />
+    <PageHeading eyebrow="Case Hub · 文字用例与自动化" title="Case Hub" description="文字审核通过后立即成为正式用例；E2E 是独立交付，可随后逐条或批量生成并审核证据。" action={<button className="secondary-button" onClick={() => void load()}><RefreshCw size={16} />刷新</button>} />
     {error && <InlineError message={error} />}
+    {visibleReviewPlans.length > 0 && <section className="case-review-hub-section"><div className="section-title"><div><span className="section-icon"><ClipboardCheck size={18} /></span><div><h2>用例待办</h2><p>审核结果与聊天同步。先确认文字用例，再生成 E2E；生成失败不会影响已批准的文字版本。</p></div></div></div>{visibleReviewPlans.map(detail => <CaseReviewPanel key={detail.plan.id} planId={detail.plan.id} onChanged={load} />)}</section>}
     <section className="surface case-library">
       <div className="case-library-head">
         <div><span className="section-icon"><Library size={18} /></span><div><h2>用例库</h2><p>{cases.length} 条符合条件的 QASEY Case</p></div></div>
         <label className="case-search" htmlFor="case-hub-search"><Search size={17} /><span className="sr-only">搜索用例</span><input id="case-hub-search" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索 Case ID、标题或 Suite" /></label>
       </div>
-      <div className="case-table-scroll"><table className="case-table"><caption className="sr-only">Case Hub 用例</caption><thead><tr><th>Case</th><th>Suite</th><th>当前版本</th><th>最新进度</th><th>最近更新</th><th><span className="sr-only">操作</span></th></tr></thead><tbody>
-        {cases.map(testCase => { const latestChangeSet = latestChangeSetForCase(testCase, changeSets); return <tr key={testCase.id}><td><button className="case-open" onClick={() => void open(testCase.id)}><span className="run-icon"><TestTube2 size={16} /></span><span><strong>{testCase.id}</strong><small>{testCase.title}</small></span></button></td><td>{testCase.suitePath}</td><td>{testCase.activeVersionId ? <span className="status-badge success">已生效</span> : <span className="status-badge">暂无</span>}</td><td>{latestChangeSet ? <ChangeSetBadge status={latestChangeSet.status} /> : <span className="status-badge">无交付记录</span>}</td><td className="updated">{formatRelative(testCase.updatedAt)}</td><td><button className="icon-button case-open-arrow" aria-label={`查看 ${testCase.id} 详情`} disabled={detailLoadingId === testCase.id} onClick={() => void open(testCase.id)}>{detailLoadingId === testCase.id ? <LoaderCircle className="spin" size={16} /> : <ChevronRight size={17} />}</button></td></tr>; })}
+      <div className="case-table-scroll"><table className="case-table"><caption className="sr-only">Case Hub 用例</caption><thead><tr><th>Case</th><th>Suite</th><th>当前版本</th><th>正式交付</th><th>最近更新</th><th><span className="sr-only">操作</span></th></tr></thead><tbody>
+        {cases.map(testCase => { const latestChangeSet = latestChangeSetForCase(testCase, changeSets); return <tr key={testCase.id}><td><button className="case-open" onClick={() => void open(testCase.id)}><span className="run-icon"><TestTube2 size={16} /></span><span><strong>{testCase.id}</strong><small>{testCase.title}</small></span></button></td><td>{testCase.suitePath}</td><td>{testCase.activeVersionId ? <span className="status-badge success">已生效</span> : <span className="status-badge">暂无</span>}</td><td>{testCase.systemTags?.includes("e2e") ? <span className="status-badge success">e2e</span> : testCase.automationStatus === "stale" ? <span className="status-badge warning">E2E 待更新</span> : latestChangeSet ? <ChangeSetBadge status={latestChangeSet.status} /> : <span className="status-badge">纯文字</span>}</td><td className="updated">{formatRelative(testCase.updatedAt)}</td><td><button className="icon-button case-open-arrow" aria-label={`查看 ${testCase.id} 详情`} disabled={detailLoadingId === testCase.id} onClick={() => void open(testCase.id)}>{detailLoadingId === testCase.id ? <LoaderCircle className="spin" size={16} /> : <ChevronRight size={17} />}</button></td></tr>; })}
         {cases.length === 0 && <tr><td colSpan={6}><div className="case-empty"><Library size={23} /><strong>{query ? "没有匹配的用例" : "Case Hub 还是空的"}</strong><span>{query ? "换一个 Case ID、标题或 Suite 试试。" : "通过需求分析创建的用例会出现在这里。"}</span></div></td></tr>}
       </tbody></table></div>
     </section>
@@ -681,10 +1065,10 @@ function CaseDetailDialog({ detail, onClose }: { detail: CaseHubDetail; onClose:
         <aside className="version-ledger" aria-label="Case 版本"><div><span>版本档案</span><small>最新在前</small></div>{[...detail.versions].reverse().map(item => { const itemChangeSet = detail.changeSets.find(candidate => candidate.caseVersionIds.includes(item.id)); return <button className={item.id === version?.id ? "active" : ""} key={item.id} onClick={() => setVersionId(item.id)}><span><strong>v{item.version}</strong><small>{formatDate(item.createdAt)}</small></span><VersionBadge version={item} changeSet={itemChangeSet} /></button>; })}</aside>
         {version ? <main className="case-version-sheet">
           <div className="case-version-title"><div className="case-version-mark"><span>V</span><strong>{version.version}</strong></div><div><div className="case-version-badges"><span>{version.priority}</span><span>{version.target === "web" ? "Web" : version.target}</span><VersionBadge version={version} changeSet={changeSet} /></div><h3>{version.title}</h3><p>{version.description || "这个版本没有补充说明。"}</p></div></div>
-          <section className="case-delivery-strip"><div><span>自动化文件</span><code>{version.automationPath}</code></div><div><span>Change Set</span><code>{changeSet ? compactId(changeSet.id) : "未关联"}</code></div><div><span>交付</span>{changeSet?.pullRequestUrl ? <a href={changeSet.pullRequestUrl} target="_blank" rel="noreferrer"><GitBranch size={14} />打开 Pull Request</a> : <strong>{changeSet ? changeSetStatusLabel(changeSet.status) : "暂无"}</strong>}</div></section>
+          <section className="case-delivery-strip"><div><span>自动化文件</span><code>{changeSet?.automationPaths?.[version.caseId] ?? version.automationPath ?? "由 E2E Author 按仓库策略生成"}</code></div><div><span>Change Set</span><code>{changeSet ? compactId(changeSet.id) : "未关联"}</code></div><div><span>自动化</span>{changeSet?.pullRequestUrl ? <a href={changeSet.pullRequestUrl} target="_blank" rel="noreferrer"><GitBranch size={14} />打开 Pull Request</a> : version.systemTags?.includes("e2e") ? <strong>e2e</strong> : <strong>{version.automationStatus === "stale" ? "E2E 待更新" : version.automationStatus === "none" ? "纯文字" : version.automationStatus ?? "纯文字"}</strong>}</div></section>
           <section className="case-archive-section"><div className="case-archive-heading"><h4>前置条件</h4><span>{version.preconditions.length}</span></div>{version.preconditions.length ? <ul className="case-preconditions">{version.preconditions.map(item => <li key={item}><CheckCircle2 size={14} />{item}</li>)}</ul> : <p className="case-archive-empty">无额外前置条件</p>}</section>
           <section className="case-archive-section"><div className="case-archive-heading"><h4>验收步骤</h4><span>{version.steps.length}</span></div><ol className="case-archive-steps">{version.steps.map((step, index) => <li key={`${version.id}:${index}`}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{step.action}</strong><p>{step.expected.join("；")}</p></div></li>)}</ol></section>
-          <section className="case-archive-section case-archive-meta"><div><h4>标签</h4><p>{version.tags.length ? version.tags.map(tag => <span key={tag}>{tag}</span>) : "无标签"}</p></div><div><h4>内容指纹</h4><code>{compactHash(version.contentHash)}</code></div></section>
+          <section className="case-archive-section case-archive-meta"><div><h4>标签</h4><p>{[...version.tags, ...(version.systemTags ?? [])].length ? [...version.tags, ...(version.systemTags ?? [])].map((tag, index) => <span key={`${tag}:${index}`}>{tag}</span>) : "无标签"}</p></div><div><h4>内容指纹</h4><code>{compactHash(version.contentHash)}</code></div></section>
           <section className="case-archive-section"><div className="case-archive-heading"><h4>QA 验收证据</h4>{result && <span>{reviewStatusLabel(result.reviewStatus)}</span>}</div>{result ? <QaEvidenceViewer result={result} /> : <p className="case-archive-empty">这个版本尚未产生 E2E 视频或 Playwright Trace。</p>}</section>
         </main> : <main className="case-version-sheet case-version-sheet--empty"><FileSearch size={24} /><strong>没有可查看的版本</strong></main>}
       </div>
@@ -699,9 +1083,12 @@ function QaReviewView({ onReviewQueueChanged }: { onReviewQueueChanged: () => Pr
   const selectedId = useRef<string | undefined>(undefined);
   const [activeVersionId, setActiveVersionId] = useState("");
   const [feedback, setFeedback] = useState<Record<string, string>>({});
+  const [busyResultId, setBusyResultId] = useState("");
+  const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const pendingChangeSets = useMemo(() => changeSets.filter(changeSet => changeSet.status === "awaiting_review"), [changeSets]);
+  const reviewChangeSets = useMemo(() => changeSets.filter(changeSet => ["awaiting_review", "revising", "verifying", "final_verifying"].includes(changeSet.status)), [changeSets]);
+  const pendingCount = useMemo(() => reviewChangeSets.filter(changeSet => changeSet.status === "awaiting_review").length, [reviewChangeSets]);
 
   const open = useCallback(async (id: string) => {
     setError("");
@@ -721,8 +1108,8 @@ function QaReviewView({ onReviewQueueChanged }: { onReviewQueueChanged: () => Pr
     try {
       const response = await api.listChangeSets();
       setChangeSets(response.changeSets);
-      const pending = response.changeSets.filter(changeSet => changeSet.status === "awaiting_review");
-      const nextId = pending.some(changeSet => changeSet.id === selectedId.current) ? selectedId.current : pending[0]?.id;
+      const inReview = response.changeSets.filter(changeSet => ["awaiting_review", "revising", "verifying", "final_verifying"].includes(changeSet.status));
+      const nextId = inReview.some(changeSet => changeSet.id === selectedId.current) ? selectedId.current : inReview[0]?.id;
       if (nextId) await open(nextId); else { selectedId.current = undefined; setSelected(null); setActiveVersionId(""); }
     } catch (cause) { setError(errorMessage(cause)); }
     finally { setLoading(false); }
@@ -730,47 +1117,133 @@ function QaReviewView({ onReviewQueueChanged }: { onReviewQueueChanged: () => Pr
 
   useEffect(() => { void load(); }, [load]);
 
+  useEffect(() => {
+    if (!selected || !["revising", "verifying", "final_verifying"].includes(selected.changeSet.status)) return;
+    const timer = window.setInterval(() => {
+      void api.getChangeSet(selected.changeSet.id).then(detail => {
+        setSelected(detail);
+        setChangeSets(current => current.map(changeSet => changeSet.id === detail.changeSet.id ? detail.changeSet : changeSet));
+      }).catch(cause => setError(errorMessage(cause)));
+    }, 3_000);
+    return () => window.clearInterval(timer);
+  }, [selected?.changeSet.id, selected?.changeSet.status]);
+
   const review = async (result: CaseHubResult, verdict: "approve" | "request_changes" | "product_bug" | "environment_issue") => {
     const note = feedback[result.id]?.trim();
     if (verdict !== "approve" && !note) { setError("非批准结论需要填写反馈。"); return; }
     if (verdict === "approve" && !hasQaEvidence(result)) { setError("没有 E2E 视频或 Playwright Trace，不能批准这个 Case。"); return; }
-    try { await api.reviewCaseResult(result.id, verdict, note); await Promise.all([load(), onReviewQueueChanged()]); }
+    if (verdict === "approve" && result.executionStatus !== "passed") { setError("E2E 尚未完整通过，不能批准。请要求 Agent 修复，或标记产品/环境问题。"); return; }
+    setBusyResultId(result.id); setError(""); setNotice("");
+    try {
+      await api.reviewCaseResult(result.id, verdict, note);
+      if (verdict === "request_changes") setNotice("已发回 Agent。修复与复验正在后台进行，新的证据生成后会自动回到这里。");
+      await Promise.all([load(), onReviewQueueChanged()]);
+    }
     catch (cause) { setError(errorMessage(cause)); }
+    finally { setBusyResultId(""); }
   };
   const latest = selected ? latestCaseResults(selected.results) : [];
   const activeVersion = selected?.versions.find(version => version.id === activeVersionId) ?? selected?.versions[0];
   const activeResult = activeVersion ? latest.find(result => result.caseVersionId === activeVersion.id) : undefined;
+  const activeAutomationPath = activeVersion
+    ? selected?.changeSet.automationPaths?.[activeVersion.caseId] ?? activeVersion.automationPath ?? "由 E2E Author 按仓库策略生成"
+    : "";
   const approvedCount = latest.filter(result => result.reviewStatus === "approved").length;
 
   return <>
-    <PageHeading eyebrow="QA Review · 人工验收" title="待我审阅" description="一次只判断一个 Case。有效证据只有可播放的 E2E 视频或可交互的 Playwright Trace。" action={<button className="secondary-button" onClick={() => void Promise.all([load(), onReviewQueueChanged()])} disabled={loading}><RefreshCw className={loading ? "spin" : ""} size={16} />刷新</button>} />
+    <PageHeading eyebrow="E2E Evidence Review · 人工验收" title="E2E 证据审核" description="这是文字用例审核之后的独立质量门。一次只判断一个 Case，有效证据只有可播放的 E2E 视频或可交互的 Playwright Trace。" action={<button className="secondary-button" onClick={() => void Promise.all([load(), onReviewQueueChanged()])} disabled={loading}><RefreshCw className={loading ? "spin" : ""} size={16} />刷新</button>} />
     {error && <InlineError message={error} />}
+    {notice && <div className="success-notice" role="status"><CheckCircle2 size={17} />{notice}</div>}
     <div className="review-workbench">
-      <aside className="surface review-queue"><div className="review-queue-head"><span>待审队列</span><strong>{pendingChangeSets.length}</strong></div>{pendingChangeSets.map(changeSet => <button className={selected?.changeSet.id === changeSet.id ? "active" : ""} key={changeSet.id} onClick={() => void open(changeSet.id)}><span className="app-glyph qasey"><ClipboardCheck size={15} /></span><div><strong>{changeSet.requirement.goal}</strong><small>{changeSet.caseVersionIds.length} Cases · {formatRelative(changeSet.updatedAt)}</small></div><ChevronRight size={16} /></button>)}{!loading && pendingChangeSets.length === 0 && <div className="review-queue-empty"><CheckCircle2 size={22} /><strong>已全部审完</strong><span>新的验证结果会进入这里。</span></div>}</aside>
+      <aside className="surface review-queue"><div className="review-queue-head"><span>审核与复验</span><strong>{pendingCount}</strong></div>{reviewChangeSets.map(changeSet => { const processing = changeSet.status !== "awaiting_review"; return <button className={selected?.changeSet.id === changeSet.id ? "active" : ""} key={changeSet.id} onClick={() => void open(changeSet.id)}><span className="app-glyph qasey">{processing ? <LoaderCircle className="spin" size={15} /> : <ClipboardCheck size={15} />}</span><div><strong>{changeSet.requirement.goal}</strong><small>{processing ? changeSetStatusLabel(changeSet.status) : `${changeSet.caseVersionIds.length} Cases · 等待判断`}</small></div><ChevronRight size={16} /></button>; })}{!loading && reviewChangeSets.length === 0 && <div className="review-queue-empty"><CheckCircle2 size={22} /><strong>已全部审完</strong><span>新的验证结果会进入这里。</span></div>}</aside>
       {selected && activeVersion ? <main className="surface review-focus">
         <header className="review-focus-head"><div><p className="eyebrow">{selected.changeSet.requirement.goal}</p><h2>{activeVersion.caseId} · {activeVersion.title}</h2><p>{selected.changeSet.requirement.requirementSummary}</p></div><div className="review-progress"><strong>{approvedCount}/{latest.length}</strong><span>已批准</span></div></header>
         <nav className="case-switcher" aria-label="本次变更的 Case">{selected.versions.map(version => { const result = latest.find(item => item.caseVersionId === version.id); return <button className={version.id === activeVersion.id ? "active" : ""} key={version.id} onClick={() => setActiveVersionId(version.id)}><span>{version.caseId}</span><i className={`case-state case-state--${result?.reviewStatus ?? "verifying"}`} /> </button>; })}</nav>
         <section className="case-review-body">
-          <div className="case-review-main"><div className="case-review-meta"><span>{activeVersion.priority}</span><span>{activeVersion.suitePath}</span><code>v{activeVersion.version} · {activeVersion.automationPath}</code></div>{activeResult ? <QaEvidenceViewer key={activeResult.id} result={activeResult} /> : <MissingEvidence message="验证尚未生成 Case Result。" />}
-            <div className="case-steps"><div className="case-steps-head"><h3>验收步骤</h3><span>{activeVersion.steps.length} 步</span></div><ol>{activeVersion.steps.map((step, index) => <li key={`${activeVersion.id}:${index}`}><span>{index + 1}</span><div><strong>{step.action}</strong><p>{step.expected.join("；")}</p></div></li>)}</ol></div>
+          <div className="case-review-main"><div className="case-review-meta"><span>{activeVersion.priority}</span><span>{activeVersion.suitePath}</span><code>v{activeVersion.version} · {activeAutomationPath}</code></div>{activeResult && activeResult.executionStatus !== "passed" && <div className="execution-failure-notice" role="status"><CircleAlert size={18} /><div><strong>E2E 未完整跑通，当前证据不可批准</strong><p>执行状态：{executionStatusLabel(activeResult.executionStatus)}。这是失败诊断证据，请要求 Agent 修复；若达到有限修复次数，则明确标记为产品问题、环境问题或自动化失败。</p></div></div>}{activeResult ? <QaEvidenceViewer key={activeResult.id} result={activeResult} steps={activeVersion.steps} /> : <MissingEvidence message="验证尚未生成 Case Result。" />}
           </div>
-          <aside className="review-decision"><div><p className="eyebrow">你的结论</p><h3>{reviewStatusLabel(activeResult?.reviewStatus)}</h3><p>{activeResult?.reviewStatus === "pending" ? "先在左侧完成视频播放或 Trace 调试，再提交结论。" : activeResult?.feedback ?? "这个 Case 当前不需要操作。"}</p></div>{activeResult?.reviewStatus === "pending" && <><label htmlFor={`case-feedback-${activeResult.id}`}>问题说明 <span>非批准结论必填</span></label><textarea id={`case-feedback-${activeResult.id}`} value={feedback[activeResult.id] ?? ""} onChange={event => setFeedback(current => ({ ...current, [activeResult.id]: event.target.value }))} placeholder="描述实际结果、期望结果和复现位置" /><div className="review-actions review-actions--stacked"><button className="primary-button success-button" disabled={!hasQaEvidence(activeResult)} onClick={() => void review(activeResult, "approve")}><Check size={16} />批准这个 Case</button><button className="secondary-button" onClick={() => void review(activeResult, "request_changes")}>要求修改</button><button className="secondary-button" onClick={() => void review(activeResult, "product_bug")}>标记产品缺陷</button><button className="secondary-button" onClick={() => void review(activeResult, "environment_issue")}>标记环境问题</button></div>{!hasQaEvidence(activeResult) && <p className="approval-blocked"><CircleAlert size={14} />缺少有效 QA 证据，无法批准。</p>}</>}</aside>
+          <aside className="review-decision"><div><p className="eyebrow">你的结论</p><h3>{selected.changeSet.status !== "awaiting_review" ? changeSetStatusLabel(selected.changeSet.status) : activeResult?.executionStatus !== "passed" ? "E2E 未跑通" : reviewStatusLabel(activeResult?.reviewStatus)}</h3><p>{selected.changeSet.status !== "awaiting_review" ? "Agent 正在应用反馈并重新执行干净验证。完成后，本页会自动载入新的待审证据。" : activeResult?.reviewStatus === "pending" ? activeResult.executionStatus === "passed" ? "先在左侧按步骤核对视频或 Trace，再提交结论。" : "当前仅提供失败诊断，不能作为通过证据。优先要求 Agent 修复；达到上限后请归类结束原因。" : activeResult?.feedback ?? "这个 Case 当前不需要操作。"}</p></div>{activeResult?.reviewStatus === "pending" && selected.changeSet.status === "awaiting_review" && <><label htmlFor={`case-feedback-${activeResult.id}`}>问题说明 <span>非批准结论必填</span></label><textarea id={`case-feedback-${activeResult.id}`} disabled={busyResultId === activeResult.id} value={feedback[activeResult.id] ?? ""} onChange={event => setFeedback(current => ({ ...current, [activeResult.id]: event.target.value }))} placeholder="描述实际结果、期望结果和复现位置" /><div className="review-actions review-actions--stacked"><button className="primary-button success-button" disabled={busyResultId === activeResult.id || !hasQaEvidence(activeResult) || activeResult.executionStatus !== "passed"} onClick={() => void review(activeResult, "approve")}><Check size={16} />批准这个 Case</button><button className="secondary-button" disabled={busyResultId === activeResult.id} onClick={() => void review(activeResult, "request_changes")}>{busyResultId === activeResult.id ? <LoaderCircle className="spin" size={16} /> : <RotateCcw size={16} />}{busyResultId === activeResult.id ? "正在发回…" : "要求 Agent 修复"}</button><button className="secondary-button" disabled={busyResultId === activeResult.id} onClick={() => void review(activeResult, "product_bug")}>标记产品缺陷</button><button className="secondary-button" disabled={busyResultId === activeResult.id} onClick={() => void review(activeResult, "environment_issue")}>标记环境问题</button></div>{(!hasQaEvidence(activeResult) || activeResult.executionStatus !== "passed") && <p className="approval-blocked"><CircleAlert size={14} />{activeResult.executionStatus !== "passed" ? `执行${executionStatusLabel(activeResult.executionStatus)}，无法批准。` : "缺少有效 QA 证据，无法批准。"}</p>}</>}</aside>
         </section>
       </main> : <section className="surface review-focus review-focus--empty"><span><ClipboardCheck size={25} /></span><h2>{loading ? "正在加载待审队列" : "没有待审 Case"}</h2><p>{loading ? "正在读取最新的验证结果。" : "当前没有需要你判断的验证结果。"}</p></section>}
     </div>
   </>;
 }
 
-function QaEvidenceViewer({ result }: { result: CaseHubResult }) {
+function QaEvidenceViewer({ result, steps = [] }: { result: CaseHubResult; steps?: CaseHubCaseVersion["steps"] }) {
   const videos = result.artifacts.filter(artifact => artifact.kind === "video");
   const traces = result.artifacts.filter(artifact => artifact.kind === "trace" && /(?:^|\/)trace\.zip$/iu.test(artifact.name.replaceAll("\\", "/")));
   const [mode, setMode] = useState<"video" | "trace">(videos.length ? "video" : "trace");
-  if (!videos.length && !traces.length) return <MissingEvidence message="本次运行没有生成 E2E 视频或 Playwright Trace。日志和报告文件不能替代人工验收。" />;
+  const [expanded, setExpanded] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const artifact = mode === "video" ? videos[0] : traces[0];
+  const passed = result.executionStatus === "passed";
+  const fallbackDuration = result.durationMs ? result.durationMs / 1_000 : 0;
+  const stepSync = useEvidenceStepSync(mode, steps.length, fallbackDuration, videoRef);
+  const changeMode = (nextMode: "video" | "trace") => {
+    setMode(nextMode);
+    if (nextMode === "video") stepSync.seekToStep(stepSync.activeStep, true);
+  };
+  if (!videos.length && !traces.length) return <MissingEvidence message="本次运行没有生成 E2E 视频或 Playwright Trace。日志和报告文件不能替代人工验收。" />;
   if (!artifact) return <MissingEvidence message="所选证据不可用。" />;
+  return <><section className={`qa-evidence${passed ? "" : " qa-evidence--failed"}`}><header><div><span className={passed ? "evidence-live" : "evidence-live evidence-live--failed"}><i />{passed ? "QA 有效证据" : "失败诊断 · 不可批准"}</span><strong>{mode === "video" ? "E2E 运行录像" : "Playwright 调试器"}</strong></div><div className="evidence-view-controls"><EvidenceModeButtons mode={mode} videos={videos.length} traces={traces.length} onChange={changeMode} /><button className="evidence-expand" type="button" onClick={() => setExpanded(true)} aria-label={mode === "video" ? "放大视频" : "放大 Trace"} title={mode === "video" ? "放大视频" : "放大 Trace"}><Maximize2 size={15} /></button></div></header><EvidenceStage result={result} mode={mode} artifact={artifact} videoRef={videoRef} onDurationChange={stepSync.setVideoDuration} onTimeChange={stepSync.updateActiveStep} /><footer><span>{passed ? mode === "video" ? `${videos.length} 段录像` : `${traces.length} 个 Trace` : `执行${executionStatusLabel(result.executionStatus)}`}</span><code>{artifact.name.split("/").at(-1)}</code></footer></section>{steps.length > 0 && <EvidenceStepNavigator mode={mode} steps={steps} activeStep={stepSync.activeStep} duration={stepSync.duration} onSelect={stepSync.seekToStep} />}{expanded && <EvidenceLightbox result={result} mode={mode} videos={videos.length} traces={traces.length} onModeChange={changeMode} onClose={() => setExpanded(false)} />}</>;
+}
+
+function useEvidenceStepSync(mode: "video" | "trace", stepCount: number, fallbackDuration: number, videoRef: { current: HTMLVideoElement | null }) {
+  const [activeStep, setActiveStep] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [pendingSeek, setPendingSeek] = useState<number | null>(null);
+  const duration = videoDuration || fallbackDuration;
+  const seekToStep = (index: number, forceVideo = false) => {
+    setActiveStep(index);
+    if (mode === "video" || forceVideo) setPendingSeek(index);
+  };
+  useEffect(() => {
+    if (mode !== "video" || pendingSeek === null) return;
+    const frame = window.requestAnimationFrame(() => {
+      const video = videoRef.current;
+      const playableDuration = Number.isFinite(video?.duration) && (video?.duration ?? 0) > 0 ? video!.duration : duration;
+      if (video && playableDuration > 0) {
+        video.currentTime = stepStartTime(pendingSeek, stepCount, playableDuration);
+        void video.play().catch(() => undefined);
+      }
+      setPendingSeek(null);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [duration, mode, pendingSeek, stepCount, videoRef]);
+  const updateActiveStep = (currentTime: number, currentDuration: number) => {
+    if (!stepCount || !Number.isFinite(currentDuration) || currentDuration <= 0) return;
+    setActiveStep(Math.min(stepCount - 1, Math.floor(currentTime / currentDuration * stepCount)));
+  };
+  return { activeStep, duration, seekToStep, setVideoDuration, updateActiveStep };
+}
+
+function EvidenceStepNavigator({ mode, steps, activeStep, duration, onSelect }: { mode: "video" | "trace"; steps: CaseHubCaseVersion["steps"]; activeStep: number; duration: number; onSelect: (index: number) => void }) {
+  return <section className="evidence-steps" aria-labelledby="evidence-steps-title"><header><div><h3 id="evidence-steps-title">按验收步骤核对</h3><p>{mode === "video" ? "播放时自动跟随；点击步骤可从对应片段继续播放。" : `当前核对 Step ${String(activeStep + 1).padStart(2, "0")}；在 Trace 的 Actions 中打开同名分组。`}</p></div><span>{activeStep + 1} / {steps.length}</span></header><ol>{steps.map((step, index) => <li key={`${step.action}:${step.expected.join("|")}`}><button type="button" className={activeStep === index ? "active" : ""} aria-current={activeStep === index ? "step" : undefined} aria-label={`验收步骤 ${index + 1}：${step.action}`} onClick={() => onSelect(index)}><span className="evidence-step-index">{String(index + 1).padStart(2, "0")}</span><span className="evidence-step-copy"><strong>{step.action}</strong><small>{step.expected.join("；")}</small></span><span className="evidence-step-anchor">{mode === "video" ? duration > 0 ? formatMediaTime(stepStartTime(index, steps.length, duration)) : "定位" : `Step ${String(index + 1).padStart(2, "0")}`}</span></button></li>)}</ol></section>;
+}
+
+function EvidenceModeButtons({ mode, videos, traces, onChange }: { mode: "video" | "trace"; videos: number; traces: number; onChange: (mode: "video" | "trace") => void }) {
+  return <div className="evidence-modes">{videos > 0 && <button type="button" className={mode === "video" ? "active" : ""} onClick={() => onChange("video")}><Play size={14} />播放视频</button>}{traces > 0 && <button type="button" className={mode === "trace" ? "active" : ""} onClick={() => onChange("trace")}><MonitorPlay size={14} />调试 Trace</button>}</div>;
+}
+
+function EvidenceStage({ result, mode, artifact, expanded = false, videoRef, onDurationChange, onTimeChange }: { result: CaseHubResult; mode: "video" | "trace"; artifact: CaseHubResult["artifacts"][number]; expanded?: boolean; videoRef?: { current: HTMLVideoElement | null }; onDurationChange?: (duration: number) => void; onTimeChange?: (currentTime: number, duration: number) => void }) {
   const url = artifactUrl(result.runId, artifact.id);
   const traceUrl = typeof window === "undefined" ? url : new URL(url, window.location.origin).href;
-  return <section className="qa-evidence"><header><div><span className="evidence-live"><i />QA 有效证据</span><strong>{mode === "video" ? "E2E 运行录像" : "Playwright 调试器"}</strong></div><div className="evidence-modes">{videos.length > 0 && <button className={mode === "video" ? "active" : ""} onClick={() => setMode("video")}><Play size={14} />播放视频</button>}{traces.length > 0 && <button className={mode === "trace" ? "active" : ""} onClick={() => setMode("trace")}><MonitorPlay size={14} />调试 Trace</button>}</div></header><div className="evidence-stage">{mode === "video" ? <video key={url} controls playsInline preload="metadata" src={url}>当前浏览器无法播放该 E2E 视频。</video> : <iframe key={url} title={`${result.caseId} Playwright Trace Viewer`} sandbox="allow-scripts allow-same-origin" src={`/v1/case-hub/trace-viewer/index.html?trace=${encodeURIComponent(traceUrl)}`} />}</div><footer><span>{mode === "video" ? `${videos.length} 段录像` : `${traces.length} 个 Trace`}</span><code>{artifact.name.split("/").at(-1)}</code></footer></section>;
+  return <div className={expanded ? "evidence-stage evidence-stage--expanded" : "evidence-stage"}>{mode === "video" ? <video ref={videoRef} key={url} controls playsInline preload="metadata" src={url} onLoadedMetadata={event => onDurationChange?.(event.currentTarget.duration)} onDurationChange={event => onDurationChange?.(event.currentTarget.duration)} onTimeUpdate={event => onTimeChange?.(event.currentTarget.currentTime, event.currentTarget.duration)}>当前浏览器无法播放该 E2E 视频。</video> : <iframe key={url} title={`${result.caseId} Playwright Trace Viewer`} sandbox="allow-scripts allow-same-origin" src={`/v1/case-hub/trace-viewer/index.html?trace=${encodeURIComponent(traceUrl)}`} />}</div>;
+}
+
+function EvidenceLightbox({ result, mode, videos, traces, onModeChange, onClose }: { result: CaseHubResult; mode: "video" | "trace"; videos: number; traces: number; onModeChange: (mode: "video" | "trace") => void; onClose: () => void }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const artifact = mode === "video"
+    ? result.artifacts.find(item => item.kind === "video")
+    : result.artifacts.find(item => item.kind === "trace" && /(?:^|\/)trace\.zip$/iu.test(item.name.replaceAll("\\", "/")));
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog && !dialog.open) dialog.showModal();
+    return () => { if (dialog?.open) dialog.close(); };
+  }, []);
+  if (!artifact) return null;
+  const passed = result.executionStatus === "passed";
+  return <dialog ref={dialogRef} className="evidence-lightbox" aria-labelledby="evidence-lightbox-title" onClose={onClose}><header><div><span className={passed ? "evidence-live" : "evidence-live evidence-live--failed"}><i />{passed ? "QA 有效证据 · 放大查看" : "失败诊断 · 不可批准"}</span><strong id="evidence-lightbox-title">{mode === "video" ? "E2E 运行录像" : "Playwright 调试器"}</strong></div><div className="evidence-view-controls"><EvidenceModeButtons mode={mode} videos={videos} traces={traces} onChange={onModeChange} /><button className="evidence-expand" type="button" onClick={() => dialogRef.current?.close()} aria-label="关闭放大查看" title="关闭放大查看"><X size={17} /></button></div></header><EvidenceStage result={result} mode={mode} artifact={artifact} expanded /></dialog>;
 }
 
 function MissingEvidence({ message }: { message: string }) {
@@ -779,6 +1252,16 @@ function MissingEvidence({ message }: { message: string }) {
 
 function artifactUrl(runId: string, artifactId: string): string {
   return `/v1/case-hub/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}`;
+}
+
+function stepStartTime(index: number, stepCount: number, duration: number): number {
+  if (stepCount <= 0 || !Number.isFinite(duration) || duration <= 0) return 0;
+  return Math.min(Math.max(0, duration - 0.05), duration * index / stepCount);
+}
+
+function formatMediaTime(seconds: number): string {
+  const rounded = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, "0")}`;
 }
 
 function hasQaEvidence(result: CaseHubResult): boolean {
@@ -792,6 +1275,14 @@ function reviewStatusLabel(status?: string): string {
   if (status === "product_bug") return "已标记产品缺陷";
   if (status === "environment_issue") return "已标记环境问题";
   return "等待验证";
+}
+
+function executionStatusLabel(status: string): string {
+  if (status === "passed") return "通过";
+  if (status === "failed") return "失败";
+  if (status === "blocked") return "阻塞";
+  if (status === "skipped") return "跳过";
+  return status;
 }
 
 const changeSetStatusMeta: Record<string, { label: string; tone: string }> = {
@@ -823,8 +1314,8 @@ function VersionBadge({ version, changeSet }: { version: CaseHubCaseVersion; cha
 }
 
 function latestChangeSetForCase(testCase: CaseHubCase, changeSets: CaseHubChangeSet[]): CaseHubChangeSet | undefined {
-  const versionIds = new Set([...testCase.proposedVersionIds, ...(testCase.activeVersionId ? [testCase.activeVersionId] : [])]);
-  return changeSets.find(changeSet => changeSet.caseVersionIds.some(versionId => versionIds.has(versionId)));
+  if (!testCase.activeVersionId) return undefined;
+  return changeSets.find(changeSet => changeSet.caseVersionIds.includes(testCase.activeVersionId!));
 }
 
 function changeSetStatusLabel(status: string): string {
@@ -859,109 +1350,6 @@ function RunsView({ runs, loading, onRefresh }: { runs: QaseyRun[]; loading: boo
       </section>
     </>
   );
-}
-
-function CuaView({ subjectId }: { subjectId: string }) {
-  const [sessionId, setSessionId] = useState(`admin-${subjectId}`);
-  const [targetUrl, setTargetUrl] = useState("https://example.com");
-  const [mode, setMode] = useState<"desktop" | "browser">("desktop");
-  const [state, setState] = useState<SandboxSessionState | null>(null);
-  const [frameUrl, setFrameUrl] = useState("");
-  const [typing, setTyping] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const frameImage = useRef<HTMLImageElement>(null);
-  const running = mode === "desktop" ? state?.desktop.running : state?.browser.running;
-
-  const loadFrame = useCallback(async () => {
-    if (!running) return;
-    try {
-      const frame = mode === "desktop" ? await api.desktopFrame(sessionId) : await api.browserFrame(sessionId);
-      setFrameUrl(await blobDataUrl(frame.blob));
-      if (mode === "browser") setState(current => current ? { ...current, browser: { ...current.browser, ...(frame.url ? { url: frame.url } : {}), ...(frame.title ? { title: frame.title } : {}) } } : current);
-    } catch (cause) {
-      setError(errorMessage(cause));
-    }
-  }, [mode, running, sessionId]);
-
-  useEffect(() => {
-    if (!running) return;
-    void loadFrame();
-    const timer = window.setInterval(() => void loadFrame(), 900);
-    return () => window.clearInterval(timer);
-  }, [loadFrame, running]);
-
-  const start = async () => {
-    setBusy(true); setError("");
-    try {
-      setState(mode === "desktop"
-        ? await api.desktopStart(sessionId.trim(), { application: "browser", ...(targetUrl.trim() ? { url: targetUrl.trim() } : {}), recordVideo: true })
-        : await api.browserStart(sessionId.trim(), targetUrl.trim() || undefined));
-    }
-    catch (cause) { setError(errorMessage(cause)); }
-    finally { setBusy(false); }
-  };
-  const act = async (action: Record<string, unknown>) => {
-    setError("");
-    try {
-      setState(mode === "desktop"
-        ? await api.desktopAction(sessionId.trim(), action)
-        : await api.browserAction(sessionId.trim(), action));
-      await loadFrame();
-    }
-    catch (cause) { setError(errorMessage(cause)); }
-  };
-  const stop = async () => {
-    setBusy(true); setError("");
-    try {
-      if (mode === "desktop") setState(await api.desktopStop(sessionId.trim()));
-      else { await api.sandboxStop(sessionId.trim()); setState(null); }
-      setFrameUrl("");
-    }
-    catch (cause) { setError(errorMessage(cause)); }
-    finally { setBusy(false); }
-  };
-  const launch = async (application: "browser" | "terminal" | "editor" | "files") => {
-    setBusy(true); setError("");
-    try {
-      setState(await api.desktopApplication(sessionId.trim(), application, application === "browser" ? targetUrl.trim() || undefined : undefined));
-      await loadFrame();
-    } catch (cause) { setError(errorMessage(cause)); }
-    finally { setBusy(false); }
-  };
-  const clickFrame = (event: React.MouseEvent<HTMLButtonElement>) => {
-    const image = frameImage.current;
-    if (!image) return;
-    const bounds = image.getBoundingClientRect();
-    const x = (event.clientX - bounds.left) * (image.naturalWidth / bounds.width);
-    const y = (event.clientY - bounds.top) * (image.naturalHeight / bounds.height);
-    void act({ action: "click", x, y });
-  };
-  const clickFrameCenter = () => {
-    const image = frameImage.current;
-    if (image) void act({ action: "click", x: image.naturalWidth / 2, y: image.naturalHeight / 2 });
-  };
-
-  return <>
-    <PageHeading eyebrow="Computer use" title="Ubuntu 工作台" description="每个远程 sandbox 实例都是长期运行的 Ubuntu 环境；会话独占 GUI 桌面，并使用自己的持久 workspace 与 home。" />
-    {error && <InlineError message={error} />}
-    <div className="segmented cua-mode" role="tablist" aria-label="控制模式">
-      <button role="tab" aria-selected={mode === "desktop"} className={mode === "desktop" ? "active" : ""} disabled={Boolean(running)} onClick={() => { setMode("desktop"); setFrameUrl(""); }}>完整桌面</button>
-      <button role="tab" aria-selected={mode === "browser"} className={mode === "browser" ? "active" : ""} disabled={Boolean(running)} onClick={() => { setMode("browser"); setFrameUrl(""); }}>Playwright 浏览器</button>
-    </div>
-    <section className="surface cua-toolbar">
-      <label>会话 ID<input value={sessionId} disabled={Boolean(running)} onChange={event => setSessionId(event.target.value)} /></label>
-      <label>浏览器地址<input value={targetUrl} onChange={event => setTargetUrl(event.target.value)} onKeyDown={event => { if (event.key === "Enter") void (!running ? start() : mode === "browser" ? act({ action: "navigate", url: targetUrl }) : launch("browser")); }} /></label>
-      {!running ? <button className="primary-button" disabled={busy || !sessionId.trim()} onClick={() => void start()}>{busy ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}启动</button>
-        : <button className="secondary-button danger-text" disabled={busy} onClick={() => void stop()}><Square size={15} />停止</button>}
-    </section>
-    <section className="surface cua-stage">
-      <div className="cua-stage-head"><div><span className={running ? "health-dot" : "health-dot offline"} /><strong>{mode === "desktop" ? "Ubuntu Desktop" : state?.browser.title || "Sandbox browser"}</strong><small>{mode === "desktop" ? (state?.desktop.applications?.join(" · ") || "等待租用桌面") : state?.browser.url || "尚未启动"}</small></div>{state && <span>实例 {state.ordinal} · generation {state.generation}{mode === "desktop" && state.desktop.recording ? " · 正在录制" : ""}</span>}</div>
-      {mode === "desktop" && running && <div className="cua-appbar" aria-label="Ubuntu 应用"><button onClick={() => void launch("browser")} disabled={busy}><MonitorPlay size={15} />浏览器</button><button onClick={() => void launch("terminal")} disabled={busy}><Terminal size={15} />终端</button><button onClick={() => void launch("editor")} disabled={busy}><FileText size={15} />编辑器</button><button onClick={() => void launch("files")} disabled={busy}><FolderOpen size={15} />文件</button></div>}
-      <div className="cua-screen">{frameUrl ? <button className="cua-frame-button" onClick={clickFrame} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); clickFrameCenter(); } }} aria-label={`操作 Qasey sandbox ${mode === "desktop" ? "Ubuntu 桌面" : "浏览器"}画面`}><img ref={frameImage} src={frameUrl} alt={mode === "desktop" ? "Qasey Ubuntu desktop live view" : "Qasey sandbox browser live view"} /></button> : <div><MonitorPlay size={34} /><strong>启动后，实时画面会显示在这里</strong><span>{mode === "desktop" ? "可以操作浏览器、终端、编辑器和文件管理器。" : "点击画面可直接发送鼠标操作。"}</span></div>}</div>
-      {running && <div className={`cua-controls ${mode === "desktop" ? "desktop" : ""}`}>{mode === "browser" && <><button className="icon-button bordered" onClick={() => void act({ action: "back" })} aria-label="后退">←</button><button className="icon-button bordered" onClick={() => void act({ action: "forward" })} aria-label="前进">→</button><button className="icon-button bordered" onClick={() => void act({ action: "reload" })} aria-label="刷新"><RefreshCw size={15} /></button></>}<label className="cua-type-field"><span>键盘输入</span><input value={typing} onChange={event => setTyping(event.target.value)} placeholder="输入发送到当前焦点…" onKeyDown={event => { if (event.key === "Enter" && typing) { void act({ action: "type", text: typing }); setTyping(""); } }} /></label><button className="secondary-button" disabled={!typing} onClick={() => { void act({ action: "type", text: typing }); setTyping(""); }}>发送</button></div>}
-    </section>
-  </>;
 }
 
 const triggerStatusMeta: Record<TriggerConnectionStatus, { label: string; tone: string }> = {
@@ -1193,11 +1581,47 @@ function AccessView({ session }: { session: Session }) {
 }
 
 function EvidenceRail({ run, compact = false }: { run: QaseyRun; compact?: boolean }) {
-  const step = statusMeta[run.status].step;
-  return <div className={compact ? "evidence-rail evidence-rail--compact" : "evidence-rail"}>{evidenceStages.map(([Icon,label],index) => { const done = index < step || run.status === "succeeded"; const active = index === Math.min(step,5) && !["succeeded","failed","cancelled"].includes(run.status); return <div className={`rail-step ${done ? "done" : ""} ${active ? "active" : ""}`} key={label}><span className="rail-node">{done ? <Check size={14} /> : <Icon size={15} />}</span><strong>{label}</strong>{!compact && <small>{railDetail(run,index)}</small>}{index < evidenceStages.length - 1 && <i />}</div>; })}</div>;
+  return <div className={compact ? "evidence-rail evidence-rail--compact" : "evidence-rail"}>{evidenceStages.map(([Icon, label], index) => {
+    const state = evidenceStageState(run, index);
+    return <div className={`rail-step ${state === "completed" ? "done" : state === "running" ? "active" : state}`} key={label}>
+      <span className="rail-node">{state === "completed" ? <Check size={14} /> : state === "failed" ? <XCircle size={15} /> : <Icon size={15} />}</span>
+      <strong>{label}</strong>{!compact && <small>{railDetail(run, index)}</small>}{index < evidenceStages.length - 1 && <i />}
+    </div>;
+  })}</div>;
 }
 
-function EmptyRail() { return <div className="empty-rail"><div className="empty-rail-line" /><div><span><FileSearch size={17} /></span><span><Bot size={17} /></span><span><Play size={17} /></span><span><ClipboardCheck size={17} /></span></div><h3>证据会随运行逐步汇集</h3><p>从需求来源到最终结论，每个阶段都可以追溯。</p></div>; }
+function SessionCaseSummary({ plans, hasConversation }: { plans: CaseReviewPlanDetail[]; hasConversation: boolean }) {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const items = plans.flatMap(detail => detail.items).sort((left, right) => left.ordinal - right.ordinal);
+  const selected = items.find(item => item.id === selectedId);
+  const approved = items.filter(item => item.status === "approved").length;
+  const pending = items.filter(item => item.status === "pending").length;
+  const automated = items.filter(item => item.automationStatus === "verified").length;
+  return <section className="session-cases" aria-labelledby="session-cases-title"><header><div><h3 id="session-cases-title">本次文字用例</h3><p>{items.length ? `${approved} 已批准 · ${pending} 待审 · ${automated} 已自动化` : hasConversation ? "审核计划会固定显示在这里" : "选择任务会话后查看"}</p></div>{items.length > 0 && <strong>{items.filter(item => item.status !== "removed").length}</strong>}</header>{items.length > 0 ? <ol>{items.map(item => <li key={item.id}><button type="button" className={item.status === "removed" ? "session-case session-case--removed" : "session-case"} aria-label={`查看用例详情：${item.content.title}`} aria-haspopup="dialog" onClick={() => setSelectedId(item.id)}><span className={`session-case-state session-case-state--${sessionCaseTone(item)}`}>{sessionCaseStatus(item)}</span><div><strong title={item.content.title}>{item.publishedCaseId ? `${item.publishedCaseId} · ` : ""}{item.content.title}</strong><small title={item.content.suitePath}>{item.content.priority} · {item.content.suitePath}</small></div><ChevronRight size={14} aria-hidden="true" /></button></li>)}</ol> : <div className="session-cases-empty"><ClipboardCheck size={18} /><span>{hasConversation ? "Agent 生成文字用例后，无需回翻聊天即可在这里跟踪审核与 E2E 状态。" : "还没有当前会话。"}</span></div>}{selected && <SessionCaseDialog item={selected} onClose={() => setSelectedId(null)} />}</section>;
+}
+
+function sessionCaseStatus(item: CaseReviewItem): string {
+  if (item.status === "removed") return "已移除";
+  if (item.status === "pending") return "待审";
+  if (item.automationStatus === "verified") return "e2e";
+  if (item.automationStatus === "generating") return "生成中";
+  if (item.automationStatus === "awaiting_review") return "证据待审";
+  if (item.automationStatus === "failed") return "E2E 失败";
+  if (item.automationStatus === "stale") return "待更新";
+  return "已批准";
+}
+
+function sessionCaseTone(item: CaseReviewItem): string {
+  if (item.status === "removed") return "muted";
+  if (item.status === "pending") return "pending";
+  if (item.automationStatus === "verified") return "verified";
+  if (item.automationStatus === "failed") return "failed";
+  if (["generating", "awaiting_review"].includes(item.automationStatus ?? "")) return "progress";
+  if (item.automationStatus === "stale") return "stale";
+  return "approved";
+}
+
+function EmptyRail({ compact = false }: { compact?: boolean }) { return <div className={compact ? "empty-rail empty-rail--compact" : "empty-rail"}><div className="empty-rail-line" /><div><span><FileSearch size={17} /></span><span><Bot size={17} /></span><span><Play size={17} /></span><span><ClipboardCheck size={17} /></span></div><h3>证据会随运行逐步汇集</h3><p>从需求来源到最终结论，每个阶段都可以追溯。</p></div>; }
 
 function RunTable({ runs, loading, expanded = false }: { runs: QaseyRun[]; loading: boolean; expanded?: boolean }) {
   const [busyId, setBusyId] = useState("");
@@ -1215,12 +1639,18 @@ function RunTable({ runs, loading, expanded = false }: { runs: QaseyRun[]; loadi
 }
 
 function RunDetailDialog({ run, onClose }: { run: QaseyRun; onClose: () => void }) {
+  const [caseHubDataCleared, setCaseHubDataCleared] = useState(false);
   useEffect(() => {
     const close = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
   }, [onClose]);
-  return <div className="dialog-backdrop" role="presentation" onMouseDown={event => { if (event.currentTarget === event.target) onClose(); }}><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="run-dialog-title"><div className="dialog-head"><div><p className="eyebrow">运行详情 · <span className="mono">{compactId(run.id)}</span></p><h2 id="run-dialog-title">{run.repository.owner}/{run.repository.repository}</h2><p>{run.framework === "playwright" ? "Web · Playwright" : "App · Maestro"} · 基于 {run.repository.baseRef}</p></div><button className="icon-button bordered" onClick={onClose} aria-label="关闭运行详情"><X size={18} /></button></div><div className="dialog-status"><StatusBadge status={run.status} /><span>更新于 {formatRelative(run.updatedAt)}</span>{run.pullRequestUrl && <a href={run.pullRequestUrl} target="_blank" rel="noreferrer"><GitBranch size={14} />打开 Pull Request</a>}</div><div className="dialog-section"><h3>证据轨</h3><EvidenceRail run={run} compact /></div><div className="dialog-section"><h3>证据产物 <span>{run.artifacts.length}</span></h3>{run.artifacts.length ? <div className="dialog-artifacts">{run.artifacts.map(artifact => <a key={artifact.id} href={`/v1/case-hub/runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(artifact.id)}`} target="_blank" rel="noreferrer"><span><FileSearch size={17} /></span><div><strong>{artifact.name}</strong><small>{artifact.kind}</small></div><ArrowRight size={15} /></a>)}</div> : <p className="dialog-empty">当前还没有证据产物。</p>}</div>{run.error && <div className="dialog-error"><CircleAlert size={17} /><div><strong>运行未完成</strong><p>{run.error}</p></div></div>}</section></div>;
+  useEffect(() => {
+    void api.getChangeSet(run.changeSetId).then(() => setCaseHubDataCleared(false)).catch(cause => {
+      if (cause instanceof ApiError && cause.status === 404) setCaseHubDataCleared(true);
+    });
+  }, [run.changeSetId]);
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={event => { if (event.currentTarget === event.target) onClose(); }}><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="run-dialog-title"><div className="dialog-head"><div><p className="eyebrow">运行详情 · <span className="mono">{compactId(run.id)}</span></p><h2 id="run-dialog-title">{run.repository.owner}/{run.repository.repository}</h2><p>{run.framework === "playwright" ? "Web · Playwright" : "App · Maestro"} · 基于 {run.repository.baseRef}</p></div><button className="icon-button bordered" onClick={onClose} aria-label="关闭运行详情"><X size={18} /></button></div><div className="dialog-status"><StatusBadge status={run.status} /><span>更新于 {formatRelative(run.updatedAt)}</span>{run.pullRequestUrl && <a href={run.pullRequestUrl} target="_blank" rel="noreferrer"><GitBranch size={14} />打开 Pull Request</a>}</div>{caseHubDataCleared && <div className="dialog-error"><CircleAlert size={17} /><div><strong>旧 Case Hub 数据已清理</strong><p>此 Run 和 artifacts 仍作为历史日志保留；关联的旧文字 Case 已在上线迁移中移除，因此不再提供失效操作。</p></div></div>}<div className="dialog-section"><h3>证据轨</h3><EvidenceRail run={run} compact /></div><div className="dialog-section"><h3>证据产物 <span>{run.artifacts.length}</span></h3>{run.artifacts.length ? <div className="dialog-artifacts">{run.artifacts.map(artifact => <a key={artifact.id} href={`/v1/case-hub/runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(artifact.id)}`} target="_blank" rel="noreferrer"><span><FileSearch size={17} /></span><div><strong>{artifact.name}</strong><small>{artifact.kind}</small></div><ArrowRight size={15} /></a>)}</div> : <p className="dialog-empty">当前还没有证据产物。</p>}</div>{run.error && <div className="dialog-error"><CircleAlert size={17} /><div><strong>运行未完成</strong><p>{run.error}</p></div></div>}</section></div>;
 }
 
 function StatusBadge({ status }: { status: RunStatus }) { const meta = statusMeta[status]; const Icon = status === "succeeded" ? CheckCircle2 : status === "failed" ? XCircle : status === "awaiting_qa" ? ClipboardCheck : activeStatuses.includes(status) ? LoaderCircle : Clock3; return <span className={`status-badge ${meta.tone}`}><Icon className={activeStatuses.includes(status) ? "spin-slow" : ""} size={14} />{meta.label}</span>; }
@@ -1240,8 +1670,13 @@ function GoogleGlyph() { return <svg width="19" height="19" viewBox="0 0 24 24" 
 function displayName(session: Session): string { return session.displayName ?? session.email?.split("@")[0] ?? "QA Member"; }
 function compactId(value: string): string { return value.length > 12 ? `${value.slice(0,8)}…${value.slice(-4)}` : value; }
 function formatRelative(value: string): string { const seconds = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000)); if (seconds < 60) return "刚刚"; if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`; if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`; return shortDateFormatter.format(new Date(value)); }
-function blobDataUrl(blob: Blob): Promise<string> { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("浏览器画面格式无效。")); reader.onerror = () => reject(reader.error ?? new Error("无法读取浏览器画面。")); reader.readAsDataURL(blob); }); }
 function friendlySsoError(error: string): string { let decoded = error; try { decoded = decodeURIComponent(error); } catch { /* malformed OAuth errors remain safe to display generically */ } if (/domain|hosted/iu.test(decoded)) return "此 Google 账户不属于允许的组织，请切换工作账户。"; if (/expired|state/iu.test(decoded)) return "登录链接已失效，请重新开始登录。"; return "登录未完成，请重试；如果问题持续出现，请联系平台管理员。"; }
-function extractAgentText(response: Record<string, unknown>): string { if (typeof response.text === "string") return response.text; const message = response.message; if (message && typeof message === "object" && "content" in message && typeof message.content === "string") return message.content; return "Qasey 已完成处理。打开运行记录查看后续进度与证据。"; }
-function railDetail(run: QaseyRun, index: number): string { if (index === 0) return `Change Set ${run.changeSetId.slice(0, 8)}`; if (index === 3) return "Playwright"; if (index === 4) return `${run.artifacts.length} 项证据`; return index < statusMeta[run.status].step ? "已完成" : index === statusMeta[run.status].step ? statusMeta[run.status].label : "等待中"; }
+function railDetail(run: QaseyRun, index: number): string {
+  const state = evidenceStageState(run, index);
+  if (state === "failed") return "此阶段失败";
+  if (state === "unknown") return "未确认完成";
+  if (index === 0) return `Change Set ${run.changeSetId.slice(0, 8)}`;
+  if (index === 4 && run.artifacts.length) return `${run.artifacts.length} 项证据`;
+  return state === "completed" ? "已完成" : state === "running" ? statusMeta[run.status].label : "等待中";
+}
 function countFor(runs: QaseyRun[], id: "all" | "active" | "review" | "done"): number { if (id === "all") return runs.length; if (id === "active") return runs.filter(run => activeStatuses.includes(run.status)).length; if (id === "review") return runs.filter(run => run.status === "awaiting_qa").length; return runs.filter(run => ["succeeded","failed","cancelled"].includes(run.status)).length; }

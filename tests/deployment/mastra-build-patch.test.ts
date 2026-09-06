@@ -8,12 +8,12 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 describe("Mastra filesystem-agent build patch", () => {
   it("accepts the generated filesystem-agent wrapper as a valid Mastra export", async () => {
     const patch = await readFile(
-      resolve(projectRoot, "patches/@mastra__deployer@1.59.0.patch"),
+      resolve(projectRoot, "patches/@mastra__deployer@1.64.0.patch"),
       "utf8",
     );
 
-    expect(patch).toContain("dist/analyze-CNv6Qdaz.js");
-    expect(patch).toContain("dist/analyze-BIrkd7zx.cjs");
+    expect(patch).toContain("dist/analyze-z37DoML5.js");
+    expect(patch).toContain("dist/analyze-IM-jyN5x.cjs");
     expect(patch.match(/isFsAgentWrapper/g)).toHaveLength(4);
   });
 });

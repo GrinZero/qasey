@@ -95,6 +95,7 @@ describe("container image role isolation", () => {
       const importer = lockfile.slice(0, lockfile.indexOf("\npackages:\n"));
 
       expect(manifest.dependencies).toHaveProperty("prisma");
+      expect(manifest.dependencies).not.toHaveProperty("@mastra/editor");
       expect(manifest.dependencies).not.toHaveProperty("@playwright/test");
       expect(manifest.dependencies).not.toHaveProperty("@trycua/cua-driver");
       expect(Object.values(manifest.dependencies).every(version =>
@@ -106,22 +107,22 @@ describe("container image role isolation", () => {
       expect(importer).toContain("overrides:\n");
       expect(importer).toContain("hono@4.10.6");
       expect(importer).toContain("4.13.1");
-      expect(importer).toContain("patchedDependencies:\n  '@mastra/core@1.59.0'");
+      expect(importer).not.toContain("patchedDependencies:");
       expect(workspace).toContain("packages: []");
       expect(workspace).toContain("overrides:\n");
       expect(workspace).toContain("'hono@4.10.6': '4.13.1'");
-      expect(workspace).toContain("patchedDependencies:\n  '@mastra/core@1.59.0'");
+      expect(workspace).not.toContain("patchedDependencies:");
     } finally {
       await rm(output, { recursive: true, force: true });
     }
   });
 
-  it("derives a six-package sandbox closure without service connectors", async () => {
+  it("derives a sandbox closure including agent tracing without service connectors", async () => {
     const output = await mkdtemp(join(tmpdir(), "qasey-sandbox-manifest-"));
     try {
-      const manifestPath = join(output, "package.json");
-      const lockPath = join(output, "pnpm-lock.yaml");
-      const workspacePath = join(output, "pnpm-workspace.yaml");
+      const manifestPath = join(output, "sandbox", "package.json");
+      const lockPath = join(output, "sandbox", "pnpm-lock.yaml");
+      const workspacePath = join(output, "sandbox", "pnpm-workspace.yaml");
       await exec(process.execPath, [
         resolve(projectRoot, "ci/create-service-runtime-manifest.mjs"),
         resolve(projectRoot, "package.json"),
@@ -139,6 +140,7 @@ describe("container image role isolation", () => {
       expect(Object.keys(manifest.dependencies).sort()).toEqual([
         "@ai-sdk/openai",
         "@mastra/core",
+        "@mastra/observability",
         "@playwright/test",
         "@trycua/cua-driver",
         "jose",

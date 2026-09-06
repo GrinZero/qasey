@@ -58,6 +58,7 @@ class BoundPooledSandboxCodeTaskRunner implements CodeTaskRunner {
   get(taskId: string) { return this.session.codeTaskState(taskId); }
   events(taskId: string, after?: string) { return this.session.codeTaskEvents(taskId, after); }
   async cancel(taskId: string, reason: string): Promise<void> { await this.session.codeTaskCancel(taskId, reason); }
+  async release(taskId: string): Promise<void> { await this.session.codeTaskRelease(taskId); }
 
   async artifact(ref: ArtifactRef): Promise<Buffer> {
     if (!ref.uri.startsWith("sandbox://")) throw new Error(`Unsupported CodeTask artifact URI: ${ref.uri}`);

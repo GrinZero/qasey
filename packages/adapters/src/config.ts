@@ -35,6 +35,20 @@ const optionalCsv = z.preprocess(
     : String(value).split(",").map(item => item.trim()).filter(Boolean),
   z.array(z.string().min(1)).optional(),
 );
+const optionalOriginCsv = z.preprocess(
+  value => value === "" || value === undefined
+    ? undefined
+    : String(value).split(",").map(item => item.trim()).filter(Boolean),
+  z.array(z.url().refine(value => {
+    const parsed = new URL(value);
+    return ["http:", "https:"].includes(parsed.protocol)
+      && parsed.username === ""
+      && parsed.password === ""
+      && parsed.pathname === "/"
+      && parsed.search === ""
+      && parsed.hash === "";
+  }, "Trusted browser origins must be canonical HTTP(S) origins without paths, credentials, query strings, or fragments")).optional(),
+);
 const optionalInstanceId = z.preprocess(
   value => value === "" ? undefined : value,
   z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u).optional(),
@@ -124,6 +138,7 @@ export const ConfigSchema = z.object({
   GITHUB_ORG: optionalString,
   GITHUB_WEBHOOK_SECRET: optionalString,
   QASEY_PUBLIC_BASE_URL: z.url().default("http://localhost:4111"),
+  QASEY_ADDITIONAL_TRUSTED_ORIGINS: optionalOriginCsv,
   QASEY_MCP_CONFIG_FILE: z.string().default("config/mcp.json"),
   QASEY_MCP_OAUTH_DIR: z.string().default(".qasey/oauth"),
   QASEY_ENABLE_STUDIO_MCP_PREVIEW: optionalBoolean,
@@ -144,6 +159,7 @@ export const ConfigSchema = z.object({
   QASEY_MAX_REPAIRS: z.coerce.number().int().min(0).max(5).default(2),
   QASEY_INTENT_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(300_000).default(60_000),
   QASEY_AGENT_TIMEOUT_MS: z.coerce.number().int().min(10_000).default(50 * 60_000),
+  QASEY_CONVERSATION_RECONCILER_INTERVAL_MS: z.coerce.number().int().min(5_000).default(30_000),
   QASEY_MAIN_MODEL: z.string().min(1).default("gpt-5.6-sol"),
   QASEY_MODEL_INPUT_COST_MICROUSD_PER_TOKEN: optionalNonNegativeNumber,
   QASEY_MODEL_OUTPUT_COST_MICROUSD_PER_TOKEN: optionalNonNegativeNumber,
@@ -183,6 +199,7 @@ export const ConfigSchema = z.object({
   QASEY_SANDBOX_DESKTOP_WIDTH: z.coerce.number().int().min(800).max(3840).default(1440),
   QASEY_SANDBOX_DESKTOP_HEIGHT: z.coerce.number().int().min(600).max(2160).default(900),
   QASEY_WORKSPACE_RETENTION_MS: z.coerce.number().int().min(60_000).default(7 * 24 * 60 * 60_000),
+  QASEY_CODE_TASK_RETENTION_MS: z.coerce.number().int().min(60_000).default(60 * 60_000),
   QASEY_SANDBOX_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(10_000).default(30 * 60_000),
   QASEY_CODE_AGENT_MODEL: z.string().min(1).default("gpt-5.6-sol"),
   QASEY_CODE_AGENT_MAX_STEPS: z.coerce.number().int().min(1).max(500).default(80),

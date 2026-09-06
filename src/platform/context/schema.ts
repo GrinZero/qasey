@@ -1,6 +1,8 @@
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY } from "@mastra/core/request-context";
 import { z } from "zod";
 
+export const PLATFORM_RESOURCE_ACTION_KEY = "platform-resource-action";
+
 export const PlatformChannelSchema = z.enum(["api", "web", "slack", "jira", "worker"]);
 const NativeChannelContextSchema = z.object({
   platform: z.string().min(1),
@@ -25,6 +27,7 @@ export const PlatformRequestContextSchema = z.object({
   sessionId: z.string().min(1),
   taskId: z.string().min(1).optional(),
   executionId: z.string().min(1).optional(),
+  [PLATFORM_RESOURCE_ACTION_KEY]: z.enum(["read", "list", "write", "execute"]).optional(),
   [MASTRA_RESOURCE_ID_KEY]: z.string().min(1),
   // Studio supplies its generated thread through the Agent memory options.
   // Trusted channel/API ingress still initializes this reserved key directly.

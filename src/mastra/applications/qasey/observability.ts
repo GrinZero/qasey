@@ -109,9 +109,9 @@ export function startQaseyRequestSpan(
 }
 
 /**
- * Dynamic Agent arguments in the installed Mastra version do not receive a
- * TracingContext. Correlate their spans through serializable trace/span ids
- * placed on RequestContext instead of storing a live Span there.
+ * Durable workflow operations may resume without a live TracingContext.
+ * Correlate their spans through serializable trace/span ids placed on
+ * RequestContext instead of storing a live Span there.
  */
 export function startQaseyCorrelatedSpan(
   mastra: Mastra | undefined,

@@ -34,6 +34,40 @@ afterEach(async () => {
 });
 
 describe("sandbox runtime protocol", () => {
+  it("garbage-collects terminal CodeTask attempts independently of workspace retention", async () => {
+    const dataRoot = await mkdtemp(join(tmpdir(), "qasey-code-task-gc-"));
+    cleanups.push(async () => { await rm(dataRoot, { recursive: true, force: true }); });
+    const runtime = new QaseySandboxRuntime({
+      dataRoot, port: 0, host: "127.0.0.1", maxSessions: 1,
+      idleTtlMs: 60_000, isolation: "none", commandTimeoutMs: 10_000,
+      workspaceRetentionMs: 7 * 24 * 60 * 60_000, codeTaskRetentionMs: 60_000,
+      controlKey: TEST_CONTROL_KEY,
+    });
+    const workspaceId = "a".repeat(64);
+    const expiredTaskRoot = join(dataRoot, "code-tasks", workspaceId, "expired-task");
+    const recentTaskRoot = join(dataRoot, "code-tasks", workspaceId, "recent-task");
+    const runningTaskRoot = join(dataRoot, "code-tasks", workspaceId, "running-task");
+    const states = [
+      [expiredTaskRoot, "succeeded", new Date(Date.now() - 120_000).toISOString()],
+      [recentTaskRoot, "failed", new Date().toISOString()],
+      [runningTaskRoot, "running", new Date(Date.now() - 120_000).toISOString()],
+    ] as const;
+    for (const [taskRoot, status, updatedAt] of states) {
+      const controlRoot = join(taskRoot, "attempt-1", "control");
+      await mkdir(controlRoot, { recursive: true });
+      await writeFile(join(controlRoot, "state.json"), JSON.stringify({
+        taskId: taskRoot.split("/").at(-1), attemptId: "attempt-1", status,
+        createdAt: updatedAt, updatedAt,
+      }));
+    }
+
+    await (runtime as unknown as { deleteExpiredCodeTasks(): Promise<void> }).deleteExpiredCodeTasks();
+
+    await expect(access(expiredTaskRoot)).rejects.toThrow();
+    await expect(access(recentTaskRoot)).resolves.toBeUndefined();
+    await expect(access(runningTaskRoot)).resolves.toBeUndefined();
+  });
+
   it("passes only declared authentication variables to the non-Agent verifier", () => {
     const runtime = new QaseySandboxRuntime({
       dataRoot: "/tmp/qasey-secret-contract-test", port: 0, host: "127.0.0.1", maxSessions: 1,
@@ -575,7 +609,7 @@ describe("sandbox runtime protocol", () => {
 
   it("uses only explicit portable sandbox isolation modes", () => {
     expect(sandboxRuntimeOptions({ NODE_ENV: "test", QASEY_SANDBOX_CONTROL_KEY: TEST_CONTROL_KEY, QASEY_SANDBOX_ISOLATION: "none" }))
-      .toMatchObject({ isolation: "none", browserAllowedOrigins: [] });
+      .toMatchObject({ isolation: "none", browserAllowedOrigins: [], codeTaskRetentionMs: 60 * 60_000 });
     expect(sandboxRuntimeOptions({ NODE_ENV: "test", QASEY_SANDBOX_CONTROL_KEY: TEST_CONTROL_KEY, QASEY_SANDBOX_ISOLATION: "bwrap" }))
       .toMatchObject({ isolation: "bwrap" });
     expect(() => sandboxRuntimeOptions({ QASEY_SANDBOX_CONTROL_KEY: TEST_CONTROL_KEY, QASEY_SANDBOX_ISOLATION: "pod" })).toThrow(/none or bwrap/u);
@@ -1105,6 +1139,7 @@ describe("sandbox runtime protocol", () => {
       controlPlane: false,
       repositoryBroker: false,
     });
+    await expect(session.codeTaskRelease(spec.taskId)).rejects.toThrow(/while it is active/u);
     const removedBroker = await fetch(`${session.endpoint}/v1/sessions/${encodeURIComponent(spec.scope.sessionId)}/repositories/clone`, {
       method: "POST",
       headers: {
@@ -1149,6 +1184,9 @@ describe("sandbox runtime protocol", () => {
     await expect(session.codeTaskEvents(spec.taskId, firstCursor)).resolves.toMatchObject({
       events: events.events.slice(1),
     });
+    await expect(session.codeTaskRelease(spec.taskId)).resolves.toBe(true);
+    await expect(access(attemptRoot)).rejects.toThrow();
+    await expect(session.codeTaskRelease(spec.taskId)).resolves.toBe(false);
 
     const delayedSpec = { ...spec, taskId: "terminal-delay-1", attemptId: "terminal-delay-attempt-1" };
     await expect(session.codeTaskStart(delayedSpec, context)).resolves.toMatchObject({ status: "queued" });

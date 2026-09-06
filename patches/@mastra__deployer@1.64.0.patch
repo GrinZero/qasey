@@ -1,34 +1,43 @@
-diff --git a/dist/analyze-BIrkd7zx.cjs b/dist/analyze-BIrkd7zx.cjs
-index 01a325b20fbdbf7d027cf4177de4f83101322c31..7f81b580a62f1bb58ff32104192c223921520c68 100644
---- a/dist/analyze-BIrkd7zx.cjs
-+++ b/dist/analyze-BIrkd7zx.cjs
-@@ -937 +937,3 @@ function checkConfigExport(result) {
+diff --git a/dist/analyze-IM-jyN5x.cjs b/dist/analyze-IM-jyN5x.cjs
+index 7f4a32d0a03cb1e2ceeb0eb20de29f75dba2df02..6e93ca85235c69a3659dfa51f5fabc4cf9f395ff 100644
+--- a/dist/analyze-IM-jyN5x.cjs
++++ b/dist/analyze-IM-jyN5x.cjs
+@@ -936,7 +936,9 @@ function checkConfigExport(result) {
+ 			const decl = path.node.declaration;
+ 			if (_babel_core.types.isVariableDeclaration(decl)) {
+ 				const varDecl = decl.declarations[0];
 -				if (_babel_core.types.isIdentifier(varDecl?.id, { name: "mastra" }) && _babel_core.types.isNewExpression(varDecl.init) && _babel_core.types.isIdentifier(varDecl.init.callee, { name: "Mastra" })) result.hasValidConfig = true;
 +				const isDirectMastra = _babel_core.types.isNewExpression(varDecl?.init) && _babel_core.types.isIdentifier(varDecl.init.callee, { name: "Mastra" });
 +				const isFsAgentWrapper = _babel_core.types.isIdentifier(varDecl?.init, { name: "__mastra" });
 +				if (_babel_core.types.isIdentifier(varDecl?.id, { name: "mastra" }) && (isDirectMastra || isFsAgentWrapper)) result.hasValidConfig = true;
-diff --git a/dist/analyze-CNv6Qdaz.js b/dist/analyze-CNv6Qdaz.js
-index 88db023840018e49d7f5535fef21b153b5c4e21f..424fa80d96535e9a685d69b0c5cf72e1c9c0706c 100644
---- a/dist/analyze-CNv6Qdaz.js
-+++ b/dist/analyze-CNv6Qdaz.js
-@@ -949 +949,3 @@ function checkConfigExport(result) {
+ 			}
+ 			/**
+ 			* 2) export { foo as mastra }
+diff --git a/dist/analyze-z37DoML5.js b/dist/analyze-z37DoML5.js
+index e4c68aaad21c0232dcb5fead1f61ea537859c82c..65cf1152e14ee8bc90d324fd6cdb59ec04101a4a 100644
+--- a/dist/analyze-z37DoML5.js
++++ b/dist/analyze-z37DoML5.js
+@@ -948,7 +948,9 @@ function checkConfigExport(result) {
+ 			const decl = path.node.declaration;
+ 			if (types.isVariableDeclaration(decl)) {
+ 				const varDecl = decl.declarations[0];
 -				if (types.isIdentifier(varDecl?.id, { name: "mastra" }) && types.isNewExpression(varDecl.init) && types.isIdentifier(varDecl.init.callee, { name: "Mastra" })) result.hasValidConfig = true;
 +				const isDirectMastra = types.isNewExpression(varDecl?.init) && types.isIdentifier(varDecl.init.callee, { name: "Mastra" });
 +				const isFsAgentWrapper = types.isIdentifier(varDecl?.init, { name: "__mastra" });
 +				if (types.isIdentifier(varDecl?.id, { name: "mastra" }) && (isDirectMastra || isFsAgentWrapper)) result.hasValidConfig = true;
-diff --git a/dist/services-BRF1RRXB.js b/dist/services-BRF1RRXB.js
-index 98a6326a44a4cc5bdba746341f6f601570cff2a1..8ed05aba375b402a96e74faef772b625fcf65d72 100644
---- a/dist/services-BRF1RRXB.js
-+++ b/dist/services-BRF1RRXB.js
-@@ -140,9 +140,63 @@ function copyPnpmWorkspaceSettings(source, options = {}) {
+ 			}
+ 			/**
+ 			* 2) export { foo as mastra }
+diff --git a/dist/services-B9KRKBT-.js b/dist/services-B9KRKBT-.js
+index 98863f5f51424b5541814f6a7c47663c57b0eab5..0c4841d85f60bfe7e61062aded55d0394350c147 100644
+--- a/dist/services-B9KRKBT-.js
++++ b/dist/services-B9KRKBT-.js
+@@ -167,9 +167,60 @@ function copyPnpmWorkspaceSettings(source, options = {}) {
  		blocks.push(architectureBlock.join("\n"));
  	}
  	if (options.pnpmOverrides && Object.keys(options.pnpmOverrides).length > 0) blocks.push(["overrides:", ...Object.entries(options.pnpmOverrides).map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)}`)].join("\n"));
 +	if (options.patchedDependencies && Object.keys(options.patchedDependencies).length > 0) {
 +		blocks.push(["patchedDependencies:", ...Object.entries(options.patchedDependencies).map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)}`)].join("\n"));
-+		// The generated bundle usually contains only a subset of the source
-+		// application's dependencies. Keep pnpm from rejecting source patches
-+		// that are intentionally unused by this isolated runtime install.
 +		blocks.push("allowUnusedPatches: true");
 +	}
  	if (options.pnpmNodeLinker) blocks.push(`nodeLinker: ${options.pnpmNodeLinker}`);
@@ -84,7 +93,7 @@ index 98a6326a44a4cc5bdba746341f6f601570cff2a1..8ed05aba375b402a96e74faef772b625
  var Deps = class extends MastraBase {
  	packageManager;
  	rootDir;
-@@ -205,7 +259,11 @@ var Deps = class extends MastraBase {
+@@ -232,7 +283,11 @@ var Deps = class extends MastraBase {
  	async writePnpmConfig(dir, options = {}) {
  		const sourceWorkspaceYamlPath = this.findPnpmWorkspaceFile(this.rootDir);
  		const sourceWorkspaceYaml = sourceWorkspaceYamlPath ? await fsPromises.readFile(sourceWorkspaceYamlPath, "utf-8") : "";
@@ -97,19 +106,16 @@ index 98a6326a44a4cc5bdba746341f6f601570cff2a1..8ed05aba375b402a96e74faef772b625
  	}
  	async writeYarnConfig(dir, options) {
  		const yarnrcPath = path.join(dir, ".yarnrc.yml");
-diff --git a/dist/services-_ksvysL5.cjs b/dist/services-_ksvysL5.cjs
-index 706ee2325e2c4adc5b229bde1a9b7531116f3336..e2e5b836f9d7f2f879cd6c7491b9ffce45b76c32 100644
---- a/dist/services-_ksvysL5.cjs
-+++ b/dist/services-_ksvysL5.cjs
-@@ -144,9 +144,63 @@ function copyPnpmWorkspaceSettings(source, options = {}) {
+diff --git a/dist/services-BLvNG7v7.cjs b/dist/services-BLvNG7v7.cjs
+index 87c6bced303692232d03c5d2e1114b849f166534..0c9fbc78084fb618a4f2c2343800783fff4a2ebe 100644
+--- a/dist/services-BLvNG7v7.cjs
++++ b/dist/services-BLvNG7v7.cjs
+@@ -171,9 +171,60 @@ function copyPnpmWorkspaceSettings(source, options = {}) {
  		blocks.push(architectureBlock.join("\n"));
  	}
  	if (options.pnpmOverrides && Object.keys(options.pnpmOverrides).length > 0) blocks.push(["overrides:", ...Object.entries(options.pnpmOverrides).map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)}`)].join("\n"));
 +	if (options.patchedDependencies && Object.keys(options.patchedDependencies).length > 0) {
 +		blocks.push(["patchedDependencies:", ...Object.entries(options.patchedDependencies).map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)}`)].join("\n"));
-+		// The generated bundle usually contains only a subset of the source
-+		// application's dependencies. Keep pnpm from rejecting source patches
-+		// that are intentionally unused by this isolated runtime install.
 +		blocks.push("allowUnusedPatches: true");
 +	}
  	if (options.pnpmNodeLinker) blocks.push(`nodeLinker: ${options.pnpmNodeLinker}`);
@@ -165,7 +171,7 @@ index 706ee2325e2c4adc5b229bde1a9b7531116f3336..e2e5b836f9d7f2f879cd6c7491b9ffce
  var Deps = class extends _mastra_core_base.MastraBase {
  	packageManager;
  	rootDir;
-@@ -209,7 +263,11 @@ var Deps = class extends _mastra_core_base.MastraBase {
+@@ -236,7 +287,11 @@ var Deps = class extends _mastra_core_base.MastraBase {
  	async writePnpmConfig(dir, options = {}) {
  		const sourceWorkspaceYamlPath = this.findPnpmWorkspaceFile(this.rootDir);
  		const sourceWorkspaceYaml = sourceWorkspaceYamlPath ? await fs_promises.default.readFile(sourceWorkspaceYamlPath, "utf-8") : "";

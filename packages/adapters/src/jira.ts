@@ -33,7 +33,8 @@ function adfDocument(text: string) {
 }
 
 export function verifyWebhookToken(actual: string | undefined, expected: string | undefined): boolean {
+  if (!actual) return false;
   if (!expected) return process.env.NODE_ENV !== "production";
-  if (!actual || actual.length !== expected.length) return false;
+  if (actual.length !== expected.length) return false;
   return timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
 }
