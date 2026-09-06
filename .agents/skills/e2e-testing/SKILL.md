@@ -49,6 +49,7 @@ Qasey's clean verifier supplies `QASEY_E2E_BASE_URL` as `BASE_URL` plus only the
 
 ## Repository conventions
 
+- Live dogfood Case automation must use a filename matched by `tests/browser/playwright.config.ts`: `tests/browser/*.e2e.spec.ts`. Never assign a live Case to `tests/browser/admin-ui.spec.ts`; that file belongs to the route-mocked UI contract suite and is excluded from clean dogfood verification.
 - Reuse existing page objects, fixtures, and accessible locators. Prefer role, label, and exact visible text over CSS structure or sleeps.
 - Map exactly one Playwright test to one Case Hub case. Include the `QASEY-N` id in the title and exactly one `qasey.case` plus one `qasey.version` annotation from the frozen Case.
 - Keep meaningful assertions and failure artifacts. Do not use `test.only`, unapproved skips, conditional pass paths, or weakened assertions.

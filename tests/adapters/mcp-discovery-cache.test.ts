@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { McpToolDiscoveryCache } from "../../packages/adapters/src/mcp.ts";
 
-const result = (name: string) => ({ tools: { [name]: { description: name } }, errors: {} });
+const result = (name: string) => ({
+  tools: { [name]: { description: name } },
+  errors: {},
+  errorDetails: {},
+});
 
 describe("MCP tool discovery cache", () => {
   afterEach(() => vi.useRealTimers());
@@ -51,6 +55,7 @@ describe("MCP tool discovery cache", () => {
     await vi.advanceTimersByTimeAsync(50);
     await expect(first).resolves.toEqual({
       tools: {}, errors: { discovery: "Tool discovery is still warming in the background" },
+      errorDetails: {},
     });
 
     resolve(result("ready"));

@@ -72,7 +72,7 @@ model QaseyCaseVersionRecord {
   tenantId      String   @map("tenant_id")
   id            String   @db.Uuid
   caseId        String   @map("case_id")
-  changeSetId   String   @map("change_set_id") @db.Uuid
+  changeSetId   String?  @map("change_set_id") @db.Uuid
   version       Int
   status        String
   payload       Json
@@ -82,6 +82,43 @@ model QaseyCaseVersionRecord {
   @@unique([applicationId, tenantId, caseId, version], map: "qasey_case_versions_case_version_key")
   @@index([applicationId, tenantId, changeSetId], map: "qasey_case_versions_change_set_idx")
   @@map("qasey_case_versions")
+}
+
+model QaseyCaseReviewPlanRecord {
+  applicationId String   @map("application_id")
+  tenantId      String   @map("tenant_id")
+  id            String   @db.Uuid
+  conversationId String  @map("conversation_id")
+  threadId      String   @map("thread_id")
+  subjectId     String   @map("subject_id")
+  status        String
+  revision      Int      @default(1)
+  payload       Json
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@id([applicationId, tenantId, id])
+  @@index([applicationId, tenantId, conversationId, updatedAt(sort: Desc)], map: "qasey_case_review_plans_conversation_idx")
+  @@index([applicationId, tenantId, status, updatedAt(sort: Desc)], map: "qasey_case_review_plans_status_idx")
+  @@map("qasey_case_review_plans")
+}
+
+model QaseyCaseReviewItemRecord {
+  applicationId String   @map("application_id")
+  tenantId      String   @map("tenant_id")
+  id            String   @db.Uuid
+  planId        String   @map("plan_id") @db.Uuid
+  ordinal       Int
+  status        String
+  revision      Int      @default(1)
+  payload       Json
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@id([applicationId, tenantId, id])
+  @@unique([applicationId, tenantId, planId, ordinal], map: "qasey_case_review_items_ordinal_key")
+  @@index([applicationId, tenantId, planId, status], map: "qasey_case_review_items_plan_idx")
+  @@map("qasey_case_review_items")
 }
 
 model QaseyCaseChangeSetRecord {
@@ -118,6 +155,59 @@ model QaseyCaseResultRecord {
   @@unique([applicationId, tenantId, runId, caseVersionId, attempt], map: "qasey_case_results_attempt_key")
   @@index([applicationId, tenantId, changeSetId, reviewStatus], map: "qasey_case_results_review_idx")
   @@map("qasey_case_results")
+}
+
+model QaseyConversationRecord {
+  applicationId String   @map("application_id")
+  tenantId      String   @map("tenant_id")
+  id            String   @db.Uuid
+  subjectId     String   @map("subject_id")
+  title         String
+  activeTurnId  String?  @map("active_turn_id") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@id([applicationId, tenantId, id])
+  @@index([applicationId, tenantId, subjectId, updatedAt(sort: Desc)], map: "qasey_conversations_owner_idx")
+  @@map("qasey_conversations")
+}
+
+model QaseyConversationTurnRecord {
+  applicationId String   @map("application_id")
+  tenantId      String   @map("tenant_id")
+  id            String   @db.Uuid
+  conversationId String  @map("conversation_id") @db.Uuid
+  clientMessageId String @map("client_message_id") @db.Uuid
+  userMessage   String   @map("user_message")
+  assistantText String   @default("") @map("assistant_text")
+  status        String
+  eventSequence Int      @default(0) @map("event_sequence")
+  agentRunId    String?  @map("agent_run_id") @db.Uuid
+  linkedRunId   String?  @map("linked_run_id") @db.Uuid
+  error         String?
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@id([applicationId, tenantId, id])
+  @@unique([applicationId, tenantId, conversationId, clientMessageId], map: "qasey_conversation_turns_client_message_key")
+  @@index([applicationId, tenantId, conversationId, createdAt], map: "qasey_conversation_turns_conversation_idx")
+  @@index([status, updatedAt], map: "qasey_conversation_turns_stale_idx")
+  @@map("qasey_conversation_turns")
+}
+
+model QaseyConversationEventRecord {
+  applicationId String   @map("application_id")
+  tenantId      String   @map("tenant_id")
+  conversationId String  @map("conversation_id") @db.Uuid
+  turnId        String   @map("turn_id") @db.Uuid
+  sequence      Int
+  type          String
+  payload       Json     @default("{}")
+  occurredAt    DateTime @default(now()) @map("occurred_at")
+
+  @@id([applicationId, tenantId, turnId, sequence])
+  @@index([applicationId, tenantId, conversationId, turnId, sequence], map: "qasey_conversation_events_replay_idx")
+  @@map("qasey_conversation_events")
 }
 
 model QaseyE2EFixtureLease {
@@ -471,4 +561,19 @@ model QaseyMcpOAuthCredential {
 
   @@id([namespace, storageKey])
   @@map("qasey_mcp_oauth_credentials")
+}
+
+// Durable conversation mailbox, participant registry and replay journal.
+model ConversationCollaborationRecord {
+  applicationId String @map("application_id")
+  tenantId String @map("tenant_id")
+  conversationId String @map("conversation_id") @db.Uuid
+  subjectId String @map("subject_id")
+  revision Int @default(0)
+  state Json
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  @@id([applicationId, tenantId, conversationId])
+  @@index([updatedAt], map: "conversation_collaboration_updated_idx")
+  @@map("conversation_collaboration")
 }

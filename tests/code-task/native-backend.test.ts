@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { nativeCodingBackendPolicy } from "../../packages/code-task/src/index.ts";
+import {
+  codeTaskTraceIds,
+  nativeCodingBackendPolicy,
+  QASEY_E2E_CODE_AUTHOR_ID,
+} from "../../packages/code-task/src/index.ts";
 
 describe("native Mastra coding backend policy", () => {
   it("accepts writes only inside frozen allowed paths", () => {
@@ -20,5 +24,14 @@ describe("native Mastra coding backend policy", () => {
 
     expect(nativeCodingBackendPolicy.taskSkillPaths(context)).toEqual([".agents/skills", ".claude/skills"]);
     expect(nativeCodingBackendPolicy.taskSkillPaths("not-json")).toEqual([]);
+  });
+
+  it("uses one stable E2E Agent identity and propagates valid W3C trace ids", () => {
+    const traceId = "a".repeat(32);
+    const parentSpanId = "b".repeat(16);
+
+    expect(QASEY_E2E_CODE_AUTHOR_ID).toBe("qasey-e2e-author");
+    expect(codeTaskTraceIds({ traceparent: `00-${traceId}-${parentSpanId}-01` })).toEqual({ traceId, parentSpanId });
+    expect(codeTaskTraceIds({ traceId: "task-local-label" })).toBeUndefined();
   });
 });

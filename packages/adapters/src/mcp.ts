@@ -104,6 +104,7 @@ export class McpToolDiscoveryCache {
       .catch((error: unknown): ToolDiscoveryResult => ({
         tools: {},
         errors: { discovery: error instanceof Error ? error.message : String(error) },
+        errorDetails: {},
       }))
       .then(result => {
         entry.value = result;
@@ -131,6 +132,7 @@ export class McpToolDiscoveryCache {
         const result: ToolDiscoveryResult = {
           tools: {},
           errors: { discovery: "Tool discovery is still warming in the background" },
+          errorDetails: {},
         };
         entry.value = result;
         entry.expiresAt = this.now() + this.failureTtlMs;

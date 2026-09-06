@@ -1,8 +1,10 @@
+import { RequestContext, MASTRA_THREAD_ID_KEY } from "@mastra/core/request-context";
 import type { Mastra } from "@mastra/core/mastra";
 import { describe, expect, it, vi } from "vitest";
 import type { QaseyRequestContext } from "../../packages/contracts/src/index.ts";
 import {
   agentRuntimeEventFromChunk,
+  prepareQaseyRequestContext,
   assertNormalCompletion,
   executeQasey,
   QaseyResponseSchema,
@@ -21,6 +23,15 @@ const context: QaseyRequestContext = {
 };
 
 describe("Qasey service completion", () => {
+  it("isolates each participant in Mastra's trusted thread key while preserving the main agent's legacy thread", () => {
+    const main = prepareQaseyRequestContext(context);
+    const addressed = new RequestContext();
+    addressed.set("qasey-conversation-agent", "qasey-e2e-author");
+    const e2e = prepareQaseyRequestContext(context, addressed);
+    expect(e2e.get(MASTRA_THREAD_ID_KEY)).toBe(`${main.get(MASTRA_THREAD_ID_KEY)}:agent:qasey-e2e-author`);
+    expect(e2e.get("sessionId")).toBe(main.get("sessionId"));
+  });
+
   it("selects only final-step text and validates native completion", () => {
     expect(selectFinalText({
       text: "progressfinal",

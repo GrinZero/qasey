@@ -11,6 +11,7 @@ const setupSource = [
 ].join("\n");
 const setupFile = { type: "file", encoding: "base64", content: Buffer.from(setupSource).toString("base64") };
 const playwrightConfigSource = [
+  "use: { video: 'on' },",
   "projects: [",
   "  { name: 'setup', testMatch: /auth\\.setup\\.ts/ },",
   "  { name: 'chromium', dependencies: ['setup'], use: { storageState: 'test-results/auth.json' } },",
@@ -37,6 +38,9 @@ const configuration: WebE2EConfiguration = {
   verification: {
     strategy: "changed-project-playwright",
     projects: [{ id: "web", root: "tests/e2e", testRoot: "tests/e2e", config: "tests/e2e/playwright.config.ts", playwrightProject: "chromium" }],
+  },
+  automationPathPolicy: {
+    projects: [{ id: "web", testRoot: "tests/e2e", testFileSuffixes: [".spec.ts"] }],
   },
 };
 
@@ -143,6 +147,34 @@ describe("E2E preflight", () => {
       id: "authentication",
       status: "blocked",
       message: expect.stringContaining("E2E_LOGIN_PASSWORD"),
+    }));
+  });
+
+  it("blocks configs that cannot retain evidence for a passing Case", async () => {
+    const configWithoutReviewEvidence = playwrightConfigSource.replace("use: { video: 'on' },\n", "");
+    const service = new E2EPreflightService(dependencies({
+      github: {
+        repos: {
+          get: vi.fn(async () => ({ data: { permissions: { push: true } } })),
+          getCommit: vi.fn(async () => ({ data: { sha: sourceSha } })),
+          getContent: vi.fn(async (input: { path: string }) => ({
+            data: input.path === configuration.target.e2eAuthentication.setupPath
+              ? setupFile
+              : input.path === configuration.verification.projects[0]?.config
+                ? { type: "file", encoding: "base64", content: Buffer.from(configWithoutReviewEvidence).toString("base64") }
+                : { type: "file" },
+          })),
+        },
+      },
+    }));
+
+    const snapshot = await service.inspect(owner, configuration);
+
+    expect(snapshot.ready).toBe(false);
+    expect(snapshot.checks).toContainEqual(expect.objectContaining({
+      id: "playwright_config",
+      status: "blocked",
+      message: expect.stringContaining("retain video or trace evidence"),
     }));
   });
 

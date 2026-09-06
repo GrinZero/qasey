@@ -19,6 +19,7 @@ describe("generic CodeTask runner", () => {
       get: vi.fn(async () => state!),
       events: vi.fn(async () => ({ events: [] })),
       cancel: vi.fn(async () => undefined),
+      release: vi.fn(async () => undefined),
       artifact: vi.fn(async () => Buffer.alloc(0)),
     };
 
@@ -53,6 +54,7 @@ describe("generic CodeTask runner", () => {
       }),
       events: vi.fn(async () => ({ events: [] })),
       cancel: vi.fn(async () => undefined),
+      release: vi.fn(async () => undefined),
       artifact: vi.fn(async () => Buffer.alloc(0)),
     };
 
@@ -77,6 +79,6 @@ function reviewSpec(): CodeTaskSpec {
 function successfulResult(): CodeTaskResult {
   return {
     status: "succeeded", summary: "reviewed", changedPaths: [], changes: [], checks: [], artifacts: [],
-    provenance: { imageDigest: "sha256:test", profileHash: "c".repeat(64), agentBackend: "native-mastra", mastraVersion: "1.59.0", model: "gpt-5.6-sol" },
+    provenance: { imageDigest: "sha256:test", profileHash: "c".repeat(64), agentBackend: "native-mastra", mastraVersion: "1.64.0", model: "gpt-5.6-sol" },
   };
 }

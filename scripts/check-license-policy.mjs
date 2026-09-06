@@ -4,7 +4,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
-const SUPPORTED_REVIEW_KEY = "@mastra/redis-streams@0.3.0";
+const SUPPORTED_REVIEW_KEY = "@mastra/redis-streams@0.4.1";
 const REVIEW_FIELDS = [
   "expectedLicense",
   "licenseFile",

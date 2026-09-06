@@ -1,15 +1,22 @@
+import { ConversationAddressSchema } from "../../../../packages/contracts/src/index.ts";
+import { InvalidConversationRecipientError, publicSnapshot, sharedContext } from "../../../../packages/domain/src/collaboration-repository.ts";
+import { collaborationRepository } from "../../runtime.ts";
+import { acceptCollaborationMessage, attachConversationRuns } from "./collaboration.ts";
+import { collaborationUIMessages } from "./collaboration-view.ts";
+import { e2eTaskFromTurn, reviewPlanTasks } from "./e2e-task-links.ts";
 import { registerApiRoute } from "@mastra/core/server";
+import { RequestContext } from "@mastra/core/request-context";
 import "playwright-core";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname, extname, resolve, sep } from "node:path";
+import { dirname, resolve, sep } from "node:path";
 import { z } from "zod";
-import { CaseHubResultReviewInputSchema, CreateCaseHubChangeSetSchema, CreateE2ERunRequestSchema, type CaseHubChangeSet, type CaseHubResult, type OwnerScope } from "../../../../packages/contracts/src/index.ts";
-import { freezeE2EContext, normalizeJiraWebhook } from "../../../../packages/domain/src/index.ts";
-import { artifactStore, caseHubRepository, channelDeliveryInbox, config, e2eFixtureLeaseService, e2ePreflight, githubClient, jiraClient, runRepository, sandboxPoolClient } from "../../runtime.ts";
+import { ApproveCaseReviewItemsSchema, CaseHubResultReviewInputSchema, CaseReviewItemRevisionSchema, GenerateE2EConversationActionSchema, UpdateCaseReviewItemSchema, type CaseHubChangeSet, type CaseHubResult, type CaseReviewPlanDetail, type GenerateE2EConversationAction, type OwnerScope, type QaseyConversationEvent } from "../../../../packages/contracts/src/index.ts";
+import { CaseReviewForbiddenError, CaseReviewRevisionConflictError, ConversationBusyError, ConversationTurnClosedError, normalizeJiraWebhook } from "../../../../packages/domain/src/index.ts";
+import { artifactStore, caseHubRepository, channelDeliveryInbox, config, conversationRepository, e2eFixtureLeaseService, e2ePreflight, githubClient, jiraClient, runRepository, sandboxPoolClient } from "../../runtime.ts";
 import { ArtifactNotFoundError, ArtifactOwnershipError } from "../../../../packages/e2e/src/index.ts";
-import { cancelE2ERun, createAndStartE2ERun, rerunE2E, resumeE2EWithVerdict } from "../../workflows/e2e-workflow.ts";
+import { cancelE2ERun, dispatchE2ERepair, rerunE2E, resumeE2EWithVerdict } from "../../workflows/e2e-workflow.ts";
 import { ownerScopeFromRequestContext } from "../../../platform/context/owner-scope.ts";
 import type { OwnedApiRoute, PrimitiveAccessPolicy } from "../../../runtime/application.ts";
 import { conversationScope } from "../../../platform/context/conversation-scope.ts";
@@ -21,6 +28,9 @@ import { runtimeReadiness } from "../../../platform/storage/readiness.ts";
 import { productionSignals } from "../../../platform/observability/production-signals.ts";
 import { devRuntimeTunnelServerEnabled } from "../../../../packages/adapters/src/config.ts";
 import { webE2EConfigurationFromSkill } from "../../../platform/code-task/e2e-repository-skill.ts";
+import { traceViewerContentType, traceViewerRelativePath } from "../../../platform/e2e/trace-viewer.ts";
+import { conversationEventStreamResponse, conversationTurnsToUIMessages } from "./ui-message.ts";
+import { publicToolCallPresentation, publicToolResultPresentation } from "./slack-progress.ts";
 import {
   bearerToken,
   DEV_RUNTIME_HEARTBEAT_MS,
@@ -41,6 +51,11 @@ const QaseyTaskRequestSchema = z.object({
   prompt: z.string().trim().min(1).max(100_000),
 }).strict();
 
+const QaseyConversationMessageSchema = ConversationAddressSchema.extend({
+  message: z.string().trim().min(1).max(100_000),
+  clientMessageId: z.string().uuid(),
+}).strict();
+
 function authenticatedUser(c: { get(key: "requestContext"): { get(key: string): unknown } }): PlatformBrowserUser | undefined {
   return c.get("requestContext").get("user") as PlatformBrowserUser | undefined;
 }
@@ -49,11 +64,224 @@ function owner(c: { get(key: "requestContext"): import("@mastra/core/request-con
   return ownerScopeFromRequestContext(c.get("requestContext"));
 }
 
+function conversationSubject(c: { get(key: "requestContext"): import("@mastra/core/request-context").RequestContext }): string {
+  return OAuthPrincipalSchema.parse(c.get("requestContext").get("platform-principal")).subjectId;
+}
+
 function errorBody(error: unknown, requestId: string) {
   const message = config.NODE_ENV === "production"
     ? "The request could not be completed. Use the request ID to inspect server logs."
     : error instanceof Error ? error.message : String(error);
   return { message, requestId };
+}
+
+function reviewMutationError(error: unknown): { body: Record<string, unknown>; status: 403 | 409 } {
+  if (error instanceof CaseReviewForbiddenError) return { body: { error: error.code, message: error.message }, status: 403 };
+  if (error instanceof CaseReviewRevisionConflictError) return { body: { error: error.code, message: error.message }, status: 409 };
+  return { body: { error: "case_review_failed", ...errorBody(error, crypto.randomUUID()) }, status: 409 };
+}
+
+async function decorateReviewPlan(ownerScope: OwnerScope, detail: CaseReviewPlanDetail): Promise<CaseReviewPlanDetail> {
+  const versionIds = detail.items.flatMap(item => item.publishedCaseVersionId ? [item.publishedCaseVersionId] : []);
+  const statuses = await caseHubRepository.automationStatuses(ownerScope, versionIds);
+  return {
+    ...detail,
+    ...(detail.editable ? { e2eTasks: await reviewPlanTasks(conversationRepository, ownerScope, detail.plan.subjectId, detail.plan.conversationId, detail.plan.id) } : {}),
+    items: detail.items.map(item => {
+      const automationStatus = item.publishedCaseVersionId ? statuses[item.publishedCaseVersionId] ?? "none" : "none";
+      return { ...item, automationStatus, systemTags: automationStatus === "verified" ? ["e2e"] : [] };
+    }),
+  };
+}
+
+function sseHeaders(): Record<string, string> {
+  return {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive",
+    "x-accel-buffering": "no",
+  };
+}
+
+function runEventResponse(ownerScope: OwnerScope, runId: string, signal: AbortSignal): Response {
+  const encoder = new TextEncoder();
+  const seen = new Set<string>();
+  let revision = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let closed = false;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        if (timer) clearTimeout(timer);
+        try { controller.close(); } catch { /* The client may have already disconnected. */ }
+      };
+      const poll = async () => {
+        if (closed) return;
+        try {
+          const [run, events] = await Promise.all([
+            runRepository.get(ownerScope, runId), runRepository.events(ownerScope, runId),
+          ]);
+          if (!run) { close(); return; }
+          if (run.revision !== revision) {
+            revision = run.revision;
+            controller.enqueue(encoder.encode(`event: snapshot\ndata: ${JSON.stringify({ run })}\n\n`));
+          }
+          for (const event of events) {
+            if (seen.has(event.id)) continue;
+            seen.add(event.id);
+            controller.enqueue(encoder.encode(`id: ${event.id}\nevent: run.event\ndata: ${JSON.stringify({ event })}\n\n`));
+          }
+          if (["succeeded", "failed", "cancelled"].includes(run.status)) { close(); return; }
+          timer = setTimeout(() => { void poll(); }, 500);
+          timer.unref?.();
+        } catch (error) {
+          controller.error(error);
+          close();
+        }
+      };
+      signal.addEventListener("abort", close, { once: true });
+      void poll();
+    },
+    cancel() {
+      closed = true;
+      if (timer) clearTimeout(timer);
+    },
+  });
+  return new Response(body, { headers: sseHeaders() });
+}
+
+export async function executeConversationTurn(input: {
+  mastra: Parameters<typeof executeQasey>[0];
+  principal: z.infer<typeof OAuthPrincipalSchema>;
+  owner: OwnerScope;
+  conversationId: string;
+  turnId: string;
+  message: string;
+  action?: GenerateE2EConversationAction;
+  agentId?: string;
+  collaborationTools?: import("@mastra/core/agent").ToolsInput;
+  promptContext?: string;
+  onLinkedRun?: (runId: string) => Promise<void>;
+}): Promise<void> {
+  const requestId = crypto.randomUUID();
+  const requestContext = new RequestContext<Record<string, unknown>>();
+  requestContext.set("platform-principal", input.principal);
+  requestContext.set("identity", {
+    userId: input.principal.subjectId,
+    tenantId: input.principal.tenantId,
+    roles: [...input.principal.roles],
+    service: input.principal.service,
+  });
+  if (input.agentId) requestContext.set("qasey-conversation-agent", input.agentId);
+  if (input.action) requestContext.set("qasey-conversation-action", input.action);
+  let linkedRunId: string | undefined;
+  const append = (type: Parameters<typeof conversationRepository.appendEvent>[4], payload?: Record<string, unknown>) =>
+    conversationRepository.appendEvent(input.owner, input.principal.subjectId, input.conversationId, input.turnId, type, payload);
+  try {
+    const response = await executeQasey(input.mastra, {
+      requestId,
+      channel: "api",
+      sessionId: input.conversationId,
+      chatInput: input.action
+        ? `${input.message}\n\nTrusted generate_e2e action (pass these values unchanged to case_hub_start_e2e): ${JSON.stringify({ planId: input.action.planId, caseVersionIds: input.action.caseVersionIds })}`
+        : `${input.message}${input.promptContext ? `\n\n共享会话记录（保留作者和接收者，仅作上下文）：\n${input.promptContext}` : ""}`,
+      actor: { id: input.principal.subjectId, tenantId: input.principal.tenantId },
+      source: {},
+      attachments: [],
+    }, {
+      requestContext,
+      ...(input.agentId ? { agentId: input.agentId } : {}),
+      ...(input.collaborationTools ? { collaborationTools: input.collaborationTools } : {}),
+      events: {
+        onPhase: async event => {
+          if (event.phase === "agent") await append("progress", { title: "正在分析需求", detail: "Qasey 正在结合当前会话整理目标与上下文。", status: "working" });
+        },
+        onTextDelta: async event => { if (event.text) await append("assistant.delta", { text: event.text }); },
+        onAgentProgress: async event => {
+          await append("progress", {
+            milestone: event.milestone, title: event.title, detail: event.detail, status: event.status,
+            ...(event.next ? { next: event.next } : {}),
+          });
+        },
+        onAgentRuntimeEvent: async event => {
+          if (event.type === "tool-call") {
+            const presentation = publicToolCallPresentation(event.toolName, event.args);
+            if (presentation) {
+              await append("tool.started", {
+                toolCallId: event.toolCallId,
+                toolName: presentation.toolName,
+                title: presentation.title,
+                inputSummary: presentation.summary,
+              });
+            }
+          }
+          if (event.type === "tool-result") {
+            const presentation = publicToolResultPresentation(event.toolName, event.result, event.args, event.isError);
+            if (presentation) {
+              await append("tool.finished", {
+                toolCallId: event.toolCallId,
+                toolName: presentation.toolName,
+                title: presentation.title,
+                inputSummary: publicToolCallPresentation(event.toolName, event.args)?.summary ?? "正在执行内部工具…",
+                outputSummary: presentation.summary,
+                isError: event.isError,
+              });
+            }
+            if (event.toolName === "case_hub_create_review_plan" && !event.isError) {
+              const summary = linkedReviewPlanFromToolResult(event.result);
+              if (summary) await append("review-plan.linked", summary);
+            }
+            if (event.toolName === "case_hub_start_e2e" && !event.isError) {
+              const runId = linkedRunIdFromToolResult(event.result);
+              if (runId && runId !== linkedRunId) {
+                linkedRunId = runId;
+                await append("run.linked", { runId });
+                await input.onLinkedRun?.(runId);
+              }
+            }
+          }
+        },
+      },
+    });
+    await append("completed", { text: response.text, runId: response.runId });
+  } catch (error) {
+    const message = config.NODE_ENV === "production"
+      ? "Qasey 未能完成这轮处理，请重试。"
+      : error instanceof Error ? error.message : String(error);
+    try {
+      await append("failed", { message });
+    } catch (appendError) {
+      // A periodic recovery pass may have finalized an unresponsive turn while
+      // its underlying tool or model call was still unwinding.
+      if (!(appendError instanceof ConversationTurnClosedError)) throw appendError;
+    }
+  }
+}
+
+function linkedReviewPlanFromToolResult(result: unknown): Record<string, unknown> | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const detail = result as { plan?: unknown; items?: unknown };
+  if (!detail.plan || typeof detail.plan !== "object" || !Array.isArray(detail.items)) return undefined;
+  const plan = detail.plan as { id?: unknown; revision?: unknown; status?: unknown };
+  if (typeof plan.id !== "string" || !z.uuid().safeParse(plan.id).success || typeof plan.revision !== "number") return undefined;
+  const counts = detail.items.reduce((value, item) => {
+    const status = item && typeof item === "object" ? (item as { status?: unknown }).status : undefined;
+    if (status === "pending") value.pendingCount++;
+    if (status === "approved") value.approvedCount++;
+    if (status === "removed") value.removedCount++;
+    return value;
+  }, { pendingCount: 0, approvedCount: 0, removedCount: 0 });
+  return { planId: plan.id, revision: plan.revision, status: plan.status, ...counts };
+}
+
+function linkedRunIdFromToolResult(result: unknown): string | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const run = (result as { run?: unknown }).run;
+  if (!run || typeof run !== "object") return undefined;
+  const id = (run as { id?: unknown }).id;
+  return typeof id === "string" && z.uuid().safeParse(id).success ? id : undefined;
 }
 
 function sandboxScope(c: { get(key: "requestContext"): import("@mastra/core/request-context").RequestContext; req: { param(name: string): string } }) {
@@ -84,17 +312,6 @@ function playwrightTraceViewerRoot(): string {
   const playwrightCorePackage = nodeRequire.resolve("playwright-core/package.json");
   traceViewerRoot = resolve(dirname(playwrightCorePackage), "lib/vite/traceViewer");
   return traceViewerRoot;
-}
-
-function traceViewerContentType(path: string): string {
-  const extension = extname(path).toLowerCase();
-  if (extension === ".html") return "text/html; charset=utf-8";
-  if (extension === ".js") return "application/javascript; charset=utf-8";
-  if (extension === ".css") return "text/css; charset=utf-8";
-  if (extension === ".svg") return "image/svg+xml";
-  if (extension === ".webmanifest") return "application/manifest+json";
-  if (extension === ".ttf") return "font/ttf";
-  return "application/octet-stream";
 }
 
 function validGitHubSignature(rawBody: string, signature: string | undefined): boolean {
@@ -371,6 +588,194 @@ export const apiRoutes = [
       }
     },
   }),
+  registerApiRoute("/v1/qasey/conversations", {
+    method: "GET",
+    handler: async c => c.json({
+      conversations: await conversationRepository.listConversations(
+        owner(c), conversationSubject(c), Number(c.req.query("limit") ?? 50),
+      ),
+    }),
+  }),
+  registerApiRoute("/v1/qasey/conversations", {
+    method: "POST",
+    handler: async c => c.json({
+      conversation: await conversationRepository.createConversation(owner(c), conversationSubject(c)),
+    }, 201),
+  }),
+  registerApiRoute("/v1/qasey/conversations/:conversationId", {
+    method: "GET",
+    handler: async c => {
+      const ownerScope = owner(c);
+      const subjectId = conversationSubject(c);
+      const conversation = await conversationRepository.getConversation(ownerScope, subjectId, c.req.param("conversationId"));
+      if (!conversation) return c.json({ error: "not_found" }, 404);
+      const turns = await conversationRepository.listTurns(ownerScope, subjectId, conversation.id);
+      const eventGroups = await Promise.all(turns.map(async turn => [
+        turn.id,
+        await conversationRepository.events(ownerScope, subjectId, conversation.id, turn.id),
+      ] as const));
+      const scope = { ...ownerScope, subjectId, conversationId: conversation.id };
+      await attachConversationRuns(scope);
+      const state = await collaborationRepository.read(scope);
+      return c.json({ conversation, ...publicSnapshot(state), messages: collaborationUIMessages(state, turns, new Map(eventGroups), scope.conversationId) });
+    },
+  }),
+  registerApiRoute("/v1/qasey/conversations/:conversationId/events", {
+    method: "GET",
+    handler: async c => {
+      const scope = { ...owner(c), subjectId: conversationSubject(c), conversationId: c.req.param("conversationId") };
+      if (!await conversationRepository.getConversation(scope, scope.subjectId, scope.conversationId)) return c.json({ error: "not_found" }, 404);
+      await attachConversationRuns(scope);
+      const encoder = new TextEncoder();
+      let closed = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let cursor = Number(c.req.query("after") ?? 0);
+      let lastSignature = "";
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const close = () => { if (closed) return; closed = true; if (timer) clearTimeout(timer); try { controller.close(); } catch {} };
+          c.req.raw.signal.addEventListener("abort", close, { once: true });
+          const poll = async () => {
+            if (closed) return;
+            try {
+              const state = await collaborationRepository.read(scope);
+              const turns = await conversationRepository.listTurns(scope, scope.subjectId, scope.conversationId);
+              const signature = JSON.stringify([state.revision, turns.map(t => [t.id, t.updatedAt, t.assistantText.length])]);
+              if (signature !== lastSignature) {
+                const eventGroups = await Promise.all(turns.map(async t => [t.id, await conversationRepository.events(scope, scope.subjectId, scope.conversationId, t.id)] as const));
+                // Snapshots replace state, so replay safely covers both missed revisions and legacy turns.
+                cursor = state.revision;
+                const data = { ...publicSnapshot(state), messages: collaborationUIMessages(state, turns, new Map(eventGroups), scope.conversationId) };
+                controller.enqueue(encoder.encode(`id: ${cursor}\nevent: snapshot\ndata: ${JSON.stringify(data)}\n\n`));
+                lastSignature = signature;
+              } else controller.enqueue(encoder.encode(": heartbeat\n\n"));
+              timer = setTimeout(() => { void poll(); }, 750);
+              timer.unref?.();
+            } catch { close(); }
+          };
+          void poll();
+        },
+        cancel() { closed = true; if (timer) clearTimeout(timer); },
+      });
+      return new Response(body, { headers: sseHeaders() });
+    },
+  }),
+  registerApiRoute("/v1/qasey/conversations/:conversationId/messages", {
+    method: "POST",
+    handler: async c => {
+      const parsed = QaseyConversationMessageSchema.safeParse(await c.req.json());
+      if (!parsed.success) return c.json({ error: "validation_error", details: parsed.error.issues }, 400);
+      const ownerScope = owner(c);
+      const principal = OAuthPrincipalSchema.parse(c.get("requestContext").get("platform-principal"));
+      try {
+        if (parsed.data.recipientAgentIds || c.req.header("accept")?.includes("application/json")) {
+          const scope = { ...ownerScope, subjectId: principal.subjectId, conversationId: c.req.param("conversationId") };
+          const deliveryIds = await acceptCollaborationMessage(scope, {
+            id: parsed.data.clientMessageId, text: parsed.data.message, principal,
+            ...(parsed.data.recipientAgentIds ? { recipients: parsed.data.recipientAgentIds } : {}),
+            ...(parsed.data.targetRunId ? { runId: parsed.data.targetRunId } : {}),
+          });
+          return c.json({ accepted: true, deliveryIds }, 202);
+        }
+        const started = await conversationRepository.startTurn(
+          ownerScope, principal.subjectId, c.req.param("conversationId"),
+          parsed.data.clientMessageId, parsed.data.message,
+        );
+        if (started.created) {
+          void executeConversationTurn({
+            mastra: c.get("mastra"), principal, owner: ownerScope,
+            conversationId: started.turn.conversationId, turnId: started.turn.id, message: started.turn.userMessage,
+          });
+        }
+        return conversationEventStreamResponse({
+          repository: conversationRepository,
+          owner: ownerScope, subjectId: principal.subjectId,
+          conversationId: started.turn.conversationId, turn: started.turn,
+          signal: c.req.raw.signal,
+        });
+      } catch (error) {
+        if (error instanceof InvalidConversationRecipientError) return c.json({ error: error.code, message: error.message }, 400);
+        if (error instanceof Error && error.message.includes("not found")) return c.json({ error: "not_found" }, 404);
+        return c.json({ error: "conversation_turn_failed", ...errorBody(error, crypto.randomUUID()) }, 500);
+      }
+    },
+  }),
+  registerApiRoute("/v1/qasey/conversations/:conversationId/actions", {
+    method: "POST",
+    handler: async c => {
+      const parsed = GenerateE2EConversationActionSchema.safeParse(await c.req.json());
+      if (!parsed.success) return c.json({ error: "validation_error", details: parsed.error.issues }, 400);
+      const ownerScope = owner(c);
+      const principal = OAuthPrincipalSchema.parse(c.get("requestContext").get("platform-principal"));
+      const conversationId = c.req.param("conversationId");
+      try {
+        const conversation = await conversationRepository.getConversation(ownerScope, principal.subjectId, conversationId);
+        if (!conversation) return c.json({ error: "not_found" }, 404);
+        const detail = await caseHubRepository.getReviewPlan(ownerScope, parsed.data.planId, principal.subjectId);
+        if (!detail || detail.plan.conversationId !== conversationId) return c.json({ error: "not_found" }, 404);
+        if (!detail.editable) return c.json({ error: "case_review_forbidden" }, 403);
+        if (parsed.data.caseVersionIds.length > 1 && detail.plan.status !== "ready") {
+          return c.json({ error: "case_review_incomplete", message: "批量生成必须等待其余文字用例全部审核完成。" }, 409);
+        }
+        const approved = new Map(detail.items.filter(item => item.status === "approved" && item.publishedCaseVersionId)
+          .map(item => [item.publishedCaseVersionId!, item.publishedCaseId!]));
+        if (new Set(parsed.data.caseVersionIds).size !== parsed.data.caseVersionIds.length || parsed.data.caseVersionIds.some(id => !approved.has(id))) {
+          return c.json({ error: "invalid_case_versions", message: "只能生成本计划中已批准的精确文字用例版本。" }, 409);
+        }
+        const message = `为已批准的文字用例 ${parsed.data.caseVersionIds.map(id => approved.get(id)).join("、")} 生成 E2E 自动化。`;
+        const cases = await Promise.all(parsed.data.caseVersionIds.map(async caseVersionId => {
+          const caseId = approved.get(caseVersionId)!;
+          const versions = await caseHubRepository.versionsForCase(ownerScope, caseId);
+          const version = versions.find(candidate => candidate.id === caseVersionId);
+          if (!version) throw new Error("文字用例版本不存在，请刷新后重试。");
+          return { caseId, caseVersionId, version: version.version, title: version.title };
+        }));
+        const started = await conversationRepository.startTurn(ownerScope, principal.subjectId, conversationId, parsed.data.clientMessageId, message, { planId: parsed.data.planId, cases });
+        if (started.created) {
+          const scope = { ...ownerScope, subjectId: principal.subjectId, conversationId };
+          await collaborationRepository.send(scope, { id: started.turn.clientMessageId, text: message, principal,
+            action: parsed.data, turnId: started.turn.id, context: sharedContext(await collaborationRepository.read(scope)) });
+        }
+        if (c.req.header("accept")?.includes("application/json")) {
+          const task = e2eTaskFromTurn(started);
+          if (!task) return c.json({ error: "missing_task_context", message: "该请求没有关联 E2E 任务，请返回原会话确认。" }, 409);
+          return c.json(task, started.created ? 202 : 200);
+        }
+        return conversationEventStreamResponse({
+          repository: conversationRepository, owner: ownerScope, subjectId: principal.subjectId,
+          conversationId, turn: started.turn, signal: c.req.raw.signal,
+        });
+      } catch (error) {
+        if (error instanceof ConversationBusyError) return c.json({ error: error.code, message: "当前会话仍在处理中，请等待完成后再继续。" }, 409);
+        return c.json({ error: "conversation_action_failed", ...errorBody(error, crypto.randomUUID()) }, 409);
+      }
+    },
+  }),
+  registerApiRoute("/v1/qasey/conversations/:conversationId/turns/:turnId/events", {
+    method: "GET",
+    handler: async c => {
+      const ownerScope = owner(c);
+      const subjectId = conversationSubject(c);
+      const conversationId = c.req.param("conversationId");
+      const turnId = c.req.param("turnId");
+      const turns = await conversationRepository.listTurns(ownerScope, subjectId, conversationId);
+      if (!turns.some(turn => turn.id === turnId)) return c.json({ error: "not_found" }, 404);
+      const headerSequence = Number(c.req.header("last-event-id") ?? 0);
+      const queryValue = c.req.query("after");
+      const querySequence = Number(queryValue);
+      const after = queryValue !== undefined && Number.isFinite(querySequence) && querySequence >= 0
+        ? querySequence
+        : Number.isFinite(headerSequence) && headerSequence >= 0 ? headerSequence : 0;
+      const turn = turns.find(item => item.id === turnId);
+      if (!turn) return c.json({ error: "not_found" }, 404);
+      return conversationEventStreamResponse({
+        repository: conversationRepository,
+        owner: ownerScope, subjectId, conversationId, turn,
+        after,
+        signal: c.req.raw.signal,
+      });
+    },
+  }),
   registerApiRoute("/v1/qasey/tasks", {
     method: "POST",
     handler: async c => {
@@ -402,6 +807,67 @@ export const apiRoutes = [
     method: "GET",
     handler: async c => c.json({ runs: await runRepository.list(owner(c), Number(c.req.query("limit") ?? 100)) }),
   }),
+  registerApiRoute("/v1/case-hub/review-plans", {
+    method: "GET",
+    handler: async c => {
+      const principal = OAuthPrincipalSchema.parse(c.get("requestContext").get("platform-principal"));
+      const ownerScope = owner(c);
+      const plans = await caseHubRepository.listReviewPlans(ownerScope, principal.subjectId, Number(c.req.query("limit") ?? 100));
+      return c.json({ plans: await Promise.all(plans.map(plan => decorateReviewPlan(ownerScope, plan))) });
+    },
+  }),
+  registerApiRoute("/v1/case-hub/review-plans/:planId", {
+    method: "GET",
+    handler: async c => {
+      const principal = OAuthPrincipalSchema.parse(c.get("requestContext").get("platform-principal"));
+      const detail = await caseHubRepository.getReviewPlan(owner(c), c.req.param("planId"), principal.subjectId);
+      return detail ? c.json(await decorateReviewPlan(owner(c), detail)) : c.json({ error: "not_found" }, 404);
+    },
+  }),
+  registerApiRoute("/v1/case-hub/review-plans/:planId/items/:itemId", {
+    method: "PATCH",
+    handler: async c => {
+      const parsed = UpdateCaseReviewItemSchema.safeParse(await c.req.json());
+      if (!parsed.success) return c.json({ error: "validation_error", details: parsed.error.issues }, 400);
+      const principal = OAuthPrincipalSchema.parse(c.get("requestContext").get("platform-principal"));
+      try {
+        return c.json(await caseHubRepository.updateReviewItem(owner(c), c.req.param("planId"), c.req.param("itemId"), principal.subjectId, parsed.data.expectedRevision, parsed.data.content));
+      } catch (error) { const failure = reviewMutationError(error); return c.json(failure.body, failure.status); }
+    },
+  }),
+  ...(["remove", "restore"] as const).map(action => registerApiRoute(`/v1/case-hub/review-plans/:planId/items/:itemId/${action}`, {
+    method: "POST",
+    handler: async c => {
+      const parsed = CaseReviewItemRevisionSchema.pick({ expectedRevision: true }).safeParse(await c.req.json());
+      if (!parsed.success) return c.json({ error: "validation_error", details: parsed.error.issues }, 400);
+      const principal = OAuthPrincipalSchema.parse(c.get("requestContext").get("platform-principal"));
+      try {
+        return c.json(await caseHubRepository.setReviewItemRemoved(owner(c), c.req.param("planId"), c.req.param("itemId"), principal.subjectId, parsed.data.expectedRevision, action === "remove"));
+      } catch (error) { const failure = reviewMutationError(error); return c.json(failure.body, failure.status); }
+    },
+  })),
+  registerApiRoute("/v1/case-hub/review-plans/:planId/items/:itemId/approve", {
+    method: "POST",
+    handler: async c => {
+      const parsed = CaseReviewItemRevisionSchema.pick({ expectedRevision: true }).safeParse(await c.req.json());
+      if (!parsed.success) return c.json({ error: "validation_error", details: parsed.error.issues }, 400);
+      const principal = OAuthPrincipalSchema.parse(c.get("requestContext").get("platform-principal"));
+      try {
+        return c.json(await caseHubRepository.approveReviewItems(owner(c), c.req.param("planId"), principal.subjectId, [{ itemId: c.req.param("itemId"), expectedRevision: parsed.data.expectedRevision }]));
+      } catch (error) { const failure = reviewMutationError(error); return c.json(failure.body, failure.status); }
+    },
+  }),
+  registerApiRoute("/v1/case-hub/review-plans/:planId/approve", {
+    method: "POST",
+    handler: async c => {
+      const parsed = ApproveCaseReviewItemsSchema.safeParse(await c.req.json());
+      if (!parsed.success) return c.json({ error: "validation_error", details: parsed.error.issues }, 400);
+      const principal = OAuthPrincipalSchema.parse(c.get("requestContext").get("platform-principal"));
+      try {
+        return c.json(await caseHubRepository.approveReviewItems(owner(c), c.req.param("planId"), principal.subjectId, parsed.data.items));
+      } catch (error) { const failure = reviewMutationError(error); return c.json(failure.body, failure.status); }
+    },
+  }),
   registerApiRoute("/v1/case-hub/cases", {
     method: "GET",
     handler: async c => c.json({ cases: await caseHubRepository.listCases(owner(c), c.req.query("q") ?? "") }),
@@ -410,13 +876,19 @@ export const apiRoutes = [
     method: "GET",
     handler: async c => {
       const caseRecord = await caseHubRepository.getCase(owner(c), c.req.param("caseId"));
-      if (!caseRecord) return c.json({ error: "not_found" }, 404);
-      const versions = await caseHubRepository.versionsForCase(owner(c), caseRecord.id);
+      if (!caseRecord?.activeVersionId) return c.json({ error: "not_found" }, 404);
+      const versions = (await caseHubRepository.versionsForCase(owner(c), caseRecord.id))
+        .filter(version => version.status === "active");
+      const automationStatuses = await caseHubRepository.automationStatuses(owner(c), versions.map(version => version.id));
+      const decoratedVersions = versions.map(version => ({
+        ...version, automationStatus: automationStatuses[version.id] ?? "none",
+        systemTags: automationStatuses[version.id] === "verified" ? ["e2e" as const] : [],
+      }));
       const versionIds = new Set(versions.map(version => version.id));
       const changeSets = (await caseHubRepository.listChangeSets(owner(c), 500))
         .filter(changeSet => changeSet.caseVersionIds.some(versionId => versionIds.has(versionId)));
       const results = (await Promise.all(changeSets.map(changeSet => caseHubRepository.listResults(owner(c), changeSet.id)))).flat();
-      return c.json({ case: caseRecord, versions, changeSets, results });
+      return c.json({ case: caseRecord, versions: decoratedVersions, changeSets, results });
     },
   }),
   registerApiRoute("/v1/case-hub/change-sets", {
@@ -432,49 +904,10 @@ export const apiRoutes = [
   }),
   registerApiRoute("/v1/case-hub/change-sets", {
     method: "POST",
-    handler: async c => {
-      const parsed = CreateCaseHubChangeSetSchema.safeParse(await c.req.json());
-      if (!parsed.success) return c.json({ error: "validation_error", details: parsed.error.issues }, 400);
-      if (parsed.data.requirement.blockingQuestions.length > 0) {
-        return c.json({ error: "blocking_questions", questions: parsed.data.requirement.blockingQuestions }, 409);
-      }
-      const requestContext = c.get("requestContext");
-      const principal = OAuthPrincipalSchema.parse(requestContext.get("platform-principal"));
-      const requestId = String(requestContext.get("requestId") ?? crypto.randomUUID());
-      const sessionId = String(requestContext.get("sessionId") ?? requestId);
-      const webE2EConfiguration = webE2EConfigurationFromSkill();
-      const requirement = freezeE2EContext(parsed.data.requirement, {
-        sessionId,
-        threadId: String(requestContext.get(MASTRA_THREAD_ID_KEY) ?? sessionId),
-        taskRunId: String(requestContext.get("taskId") ?? requestContext.get("executionId") ?? requestId),
-        requestId,
-        resourceId: String(requestContext.get(MASTRA_RESOURCE_ID_KEY) ?? principal.subjectId),
-      });
-      try {
-        const preflight = await e2ePreflight.assertReady(owner(c), webE2EConfiguration);
-        const changeSet = await caseHubRepository.createChangeSet(owner(c), {
-          requirement,
-          proposals: parsed.data.proposals,
-          repository: webE2EConfiguration.target,
-          createdBy: principal.subjectId,
-          baseSha: preflight.baseSha,
-          environmentSourceSha: e2eFixtureLeaseService.version().sourceSha,
-        });
-        const run = await createAndStartE2ERun(c.get("mastra"), owner(c), {
-          sourceSessionId: sessionId,
-          changeSetId: changeSet.id,
-          handoff: parsed.data.requirement,
-          repository: webE2EConfiguration.target,
-          testEnvironment: webE2EConfiguration.environment,
-          playwrightVerification: webE2EConfiguration.verification,
-          platform: "web",
-          framework: "playwright",
-        }, requestContext, principal.subjectId);
-        return c.json({ changeSet, run }, 202);
-      } catch (error) {
-        return c.json({ error: "change_set_create_failed", ...errorBody(error, requestId) }, 409);
-      }
-    },
+    handler: async c => c.json({
+      error: "text_case_review_required",
+      message: "先在当前 AI session 创建并批准文字用例 Review Plan，再通过 conversation action 生成 E2E。",
+    }, 409),
   }),
   registerApiRoute("/v1/case-hub/change-sets/:changeSetId", {
     method: "GET",
@@ -495,17 +928,33 @@ export const apiRoutes = [
       if (!input.success) return c.json({ error: "validation_error", details: input.error.issues }, 400);
       const principal = OAuthPrincipalSchema.parse(c.get("requestContext").get("platform-principal"));
       try {
+        const beforeReview = await caseHubRepository.getResult(owner(c), c.req.param("resultId"));
+        if (!beforeReview) return c.json({ error: "not_found" }, 404);
         const reviewed = await caseHubRepository.reviewResult(owner(c), c.req.param("resultId"), principal.subjectId, input.data);
         const changeSet = await caseHubRepository.getChangeSet(owner(c), reviewed.changeSetId);
         if (!changeSet) return c.json({ error: "not_found" }, 404);
+        if (beforeReview.reviewStatus !== "pending") {
+          return c.json({ result: reviewed, changeSet }, input.data.verdict === "request_changes" ? 202 : 200);
+        }
         if (input.data.verdict === "product_bug" || input.data.verdict === "environment_issue") {
           const status = input.data.verdict === "product_bug" ? "blocked_product" : "blocked_environment";
           const updated = await caseHubRepository.updateChangeSet(owner(c), changeSet.id, changeSet.revision, { status, error: input.data.feedback });
           return c.json({ result: reviewed, changeSet: updated });
         }
         if (input.data.verdict === "request_changes") {
-          const revising = await caseHubRepository.updateChangeSet(owner(c), changeSet.id, changeSet.revision, { status: "revising" });
-          await resumeE2EWithVerdict(c.get("mastra"), owner(c), reviewed.runId, {
+          let revising = changeSet;
+          if (changeSet.status === "awaiting_review") {
+            try {
+              revising = await caseHubRepository.updateChangeSet(owner(c), changeSet.id, changeSet.revision, { status: "revising" });
+            } catch (error) {
+              const concurrent = await caseHubRepository.getChangeSet(owner(c), changeSet.id);
+              if (!concurrent || !["revising", "verifying"].includes(concurrent.status)) throw error;
+              return c.json({ result: reviewed, changeSet: concurrent }, 202);
+            }
+          } else if (["revising", "verifying"].includes(changeSet.status)) {
+            return c.json({ result: reviewed, changeSet }, 202);
+          }
+          await dispatchE2ERepair(c.get("mastra"), owner(c), reviewed.runId, {
             verdict: "request_changes",
             reviewerId: principal.subjectId,
             caseVersionId: reviewed.caseVersionId,
@@ -526,27 +975,10 @@ export const apiRoutes = [
   }),
   registerApiRoute("/v1/case-hub/runs", {
     method: "POST",
-    handler: async c => {
-      const parsed = CreateE2ERunRequestSchema.safeParse(await c.req.json());
-      if (!parsed.success) return c.json({ error: "validation_error", details: parsed.error.issues }, 400);
-      if (parsed.data.platform !== "web" || parsed.data.framework !== "playwright") {
-        return c.json({ error: "unsupported_e2e_target", message: "CodeTask-backed E2E currently supports Web Playwright only" }, 400);
-      }
-      const requestContext = c.get("requestContext");
-      try {
-        const webE2EConfiguration = webE2EConfigurationFromSkill();
-        await e2ePreflight.assertReady(owner(c), webE2EConfiguration);
-        const trustedInput = {
-          ...parsed.data,
-          sourceSessionId: String(requestContext.get("sessionId")),
-          repository: webE2EConfiguration.target,
-          testEnvironment: webE2EConfiguration.environment,
-          playwrightVerification: webE2EConfiguration.verification,
-        };
-        return c.json(await createAndStartE2ERun(c.get("mastra"), owner(c), trustedInput, requestContext, authenticatedUser(c)?.id), 202);
-      }
-      catch (error) { return c.json(errorBody(error, crypto.randomUUID()), 400); }
-    },
+    handler: async c => c.json({
+      error: "text_case_review_required",
+      message: "直接创建 E2E Run 已停用；请从已批准文字用例的 Review Plan 发起。",
+    }, 409),
   }),
   registerApiRoute("/v1/case-hub/runs/:runId", {
     method: "GET",
@@ -557,12 +989,21 @@ export const apiRoutes = [
   }),
   registerApiRoute("/v1/case-hub/runs/:runId/events", {
     method: "GET",
-    handler: async c => c.json({ events: await runRepository.events(owner(c), c.req.param("runId")) }),
+    handler: async c => {
+      const ownerScope = owner(c);
+      const runId = c.req.param("runId");
+      if (!await runRepository.get(ownerScope, runId)) return c.json({ error: "not_found" }, 404);
+      if (c.req.header("accept")?.includes("text/event-stream")) {
+        return runEventResponse(ownerScope, runId, c.req.raw.signal);
+      }
+      return c.json({ events: await runRepository.events(ownerScope, runId) });
+    },
   }),
   registerApiRoute("/v1/case-hub/trace-viewer/*", {
     method: "GET",
     handler: async c => {
-      const relativePath = c.req.param("*") || "index.html";
+      const relativePath = traceViewerRelativePath(c.req.url);
+      if (!relativePath) return c.json({ error: "not_found" }, 404);
       if (relativePath === "ping") return c.body("");
       const root = playwrightTraceViewerRoot();
       const target = resolve(root, relativePath);
@@ -573,7 +1014,7 @@ export const apiRoutes = [
       c.header("cache-control", relativePath === "index.html" || relativePath === "sw.bundle.js" ? "no-cache" : "public, max-age=31536000, immutable");
       c.header("service-worker-allowed", "/v1/case-hub/trace-viewer/");
       if (relativePath === "index.html") {
-        c.header("content-security-policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' blob:; worker-src 'self' blob:");
+        c.header("content-security-policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' blob:; worker-src 'self' blob:; frame-src 'self' data: blob:");
       }
       return c.body(content);
     },
@@ -798,11 +1239,25 @@ const routePolicies: Record<string, { id: string; access: PrimitiveAccessPolicy;
   "POST /v1/dev-runtime-approvals/:approvalId": { id: "dev-runtime-approval", access: { permission: "qasey.channel.receive", audiences: ["channel"] }, public: true },
   "POST /webhooks/jira": { id: "jira-webhook", access: { permission: "qasey.channel.receive", audiences: ["channel"] } },
   "POST /webhooks/github": { id: "github-webhook", access: { permission: "qasey.channel.receive", audiences: ["channel"] }, public: true },
+  "GET /v1/qasey/conversations": { id: "qasey-conversation-list", access: { permission: "qasey.agent.execute", audiences: ["admin-ui", "api"] } },
+  "POST /v1/qasey/conversations": { id: "qasey-conversation-create", access: { permission: "qasey.agent.execute", audiences: ["admin-ui", "api"] } },
+  "GET /v1/qasey/conversations/:conversationId": { id: "qasey-conversation-read", access: { permission: "qasey.agent.execute", audiences: ["admin-ui", "api"] } },
+  "GET /v1/qasey/conversations/:conversationId/events": { id: "conversation-events-read", access: { permission: "qasey.agent.execute", audiences: ["admin-ui", "api", "service"] } },
+  "POST /v1/qasey/conversations/:conversationId/messages": { id: "qasey-conversation-message", access: { permission: "qasey.agent.execute", audiences: ["admin-ui", "api"] } },
+  "POST /v1/qasey/conversations/:conversationId/actions": { id: "qasey-conversation-action", access: { permission: "qasey.agent.execute", audiences: ["admin-ui", "api"] } },
+  "GET /v1/qasey/conversations/:conversationId/turns/:turnId/events": { id: "qasey-conversation-events", access: { permission: "qasey.agent.execute", audiences: ["admin-ui", "api"] } },
   "POST /v1/qasey/tasks": { id: "qasey-task", access: { permission: "qasey.agent.execute", audiences: ["admin-ui", "api"] } },
   "GET /v1/case-hub/runs": { id: "run-list", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
   "POST /v1/case-hub/runs": { id: "run-create", access: { permission: "qasey.runs.write", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/case-hub/cases": { id: "case-list", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/case-hub/cases/:caseId": { id: "case-read", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
+  "GET /v1/case-hub/review-plans": { id: "case-review-plan-list", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api"] } },
+  "GET /v1/case-hub/review-plans/:planId": { id: "case-review-plan-read", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api"] } },
+  "PATCH /v1/case-hub/review-plans/:planId/items/:itemId": { id: "case-review-item-update", access: { permission: "qasey.cases.write", audiences: ["admin-ui", "api"] } },
+  "POST /v1/case-hub/review-plans/:planId/items/:itemId/remove": { id: "case-review-item-remove", access: { permission: "qasey.cases.write", audiences: ["admin-ui", "api"] } },
+  "POST /v1/case-hub/review-plans/:planId/items/:itemId/restore": { id: "case-review-item-restore", access: { permission: "qasey.cases.write", audiences: ["admin-ui", "api"] } },
+  "POST /v1/case-hub/review-plans/:planId/items/:itemId/approve": { id: "case-review-item-approve", access: { permission: "qasey.cases.write", audiences: ["admin-ui", "api"] } },
+  "POST /v1/case-hub/review-plans/:planId/approve": { id: "case-review-plan-approve", access: { permission: "qasey.cases.write", audiences: ["admin-ui", "api"] } },
   "GET /v1/case-hub/change-sets": { id: "change-set-list", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/case-hub/preflight": { id: "e2e-preflight", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
   "POST /v1/case-hub/change-sets": { id: "change-set-create", access: { permission: "qasey.cases.write", audiences: ["admin-ui", "api", "service"] } },

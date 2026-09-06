@@ -14,7 +14,8 @@
     "resolveJsonModule": true,
     "types": ["node", "vitest/globals"],
     "paths": {
-      "@qasey/*": ["./packages/*/src/index.ts"]
+      "@qasey/*": ["./packages/*/src/index.ts"],
+      "@/*": ["./apps/admin-ui/src/*"]
     }
   },
   "include": ["apps/**/*.ts", "apps/**/*.tsx", "packages/**/*.ts", "src/**/*.ts", "tests/**/*.ts", "vitest.config.ts", "tsup.config.ts"],

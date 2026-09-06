@@ -68,7 +68,7 @@ const reviewedRepository = {
 async function createReviewedFixture() {
   const root = await mkdtemp(join(tmpdir(), "qasey-reviewed-license-"));
   const virtualStorePath = join(root, "node_modules/.pnpm");
-  const virtualEntry = "@mastra+redis-streams@0.3.0_reviewed-fixture";
+  const virtualEntry = "@mastra+redis-streams@0.4.1_reviewed-fixture";
   const packagePath = join(
     virtualStorePath,
     virtualEntry,
@@ -82,12 +82,12 @@ async function createReviewedFixture() {
   const integrity = `sha512-${createHash("sha512").update("public-redacted-tarball-fixture").digest("base64")}`;
   const manifest = {
     name: "@mastra/redis-streams",
-    version: "0.3.0",
+    version: "0.4.1",
     repository: reviewedRepository,
   };
   const review = {
     name: "@mastra/redis-streams",
-    version: "0.3.0",
+    version: "0.4.1",
     pnpmLockIntegrity: integrity,
     licenseFile: "LICENSE.md",
     licenseSha256: createHash("sha256").update(license).digest("hex"),
@@ -98,7 +98,7 @@ async function createReviewedFixture() {
     Unknown: [
       {
         name: "@mastra/redis-streams",
-        versions: ["0.3.0"],
+        versions: ["0.4.1"],
         paths: [packagePath],
         license: "Unknown",
       },
@@ -112,7 +112,7 @@ async function createReviewedFixture() {
     writeFile(join(packagePath, "dist/index.js"), "export {};\n", "utf8"),
     writeFile(
       lockfilePath,
-      `lockfileVersion: '9.0'\n\npackages:\n\n  '@mastra/redis-streams@0.3.0':\n    resolution: {integrity: ${integrity}}\n`,
+      `lockfileVersion: '9.0'\n\npackages:\n\n  '@mastra/redis-streams@0.4.1':\n    resolution: {integrity: ${integrity}}\n`,
       "utf8",
     ),
     writeFile(reviewsPath, JSON.stringify({ schemaVersion: 1, reviews: [review] }), "utf8"),
@@ -217,6 +217,23 @@ describe("supply-chain security workflow", () => {
 });
 
 describe("production license policy", () => {
+  it("keeps the mixed-license Mastra Editor package development-only", async () => {
+    const [manifest, source] = await Promise.all([
+      readFile(resolve(projectRoot, "package.json"), "utf8").then(value => JSON.parse(value) as {
+        dependencies?: Record<string, string>;
+        devDependencies?: Record<string, string>;
+      }),
+      readFile(resolve(projectRoot, "src/mastra/index.ts"), "utf8"),
+    ]);
+
+    expect(manifest.dependencies).not.toHaveProperty("@mastra/editor");
+    expect(manifest.devDependencies).toHaveProperty("@mastra/editor", "0.14.3");
+    expect(source).toContain('config.NODE_ENV === "development"');
+    expect(source).toContain('["@mastra", "editor"].join("/")');
+    expect(source).not.toContain('import("@mastra/editor")');
+    expect(source).not.toContain("@mastra/editor/ee");
+  });
+
   it("keeps the public review scoped to the exact redis-streams artifact", async () => {
     const config = JSON.parse(
       await readFile(resolve(projectRoot, "config/license-reviews.json"), "utf8"),
@@ -225,7 +242,7 @@ describe("production license policy", () => {
     expect(config.reviews).toHaveLength(1);
     expect(config.reviews[0]).toMatchObject({
       name: "@mastra/redis-streams",
-      version: "0.3.0",
+      version: "0.4.1",
     });
     expect(JSON.stringify(config)).not.toContain("@mastra/editor");
   });
@@ -310,7 +327,7 @@ describe("production license policy", () => {
       inventoryEntry.paths = [
         join(
           fixture.virtualStorePath,
-          "@mastra+redis-streams@0.3.0_stale-peer-suffix",
+          "@mastra+redis-streams@0.4.1_stale-peer-suffix",
           "node_modules/@mastra/redis-streams",
         ),
       ];
@@ -319,7 +336,7 @@ describe("production license policy", () => {
       await mkdir(
         join(
           fixture.virtualStorePath,
-          "@mastra+redis-streams@0.3.0_second-install",
+          "@mastra+redis-streams@0.4.1_second-install",
           "node_modules/@mastra/redis-streams",
         ),
         { recursive: true },

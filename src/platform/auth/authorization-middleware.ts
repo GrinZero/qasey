@@ -4,7 +4,7 @@ import type { AuditLog } from "./audit-log.ts";
 import type { OAuthPrincipal } from "./oauth-principal.ts";
 import type { PermissionService } from "./permission-store.ts";
 import { conversationScope } from "../context/conversation-scope.ts";
-import { MASTRA_RESOURCE_ID_KEY } from "../context/schema.ts";
+import { MASTRA_RESOURCE_ID_KEY, PLATFORM_RESOURCE_ACTION_KEY } from "../context/schema.ts";
 import { MASTRA_API_PREFIX, MASTRA_STUDIO_BASE, stripMastraApiPrefix } from "../../runtime/mastra-paths.ts";
 
 export interface AuthorizationMiddlewareOptions {
@@ -177,6 +177,7 @@ export function createAuthorizationMiddleware(options: AuthorizationMiddlewareOp
     if (resource) {
       requestContext.set("platform-route-id", resource.resourceId);
       requestContext.set("platform-resource-type", resource.resourceType);
+      requestContext.set(PLATFORM_RESOURCE_ACTION_KEY, resource.action);
       requestContext.set("applicationId", resource.applicationId);
     }
     if (resource?.public) return next();
@@ -201,12 +202,25 @@ export function createAuthorizationMiddleware(options: AuthorizationMiddlewareOp
       });
       return c.json({ error: "not_found", requestId }, 404);
     }
+    const studioRequest = isMastraStudioRequest(c.req);
     if (!resource.audiences.includes(principal.audience)) {
       await options.audit.write(auditRecord(requestId, resource, principal, "deny", "audience_denied"));
       return c.json({ error: "forbidden", requestId }, 403);
     }
-    const allowed = await options.permissions.authorize({ principal, ...resource });
-    await options.audit.write(auditRecord(requestId, resource, principal, allowed ? "allow" : "deny", allowed ? "permission_granted" : "permission_denied"));
+    // Studio is an authenticated development/operations surface. Once a
+    // browser user has passed authentication and reached the admin-ui
+    // audience, keep the whole Studio usable instead of silently turning
+    // individual pages, agents, or actions into synthetic 404s.
+    const authenticatedStudio = studioRequest && principal.audience === "admin-ui";
+    const allowed = authenticatedStudio
+      || await options.permissions.authorize({ principal, ...resource });
+    await options.audit.write(auditRecord(
+      requestId,
+      resource,
+      principal,
+      allowed ? "allow" : "deny",
+      authenticatedStudio ? "authenticated_studio" : allowed ? "permission_granted" : "permission_denied",
+    ));
     if (!allowed) return c.json({ error: "not_found", requestId }, 404);
     const scopeApplicationId = await applicationIdForRequestScope(c.req, resource.applicationId, catalog);
     requestContext.set("platform-principal", principal);
@@ -226,7 +240,6 @@ export function createAuthorizationMiddleware(options: AuthorizationMiddlewareOp
       kind: "private",
     });
     requestContext.set("channel", channel);
-    const studioRequest = isMastraStudioRequest(c.req);
     requestContext.set("ingressSource", studioRequest ? "mastra-studio" : principal.audience);
     requestContext.set("sessionId", scope.threadId);
     if (isPlatformAdminWorkflowRunAccess(c.req, principal, studioRequest)) {

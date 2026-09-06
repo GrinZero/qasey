@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   markSlackRequestFinished,
   markSlackRequestStarted,
+  publicToolCallPresentation,
+  publicToolResultPresentation,
   showSlackStatus,
   SlackAgentStatusProjector,
 } from "../../src/mastra/applications/qasey/slack-progress.ts";
@@ -211,19 +213,34 @@ describe("Qasey Slack progress", () => {
       runId: "run-1",
       step: 1,
       toolCallId: "case-write-1",
-      toolName: "case_hub_create_change_set",
+      toolName: "case_hub_create_review_plan",
       args: { items: [{ name: "case 1" }, { name: "case 2" }] },
-    })).toBe("正在冻结候选用例并启动 E2E 验证…");
+    })).toBe("正在整理待审文字用例…");
 
     expect(projector.project({
       type: "tool-result",
       runId: "run-1",
       step: 1,
       toolCallId: "case-write-1",
-      toolName: "case_hub_create_change_set",
-      result: { status: "committed_and_verified", itemCount: 2, createdCount: 2, updatedCount: 0, verifiedCount: 2 },
+      toolName: "case_hub_create_review_plan",
+      result: { planId: "plan-1", itemCount: 2 },
       isError: false,
-    })).toBe("Change Set 已创建，正在隔离环境中生成和验证 Playwright…");
+    })).toBe("文字用例计划已创建，等待用户审核。");
+
+    expect(projector.project({
+      type: "tool-call", runId: "run-1", step: 2, toolCallId: "e2e-start-1",
+      toolName: "case_hub_start_e2e", args: { planId: "plan-1", caseVersionIds: ["version-1"] },
+    })).toBe("正在为已批准版本启动 E2E 验证…");
+
+    expect(projector.project({
+      type: "tool-result", runId: "run-1", step: 2, toolCallId: "e2e-start-1",
+      toolName: "case_hub_start_e2e", result: { runId: "e2e-run-1" }, isError: false,
+    })).toBe("E2E 运行已启动，正在隔离环境中生成和验证 Playwright…");
+
+    expect(projector.project({
+      type: "tool-call", runId: "run-1", step: 3, toolCallId: "legacy-write-1",
+      toolName: "case_hub_create_change_set", args: {},
+    })).toBe("旧的直启入口已停用，正在要求先审核文字用例…");
   });
 
   it("uses progress and step conclusions directly while hiding internal acknowledgements", () => {
@@ -359,5 +376,34 @@ describe("Qasey Slack progress", () => {
     expect(statuses).toHaveLength(3);
     for (const status of statuses) expect([...status].length).toBeLessThanOrEqual(50);
     expect([...(statuses.at(-1) ?? "")]).toHaveLength(50);
+  });
+
+  it("creates broad secret-free tool presentations for chat while hiding infrastructure noise", () => {
+    const started = publicToolCallPresentation("github_get_pull_request_diff", {
+      repo: "example/sample-app",
+      pullNumber: 42,
+      authorization: "Bearer should-not-leak",
+    });
+    const finished = publicToolResultPresentation(
+      "github_get_pull_request_diff",
+      { files: [{ path: "src/private.ts", content: "secret source" }], changedFiles: 1, token: "hidden" },
+      { repo: "example/sample-app", pullNumber: 42 },
+      false,
+    );
+
+    expect(started).toEqual({
+      toolName: "github_get_pull_request_diff",
+      title: "读取 GitHub",
+      summary: "正在查看 example/sample-app #42 的代码改动…",
+    });
+    expect(finished).toEqual({
+      toolName: "github_get_pull_request_diff",
+      title: "读取 GitHub",
+      summary: "已读取 PR #42，发现 1 个文件变更…",
+    });
+    expect(JSON.stringify([started, finished])).not.toContain("should-not-leak");
+    expect(JSON.stringify([started, finished])).not.toContain("secret source");
+    expect(publicToolCallPresentation("qasey_report_progress", { title: "内部进度" })).toBeUndefined();
+    expect(publicToolResultPresentation("get_current_time", "12:00", {}, false)).toBeUndefined();
   });
 });

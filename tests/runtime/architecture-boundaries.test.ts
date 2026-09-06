@@ -38,13 +38,13 @@ describe("shared runtime architecture boundaries", () => {
       readFile(join(projectRoot, "src/mastra/applications/qasey/service.ts"), "utf8"),
       readFile(join(projectRoot, "src/mastra/applications/qasey/slack-tunnel-command.ts"), "utf8"),
     ]);
-    expect(applicationSource).toContain('filesystemAgents: ["qasey-main"]');
+    expect(applicationSource).toContain('filesystemAgents: ["qasey-main", "qasey-e2e-author"]');
     expect(runtimeSource).not.toMatch(/agents\/qasey-(?:main|intent-router)\/agent/u);
     expect(runtimeSource).not.toContain("await registerQaseySlackTunnelCommand(mastra)");
     expect(runtimeSource).toContain("runtimeReadiness.register(\"slack-tunnel-command\"");
     expect(slackTunnelSource).toContain('mastra.listAgents()["qasey-main"]');
     expect(slackTunnelSource).not.toContain('mastra.getAgent("qasey-main")');
-    expect(serviceSource).toContain('mastra.getAgent("qasey-main")');
+    expect(serviceSource).toContain('mastra.getAgent(options.agentId ?? "qasey-main")');
     expect(serviceSource).not.toContain('mastra.getAgent("qasey-intent-router")');
   });
 
@@ -70,7 +70,8 @@ describe("shared runtime architecture boundaries", () => {
     expect(routeSource).not.toContain('getAgent("qasey-main").generate');
     expect(routeSource).toContain("executeQasey");
     expect(routeSource).not.toContain("runQaseyTaskWorkflow");
-    expect(adminApiSource).toContain('"/v1/qasey/tasks"');
+    expect(adminApiSource).toContain('"/v1/qasey/conversations"');
+    expect(adminApiSource).not.toContain('"/v1/qasey/tasks"');
     expect(adminApiSource).not.toContain("/studio/api/agents/");
   });
 

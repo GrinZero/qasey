@@ -6,7 +6,6 @@ export type View =
   | "qasey-runs"
   | "qasey-cases"
   | "qasey-review"
-  | "qasey-cua"
   | "triggers"
   | "access";
 
@@ -18,7 +17,6 @@ export const adminPaths = {
   "qasey-runs": "/admin/apps/qasey/runs",
   "qasey-cases": "/admin/apps/qasey/cases",
   "qasey-review": "/admin/apps/qasey/reviews",
-  "qasey-cua": "/admin/apps/qasey/workspace",
   triggers: "/admin/triggers",
   access: "/admin/access",
 } as const satisfies Record<View, string>;

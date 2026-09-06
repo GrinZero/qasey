@@ -1,7 +1,7 @@
 import type { QaseyRequestContext } from "../../contracts/src/index.ts";
 
 export interface PromptBuildResult {
-  version: 15;
+  version: 16;
   modules: string[];
   text: string;
 }
@@ -21,7 +21,7 @@ const base = `# QA 需求分析与测试用例设计
 - 必须按下面的明文映射加载 Skill，不要根据 Skill description 自由猜测路由：
   - intent=qa_quick_query：加载 \`qa-quick-query\` Skill。
   - intent=qa_review：加载 \`qa-review\` Skill。
-  - intent=case_create_full、case_maintain_fast 或 e2e_generate：加载 \`e2e-lifecycle\` Skill，通过 Case Hub Change Set 提交候选用例与自动化。
+  - intent=case_create_full、case_maintain_fast 或 e2e_generate：加载 \`e2e-lifecycle\` Skill；先创建文字用例 Review Plan，E2E 只能由已批准版本的结构化 conversation action 启动。
   - intent=experience_read 或 experience_write：加载 \`qa-experience\` Skill，并执行其中对应 intent 的模式。
   - intent=e2e_generate、e2e_rerun、e2e_repair 或 e2e_status：加载 \`e2e-lifecycle\` Skill，并执行其中对应 intent 的模式。
   - intent=meta_or_out_of_scope：不加载专门 Skill；用一至三个短段落直接回答，不启动完整取证、写入或 E2E lifecycle。
@@ -34,7 +34,8 @@ const base = `# QA 需求分析与测试用例设计
 - 外部能力默认不进入上下文。需要能力时调用 search_tools，使用描述当前动作和目标系统的具体关键词。
 - 搜索结果会按需激活；下一轮直接调用已发现工具。找不到时调整一次查询，不要反复搜索同义词。
 - Tool Discovery 只降低上下文成本，不代表授权。身份、渠道、副作用、审批和 Workflow ownership 由运行时独立校验。
-- Case Hub 是测试用例唯一真相源。主 Agent 只能提交不可变的 \`case_hub_create_change_set\`，不得直接修改数据库或把 Case YAML 写入 Git。
+- Case Hub 是测试用例唯一真相源。主 Agent 先用 \`case_hub_create_review_plan\` 提交可审文字用例；不得调用已停用的 \`case_hub_create_change_set\`，不得直接修改数据库或把 Case YAML 写入 Git。
+- 收到运行时提供的 generate_e2e conversation action 时，必须把其中的 planId 与 caseVersionIds 原样传给 \`case_hub_start_e2e\`；不得添加、删除、重排或替换版本。普通文本请求不得直接启动 E2E，应提示用户在 Review UI 中批准并发起。
 
 ## 用户可见表达
 - 把自己当作同事，先说结果、下一步和真正有用的新信息。
@@ -74,7 +75,7 @@ export function buildSystemPrompt(context: QaseyRequestContext): PromptBuildResu
   ];
 
   return {
-    version: 15,
+    version: 16,
     modules: modules.map(([key]) => key),
     text: modules.map(([, text]) => text).join("\n\n"),
   };

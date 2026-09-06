@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { UIMessage } from "ai";
 
 export const OwnerScopeSchema = z.object({
   applicationId: z.string().min(1),
@@ -38,6 +39,203 @@ export const QaseyRequestContextSchema = z.object({
   attachments: z.array(AttachmentRefSchema).default([]),
 });
 export type QaseyRequestContext = z.infer<typeof QaseyRequestContextSchema>;
+
+export const QaseyConversationSchema = z.object({
+  applicationId: z.literal("qasey"),
+  tenantId: z.string().min(1),
+  id: z.string().uuid(),
+  subjectId: z.string().min(1),
+  title: z.string().trim().min(1).max(120),
+  activeTurnId: z.string().uuid().optional(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+}).strict();
+export type QaseyConversation = z.infer<typeof QaseyConversationSchema>;
+
+export const QaseyConversationTurnStatusSchema = z.enum(["running", "completed", "failed"]);
+export const QaseyConversationTurnSchema = z.object({
+  applicationId: z.literal("qasey"),
+  tenantId: z.string().min(1),
+  id: z.string().uuid(),
+  conversationId: z.string().uuid(),
+  clientMessageId: z.string().uuid(),
+  userMessage: z.string().trim().min(1).max(100_000),
+  assistantText: z.string().default(""),
+  status: QaseyConversationTurnStatusSchema,
+  agentRunId: z.string().uuid().optional(),
+  linkedRunId: z.string().uuid().optional(),
+  error: z.string().max(2_000).optional(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+}).strict();
+export type QaseyConversationTurn = z.infer<typeof QaseyConversationTurnSchema>;
+
+export const QaseyConversationEventTypeSchema = z.enum([
+  "accepted", "assistant.delta", "progress", "tool.started", "tool.finished", "review-plan.linked", "run.linked", "completed", "failed",
+]);
+export type QaseyConversationEventType = z.infer<typeof QaseyConversationEventTypeSchema>;
+export const QaseyConversationEventSchema = z.object({
+  applicationId: z.literal("qasey"),
+  tenantId: z.string().min(1),
+  conversationId: z.string().uuid(),
+  turnId: z.string().uuid(),
+  sequence: z.number().int().positive(),
+  type: QaseyConversationEventTypeSchema,
+  payload: z.record(z.string(), z.unknown()),
+  occurredAt: z.iso.datetime(),
+}).strict();
+export type QaseyConversationEvent = z.infer<typeof QaseyConversationEventSchema>;
+
+export const QaseyE2EContextSchema = z.object({
+  planId: z.string().uuid(),
+  cases: z.array(z.object({
+    caseId: z.string().min(1), caseVersionId: z.string().uuid(),
+    version: z.number().int().positive(), title: z.string(),
+  }).strict()).min(1).max(100),
+}).strict();
+export type QaseyE2EContext = z.infer<typeof QaseyE2EContextSchema>;
+export const QaseyE2ETaskSchema = z.object({
+  conversationId: z.string().uuid(), turnId: z.string().uuid(),
+  status: QaseyConversationTurnStatusSchema, createdAt: z.iso.datetime(),
+  context: QaseyE2EContextSchema,
+}).strict();
+export type QaseyE2ETask = z.infer<typeof QaseyE2ETaskSchema>;
+
+export const QaseyUIMessageMetadataSchema = z.object({
+  authorAgentId: z.string().optional(),
+  recipientAgentIds: z.array(z.string()).optional(),
+  collaborationStatus: z.enum(["queued", "running", "completed", "failed"]).optional(),
+  messageKind: z.enum(["message", "handoff", "execution"]).optional(),
+  replyTo: z.string().optional(),
+  e2eContext: QaseyE2EContextSchema.optional(),
+  conversationId: z.string().uuid(),
+  turnId: z.string().uuid(),
+  createdAt: z.iso.datetime(),
+  latestSequence: z.number().int().nonnegative(),
+  linkedRunId: z.string().uuid().optional(),
+}).strict();
+export type QaseyUIMessageMetadata = z.infer<typeof QaseyUIMessageMetadataSchema>;
+
+export const QaseyProgressDataSchema = z.object({
+  sequence: z.number().int().positive(),
+  title: z.string().min(1).max(100),
+  detail: z.string().max(1_200),
+  status: z.enum(["working", "waiting", "blocked", "completed", "failed"]),
+  milestone: z.string().max(64).optional(),
+  next: z.string().max(500).optional(),
+}).strict();
+export type QaseyProgressData = z.infer<typeof QaseyProgressDataSchema>;
+
+export const QaseyRunDataSchema = z.object({
+  runId: z.string().uuid(),
+}).strict();
+export type QaseyRunData = z.infer<typeof QaseyRunDataSchema>;
+
+export const QaseyCursorDataSchema = z.object({
+  sequence: z.number().int().positive(),
+}).strict();
+export type QaseyCursorData = z.infer<typeof QaseyCursorDataSchema>;
+
+export const QaseyCaseReviewDataSchema = z.object({
+  planId: z.string().uuid(),
+  revision: z.number().int().positive(),
+  status: z.enum(["reviewing", "ready", "cancelled"]),
+  pendingCount: z.number().int().nonnegative(),
+  approvedCount: z.number().int().nonnegative(),
+  removedCount: z.number().int().nonnegative(),
+}).strict();
+export type QaseyCaseReviewData = z.infer<typeof QaseyCaseReviewDataSchema>;
+
+export type QaseyUIDataTypes = {
+  progress: QaseyProgressData;
+  run: QaseyRunData;
+  cursor: QaseyCursorData;
+  "case-review": QaseyCaseReviewData;
+};
+export type QaseyUIMessage = UIMessage<QaseyUIMessageMetadata, QaseyUIDataTypes>;
+
+export const QaseyPublicToolInputSchema = z.object({
+  summary: z.string().trim().min(1).max(500),
+}).strict();
+export type QaseyPublicToolInput = z.infer<typeof QaseyPublicToolInputSchema>;
+
+export const QaseyPublicToolOutputSchema = z.object({
+  summary: z.string().trim().min(1).max(500),
+}).strict();
+export type QaseyPublicToolOutput = z.infer<typeof QaseyPublicToolOutputSchema>;
+
+const QaseyUITextPartSchema = z.object({
+  type: z.literal("text"),
+  text: z.string(),
+  state: z.enum(["streaming", "done"]).optional(),
+}).passthrough();
+const QaseyUIProgressPartSchema = z.object({
+  type: z.literal("data-progress"),
+  id: z.string().min(1).optional(),
+  data: QaseyProgressDataSchema,
+}).strict();
+const QaseyUIRunPartSchema = z.object({
+  type: z.literal("data-run"),
+  id: z.string().min(1).optional(),
+  data: QaseyRunDataSchema,
+}).strict();
+const QaseyUICursorPartSchema = z.object({
+  type: z.literal("data-cursor"),
+  id: z.string().min(1).optional(),
+  data: QaseyCursorDataSchema,
+}).strict();
+const QaseyUICaseReviewPartSchema = z.object({
+  type: z.literal("data-case-review"),
+  id: z.string().min(1).optional(),
+  data: QaseyCaseReviewDataSchema,
+}).strict();
+const QaseyUIDynamicToolBaseSchema = z.object({
+  type: z.literal("dynamic-tool"),
+  toolName: z.string().min(1).max(256),
+  toolCallId: z.string().min(1).max(256),
+  title: z.string().min(1).max(100).optional(),
+  providerExecuted: z.boolean().optional(),
+  // AI SDK's stream reducer materializes this key with `undefined` while
+  // replacing an input part with its result. No raw input is accepted here.
+  rawInput: z.never().optional(),
+});
+const QaseyUIDynamicToolPartSchema = z.discriminatedUnion("state", [
+  QaseyUIDynamicToolBaseSchema.extend({
+    state: z.literal("input-available"),
+    input: QaseyPublicToolInputSchema,
+    output: z.never().optional(),
+    errorText: z.never().optional(),
+    preliminary: z.never().optional(),
+  }).strict(),
+  QaseyUIDynamicToolBaseSchema.extend({
+    state: z.literal("output-available"),
+    input: QaseyPublicToolInputSchema,
+    output: QaseyPublicToolOutputSchema,
+    errorText: z.never().optional(),
+    preliminary: z.boolean().optional(),
+  }).strict(),
+  QaseyUIDynamicToolBaseSchema.extend({
+    state: z.literal("output-error"),
+    input: QaseyPublicToolInputSchema,
+    errorText: z.string().min(1).max(500),
+    output: z.never().optional(),
+    preliminary: z.never().optional(),
+  }).strict(),
+]);
+
+export const QaseyUIMessageSchema = z.object({
+  id: z.string().min(1),
+  role: z.enum(["user", "assistant"]),
+  metadata: QaseyUIMessageMetadataSchema,
+  parts: z.array(z.union([
+    QaseyUITextPartSchema,
+    QaseyUIProgressPartSchema,
+    QaseyUIRunPartSchema,
+    QaseyUICursorPartSchema,
+    QaseyUICaseReviewPartSchema,
+    QaseyUIDynamicToolPartSchema,
+  ])),
+}).strict();
 
 export const AgentProgressInputSchema = z.object({
   milestone: z.string().trim().min(2).max(64).regex(/^[a-z][a-z0-9_-]*$/u),
@@ -253,7 +451,7 @@ export const CaseHubCaseProposalSchema = z.object({
   }).strict()).min(1).max(200),
   testData: z.record(z.string(), z.unknown()).default({}),
   tags: z.array(z.string().trim().min(1).max(100)).max(100).default([]),
-  automationPath: z.string().trim().min(1).max(1_000),
+  automationPath: z.string().trim().min(1).max(1_000).optional(),
   evidenceRefs: z.array(E2EEvidenceRefSchema).max(200).default([]),
 }).strict().superRefine((value, context) => {
   if (value.operation === "update" && !value.caseId) {
@@ -264,6 +462,103 @@ export const CaseHubCaseProposalSchema = z.object({
   }
 });
 export type CaseHubCaseProposal = z.infer<typeof CaseHubCaseProposalSchema>;
+
+export const CaseReviewPlanStatusSchema = z.enum(["reviewing", "ready", "cancelled"]);
+export const CaseReviewItemStatusSchema = z.enum(["pending", "approved", "removed"]);
+export const CaseAutomationStatusSchema = z.enum(["none", "generating", "awaiting_review", "verified", "failed", "stale"]);
+export type CaseAutomationStatus = z.infer<typeof CaseAutomationStatusSchema>;
+
+export const CaseReviewContentSchema = z.object({
+  operation: z.enum(["create", "update"]),
+  caseId: CaseHubCaseIdSchema.optional(),
+  suitePath: z.string().trim().min(1).max(500),
+  title: z.string().trim().min(1).max(500),
+  description: z.string().max(8_000).default(""),
+  priority: z.enum(["P0", "P1", "P2", "P3"]),
+  preconditions: z.array(z.string().trim().min(1).max(2_000)).max(100).default([]),
+  steps: z.array(z.object({
+    action: z.string().trim().min(1).max(4_000),
+    expected: z.array(z.string().trim().min(1).max(4_000)).min(1).max(20),
+  }).strict()).min(1).max(200),
+  testData: z.record(z.string(), z.unknown()).default({}),
+  tags: z.array(z.string().trim().min(1).max(100)).max(100).default([]),
+}).strict().superRefine((value, context) => {
+  if (value.operation === "update" && !value.caseId) context.addIssue({ code: "custom", path: ["caseId"], message: "Update proposals require a caseId" });
+  if (value.operation === "create" && value.caseId) context.addIssue({ code: "custom", path: ["caseId"], message: "Create proposals receive a server-owned caseId" });
+});
+export type CaseReviewContent = z.infer<typeof CaseReviewContentSchema>;
+
+export const CaseReviewItemSchema = z.object({
+  applicationId: z.string().min(1),
+  tenantId: z.string().min(1),
+  id: z.string().uuid(),
+  planId: z.string().uuid(),
+  ordinal: z.number().int().nonnegative(),
+  revision: z.number().int().positive(),
+  status: CaseReviewItemStatusSchema,
+  removedFrom: z.enum(["pending", "approved"]).optional(),
+  content: CaseReviewContentSchema,
+  publishedCaseId: CaseHubCaseIdSchema.optional(),
+  publishedCaseVersionId: z.string().uuid().optional(),
+  automationStatus: CaseAutomationStatusSchema.optional(),
+  systemTags: z.array(z.literal("e2e")).optional(),
+  approvedBy: z.string().min(1).optional(),
+  approvedAt: z.iso.datetime().optional(),
+  removedAt: z.iso.datetime().optional(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+}).strict();
+export type CaseReviewItem = z.infer<typeof CaseReviewItemSchema>;
+
+export const CaseReviewPlanSchema = z.object({
+  applicationId: z.string().min(1),
+  tenantId: z.string().min(1),
+  id: z.string().uuid(),
+  conversationId: z.string().min(1),
+  threadId: z.string().min(1),
+  subjectId: z.string().min(1),
+  requirement: RequirementSnapshotSchema,
+  status: CaseReviewPlanStatusSchema,
+  revision: z.number().int().positive(),
+  createdBy: z.string().min(1),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+}).strict();
+export type CaseReviewPlan = z.infer<typeof CaseReviewPlanSchema>;
+
+export const CaseReviewPlanDetailSchema = z.object({
+  plan: CaseReviewPlanSchema,
+  e2eTasks: z.array(QaseyE2ETaskSchema).optional(),
+  items: z.array(CaseReviewItemSchema),
+  editable: z.boolean(),
+}).strict();
+export type CaseReviewPlanDetail = z.infer<typeof CaseReviewPlanDetailSchema>;
+
+export const CreateCaseReviewPlanSchema = z.object({
+  requirement: RequirementDraftSchema,
+  proposals: z.array(CaseReviewContentSchema).min(1).max(100),
+}).strict();
+export type CreateCaseReviewPlan = z.infer<typeof CreateCaseReviewPlanSchema>;
+
+export const UpdateCaseReviewItemSchema = z.object({
+  expectedRevision: z.number().int().positive(),
+  content: CaseReviewContentSchema,
+}).strict();
+export const CaseReviewItemRevisionSchema = z.object({
+  itemId: z.string().uuid(),
+  expectedRevision: z.number().int().positive(),
+}).strict();
+export const ApproveCaseReviewItemsSchema = z.object({
+  items: z.array(CaseReviewItemRevisionSchema).min(1).max(100),
+}).strict();
+
+export const GenerateE2EConversationActionSchema = z.object({
+  type: z.literal("generate_e2e"),
+  planId: z.string().uuid(),
+  caseVersionIds: z.array(z.string().uuid()).min(1).max(100),
+  clientMessageId: z.string().uuid(),
+}).strict();
+export type GenerateE2EConversationAction = z.infer<typeof GenerateE2EConversationActionSchema>;
 
 export const CreateCaseHubChangeSetSchema = z.object({
   requirement: RequirementDraftSchema,
@@ -287,13 +582,15 @@ export const CaseHubCaseVersionSchema = z.object({
   steps: TestCaseSpecSchema.shape.steps,
   testData: z.record(z.string(), z.unknown()),
   tags: z.array(z.string()),
-  automationPath: z.string().min(1),
+  automationPath: z.string().min(1).optional(),
   evidenceRefs: z.array(E2EEvidenceRefSchema),
   requirementSnapshotHash: z.string().regex(/^[a-f0-9]{64}$/u),
   contentHash: z.string().regex(/^[a-f0-9]{64}$/u),
   status: CaseHubCaseVersionStatusSchema,
   createdBy: z.string().min(1),
   createdAt: z.iso.datetime(),
+  automationStatus: CaseAutomationStatusSchema.optional(),
+  systemTags: z.array(z.literal("e2e")).optional(),
 }).strict();
 export type CaseHubCaseVersion = z.infer<typeof CaseHubCaseVersionSchema>;
 
@@ -306,6 +603,8 @@ export const CaseHubCaseSchema = z.object({
   title: z.string().min(1),
   activeVersionId: z.string().uuid().optional(),
   proposedVersionIds: z.array(z.string().uuid()).default([]),
+  automationStatus: CaseAutomationStatusSchema.optional(),
+  systemTags: z.array(z.literal("e2e")).optional(),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
 }).strict();
@@ -318,6 +617,11 @@ export const CaseHubChangeSetSchema = z.object({
   projectCode: CaseHubProjectCodeSchema,
   requirement: RequirementSnapshotSchema,
   caseVersionIds: z.array(z.string().uuid()).min(1),
+  candidateCaseSequenceRange: z.object({
+    start: z.number().int().positive(),
+    end: z.number().int().positive(),
+  }).strict().refine(value => value.end >= value.start, "Candidate Case sequence range must be ordered").optional(),
+  caseIdsFinalized: z.boolean().default(false),
   planHash: z.string().regex(/^[a-f0-9]{64}$/u),
   status: CaseHubChangeSetStatusSchema,
   revision: z.number().int().positive(),
@@ -325,6 +629,7 @@ export const CaseHubChangeSetSchema = z.object({
   baseSha: z.string().regex(/^[a-f0-9]{40,64}$/u).optional(),
   environmentSourceSha: z.string().regex(/^[a-f0-9]{40,64}$/u).optional(),
   runId: z.string().uuid().optional(),
+  automationPaths: z.record(z.string().min(1), z.string().min(1)).optional(),
   branch: z.string().optional(),
   pullRequestUrl: z.url().optional(),
   error: z.string().optional(),
@@ -587,6 +892,7 @@ export const E2EAmendmentSchema = z.object({
 export type E2EAmendment = z.infer<typeof E2EAmendmentSchema>;
 
 export const E2ERunSchema = z.object({
+  statusHistory: z.array(RunStatusSchema).optional(),
   applicationId: z.string().min(1),
   tenantId: z.string().min(1),
   id: z.string().min(1),
@@ -605,6 +911,7 @@ export const E2ERunSchema = z.object({
   traceId: z.string().optional(),
   amendments: z.array(E2EAmendmentSchema).default([]),
   codeTaskIds: z.array(z.string()).default([]),
+  automationPaths: z.record(z.string().min(1), z.string().min(1)).optional(),
   repository: RepositoryProfileSchema,
   // Optional only while decoding historical runs created before the test
   // environment address became part of the frozen run contract.
@@ -670,3 +977,5 @@ export const RunEventSchema = z.object({
   metadata: z.record(z.string(), z.unknown()).default({}),
 });
 export type RunEvent = z.infer<typeof RunEventSchema>;
+
+export * from "./collaboration.ts";

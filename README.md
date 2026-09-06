@@ -81,7 +81,9 @@ PostgreSQL/Redis 并执行 Prisma migration。首次运行后应按需要填写�
 
 - Agent：`POST /studio/api/agents/qasey-main/generate`、`/stream`
 - Workflow：`POST /studio/api/workflows/qasey-e2e-lifecycle/start`、`/resume`
+- QA 任务会话：`GET|POST /v1/qasey/conversations`、会话消息与可恢复 SSE 子资源；`POST /v1/qasey/tasks` 保留为单次调用兼容入口
 - Qasey Run：`GET|POST /v1/case-hub/runs` 与 owner-scoped 子资源
+- Case Hub：`GET /v1/case-hub/cases` 只返回 QA 已批准且 Pull Request 已合并激活的正式用例
 - Slack（Admin UI 管理）：`POST /channels/slack/apps/:webhookId/events`
 - Slack（兼容原有环境变量配置）：`POST /studio/api/agents/qasey-main/channels/slack/webhook`
 - Jira：`POST /webhooks/jira`（签名后直接进入原生 Agent）

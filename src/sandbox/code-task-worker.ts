@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { access, appendFile, copyFile, lstat, mkdir, readFile, readdir, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { LocalSandbox } from "@mastra/core/workspace";
+import type { TracingEvent } from "@mastra/core/observability";
 import {
   CodeTaskResultSchema,
   CodeTaskStateSchema,
@@ -18,11 +19,14 @@ import {
   CodeTaskWorkerManifestSchema,
   CodeTaskWorkerCredentialsSchema,
   NativeMastraCodingBackend,
+  type CandidateValidationResult,
   executionProfile,
   executionProfileHash,
   writeCodeTaskState,
 } from "../../packages/code-task/src/index.ts";
 import { runSafeCommand } from "../../packages/e2e/src/process.ts";
+import { sanitizeTelemetry } from "../platform/observability/sanitize.ts";
+import { summarizePlaywright } from "./playwright-summary.ts";
 
 const manifestPath = process.argv[2];
 if (!manifestPath) throw new Error("code-task-worker requires a manifest path");
@@ -38,6 +42,9 @@ let cursor = 0;
 let checkSandbox: LocalSandbox | undefined;
 let readOnlyRepositorySnapshots: RepositoryIntegritySnapshot[] = [];
 const abortController = new AbortController();
+let repositoryInstallResult: Promise<CheckResult> | undefined;
+let candidateValidationCalls = 0;
+let agentSummary = "Deterministic execution profile; no coding agent was started.";
 process.once("SIGTERM", () => abortController.abort(new Error("Code task cancelled")));
 process.once("SIGINT", () => abortController.abort(new Error("Code task cancelled")));
 
@@ -50,7 +57,6 @@ try {
   readOnlyRepositorySnapshots = await validateRepositoryMounts();
   if (manifest.inputPatchPath) await applyInputPatch(manifest.inputPatchPath);
   const initialPaths = await changedPaths(manifest.workspaceRoot);
-  let agentSummary = "Deterministic execution profile; no coding agent was started.";
   if (profile.useAgent) {
     await emit("agent.started", "Starting native Mastra coding agent");
     agentSummary = await runAgent();
@@ -88,7 +94,10 @@ try {
     .then(() => undefined, failure => failure instanceof Error ? failure : new Error(String(failure)));
   const result = CodeTaskResultSchema.parse({
     status: cancelled ? "cancelled" : "failed",
-    summary: safeText(integrityError?.message ?? (error instanceof Error ? error.message : String(error))),
+    summary: safeText([
+      ...(profile.useAgent ? [agentSummary] : []),
+      integrityError?.message ?? (error instanceof Error ? error.message : String(error)),
+    ].join("\n")),
     changedPaths: await changedPaths(manifest.workspaceRoot).catch(() => []),
     changes: [],
     checks: [],
@@ -102,6 +111,7 @@ try {
 }
 
 async function runAgent(): Promise<string> {
+  const isE2EAuthor = profile.id === "web-e2e-author" || profile.id === "web-e2e-repair";
   const output = await new NativeMastraCodingBackend().run({
     taskId: spec.taskId,
     workspaceRoot: manifest.workspaceRoot,
@@ -110,6 +120,20 @@ async function runAgent(): Promise<string> {
     profile,
     ...(spec.e2eSkillPath ? { e2eSkillPath: spec.e2eSkillPath } : {}),
     traceContext: spec.traceContext,
+    traceMetadata: {
+      e2eRunId: e2eRunId(spec.taskId),
+      codeTaskId: spec.taskId,
+      attemptId: spec.attemptId,
+      executionProfile: spec.executionProfileId,
+      baseSha: spec.baseSha,
+      contextHash: spec.contextHash,
+    },
+    ...(isE2EAuthor ? { validateCandidate: runCandidateValidation } : {}),
+    onTracingEvent: async event => emit(
+      `agent.trace.${event.type}`,
+      `${isE2EAuthor ? "E2E Agent" : "Code review Agent"} ${event.type}`,
+      { mastraTraceEvent: serializeTracingEvent(event) },
+    ),
     credentials: {
       ...(credentials.openaiApiKey ? { openaiApiKey: credentials.openaiApiKey } : {}),
       ...(credentials.openaiBaseUrl ? { openaiBaseUrl: credentials.openaiBaseUrl } : {}),
@@ -120,6 +144,45 @@ async function runAgent(): Promise<string> {
   return safeText(output.summary);
 }
 
+async function runCandidateValidation(): Promise<CandidateValidationResult> {
+  candidateValidationCalls += 1;
+  if (candidateValidationCalls > 5) {
+    return { passed: false, summary: "Candidate validation is limited to five calls per Agent run.", changedPaths: [] };
+  }
+  await emit("candidate_check.started", `Running in-loop E2E candidate validation ${candidateValidationCalls}`, {
+    validationAttempt: candidateValidationCalls,
+  });
+  let paths: string[] = [];
+  try {
+    abortController.signal.throwIfAborted();
+    paths = await changedPaths(manifest.workspaceRoot);
+    await assertAllowedChanges(paths);
+    const install = await ensureRepositoryInstall();
+    const discovery = install.passed
+      ? await runPlaywrightDiscoveryCheck(paths)
+      : undefined;
+    const passed = install.passed && discovery?.passed === true;
+    const summary = safeText([
+      `repo-install: ${install.passed ? "passed" : "failed"}\n${install.summary}`,
+      discovery ? `playwright-discovery: ${discovery.passed ? "passed" : "failed"}\n${discovery.summary}` : "playwright-discovery: skipped because repo-install failed",
+    ].join("\n\n"), 20_000);
+    await emit("candidate_check.completed", `In-loop E2E candidate validation ${passed ? "passed" : "failed"}`, {
+      validationAttempt: candidateValidationCalls,
+      passed,
+      changedPaths: paths,
+    });
+    return { passed, summary, changedPaths: paths };
+  } catch (error) {
+    const summary = safeText(error instanceof Error ? error.message : String(error), 20_000);
+    await emit("candidate_check.completed", "In-loop E2E candidate validation failed", {
+      validationAttempt: candidateValidationCalls,
+      passed: false,
+      changedPaths: paths,
+    });
+    return { passed: false, summary, changedPaths: paths };
+  }
+}
+
 async function runChecks(paths: string[]): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   for (const check of spec.fixedChecks) {
@@ -127,7 +190,7 @@ async function runChecks(paths: string[]): Promise<CheckResult[]> {
     abortController.signal.throwIfAborted();
     await emit("check.started", `Running fixed check ${check.id}`, { checkId: check.id });
     const result = check.id === "repo-install"
-      ? await runRepositoryInstall()
+      ? await ensureRepositoryInstall()
       : check.id === "playwright"
         ? await runPlaywrightCheck(paths)
         : undefined;
@@ -135,7 +198,20 @@ async function runChecks(paths: string[]): Promise<CheckResult[]> {
     results.push(result);
     await emit("check.completed", `Fixed check ${check.id} ${result.passed ? "passed" : "failed"}`, { checkId: check.id, exitCode: result.exitCode });
   }
+  if (["web-e2e-author", "web-e2e-repair"].includes(profile.id)) {
+    const checkId = "playwright-discovery";
+    abortController.signal.throwIfAborted();
+    await emit("check.started", `Running internal check ${checkId}`, { checkId });
+    const result = await runPlaywrightDiscoveryCheck(paths);
+    results.push(result);
+    await emit("check.completed", `Internal check ${checkId} ${result.passed ? "passed" : "failed"}`, { checkId, exitCode: result.exitCode });
+  }
   return results;
+}
+
+function ensureRepositoryInstall(): Promise<CheckResult> {
+  repositoryInstallResult ??= runRepositoryInstall();
+  return repositoryInstallResult;
 }
 
 async function runRepositoryInstall(): Promise<CheckResult> {
@@ -295,7 +371,9 @@ async function runPlaywrightCheck(paths: string[]): Promise<CheckResult> {
     await writeFile(logPath, safeText(`${result.stdout}\n${result.stderr}`, 2_000_000), { mode: 0o600 });
     artifacts.push({ id: `${spec.taskId}:playwright-${plan.id}-log`, kind: "log", name: `${plan.id}-playwright.log`, uri: sandboxUri(logPath), contentType: "text/plain" });
     const jsonReport = join(planRoot, "results.json");
+    let report: unknown;
     if (await exists(jsonReport)) {
+      report = await readFile(jsonReport, "utf8").then(text => JSON.parse(text) as unknown).catch(() => undefined);
       const artifactJsonReport = join(artifactPlanRoot, "results.json");
       await copyFile(jsonReport, artifactJsonReport);
       artifacts.push({ id: `${spec.taskId}:playwright-${plan.id}-json`, kind: "report", name: `${plan.id}-results.json`, uri: sandboxUri(artifactJsonReport), contentType: "application/json" });
@@ -305,7 +383,7 @@ async function runPlaywrightCheck(paths: string[]): Promise<CheckResult> {
     passed &&= result.exitCode === 0;
     if (exitCode === 0 && result.exitCode !== 0) exitCode = result.exitCode;
     durationMs += result.durationMs;
-    summaries.push(`${plan.id}: ${safeText(result.stdout.slice(-4_000) || result.stderr.slice(-4_000) || "Playwright completed")}`);
+    summaries.push(`${plan.id}: ${safeText(summarizePlaywright(report, result.stdout, result.stderr))}`);
   }
   return {
     id: "playwright",
@@ -314,6 +392,52 @@ async function runPlaywrightCheck(paths: string[]): Promise<CheckResult> {
     summary: safeText(summaries.join("\n\n")),
     durationMs,
     artifacts,
+  };
+}
+
+async function runPlaywrightDiscoveryCheck(paths: string[]): Promise<CheckResult> {
+  const plans = playwrightPlans(paths);
+  await validateCaseMappings(paths);
+  const summaries: string[] = [];
+  let passed = true;
+  let exitCode = 0;
+  let durationMs = 0;
+  for (const plan of plans) {
+    abortController.signal.throwIfAborted();
+    const result = await runFixedCheckCommand({
+      executable: "pnpm",
+      args: [
+        "exec", "playwright", "test", ...plan.testFiles,
+        ...(plan.config ? [`--config=${plan.config}`] : []),
+        ...(plan.playwrightProject ? [`--project=${plan.playwrightProject}`] : []),
+        "--list",
+      ],
+      cwd: manifest.workspaceRoot,
+      env: fixedCheckEnvironment(manifest.checkRoot, spec),
+      timeoutMs: Math.min(spec.deadlineMs, 2 * 60_000),
+    });
+    passed &&= result.exitCode === 0;
+    if (exitCode === 0 && result.exitCode !== 0) exitCode = result.exitCode;
+    durationMs += result.durationMs;
+    const output = `${result.stdout}\n${result.stderr}`.trim();
+    summaries.push(`${plan.id}: ${safeText(output || "Playwright discovery completed")}`);
+  }
+  const summary = safeText(summaries.join("\n\n"), 20_000);
+  const logPath = join(manifest.artifactRoot, "playwright-discovery.log");
+  await writeFile(logPath, summary, { mode: 0o600 });
+  return {
+    id: "playwright-discovery",
+    passed,
+    exitCode,
+    summary,
+    durationMs,
+    artifacts: [{
+      id: `${spec.taskId}:playwright-discovery-log`,
+      kind: "log",
+      name: "playwright-discovery.log",
+      uri: sandboxUri(logPath),
+      contentType: "text/plain",
+    }],
   };
 }
 
@@ -350,21 +474,25 @@ async function collectPlaywrightArtifacts(planId: string, sourceRoot: string, de
 async function validateCaseMappings(paths: string[]): Promise<void> {
   const context = JSON.parse(manifest.context) as { brief?: { cases?: Array<{ id?: string; versionHash?: string; automationPath?: string }> } };
   const cases = context.brief?.cases ?? [];
+  const testSources = new Map<string, string>();
   for (const path of paths.filter(path => /\.(?:spec|test)\.[cm]?[jt]sx?$/u.test(path))) {
     const source = await readFile(join(manifest.workspaceRoot, path), "utf8");
+    testSources.set(path, source);
     if (/\btest\.(?:only|skip)\s*\(/u.test(source)) throw new Error(`${path}: test.only and test.skip are forbidden`);
     if (!/\bexpect\s*\(/u.test(source)) throw new Error(`${path}: Playwright case must contain a meaningful assertion`);
   }
   for (const testCase of cases) {
-    if (!testCase.id || !testCase.versionHash || !testCase.automationPath) continue;
-    const source = await readFile(join(manifest.workspaceRoot, testCase.automationPath), "utf8");
-    const caseAnnotations = [...source.matchAll(/type:\s*["']qasey\.case["']\s*,\s*description:\s*["']([^"']+)["']/gu)]
-      .filter(match => match[1] === testCase.id);
-    if (caseAnnotations.length !== 1) throw new Error(`${testCase.automationPath}: expected exactly one qasey.case annotation for ${testCase.id}`);
-    const versionAnnotations = [...source.matchAll(/type:\s*["']qasey\.version["']\s*,\s*description:\s*["']([^"']+)["']/gu)]
-      .filter(match => match[1] === testCase.versionHash);
-    if (versionAnnotations.length !== 1) throw new Error(`${testCase.automationPath}: qasey.version does not match ${testCase.versionHash}`);
-    if (!source.includes(testCase.id)) throw new Error(`${testCase.automationPath}: test title must include ${testCase.id}`);
+    if (!testCase.id || !testCase.versionHash) continue;
+    const candidates = testCase.automationPath
+      ? [[testCase.automationPath, testSources.get(testCase.automationPath) ?? await readFile(join(manifest.workspaceRoot, testCase.automationPath), "utf8")] as const]
+      : [...testSources.entries()];
+    const matching = candidates.filter(([, source]) => [...source.matchAll(/type:\s*["']qasey\.case["']\s*,\s*description:\s*["']([^"']+)["']/gu)]
+      .some(match => match[1] === testCase.id));
+    if (matching.length !== 1) throw new Error(`expected exactly one generated Playwright file with qasey.case annotation for ${testCase.id}; found ${matching.length}`);
+    const [path, source] = matching[0]!;
+    const versionAnnotations = [...source.matchAll(/type:\s*["']qasey\.version["']\s*,\s*description:\s*["']([^"']+)["']/gu)].filter(match => match[1] === testCase.versionHash);
+    if (versionAnnotations.length !== 1) throw new Error(`${path}: qasey.version does not match ${testCase.versionHash}`);
+    if (!source.includes(testCase.id)) throw new Error(`${path}: test title must include ${testCase.id}`);
   }
 }
 
@@ -534,6 +662,21 @@ async function emit(type: string, message: string, metadata: Record<string, unkn
   };
   await mkdir(dirname(manifest.eventsPath), { recursive: true });
   await appendFile(manifest.eventsPath, `${JSON.stringify(event)}\n`, { mode: 0o600 });
+}
+
+function e2eRunId(taskId: string): string {
+  return taskId.replace(/:(?:author|verifier):\d+$/u, "");
+}
+
+function serializeTracingEvent(event: TracingEvent): unknown {
+  const cloned = JSON.parse(JSON.stringify(event)) as {
+    exportedSpan?: Record<string, unknown>;
+  };
+  if (cloned.exportedSpan) {
+    cloned.exportedSpan.input = undefined;
+    cloned.exportedSpan.output = undefined;
+  }
+  return sanitizeTelemetry(cloned);
 }
 
 function verifyContextIntegrity(context: string, expected: string): void {

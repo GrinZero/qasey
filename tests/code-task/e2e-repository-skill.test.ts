@@ -8,6 +8,7 @@ import {
   webE2EConfigurationFromSkill,
   webE2EPlaywrightPlans,
   webE2ERepositoryFromSkill,
+  assertWebE2EAutomationPaths,
 } from "../../src/platform/code-task/e2e-repository-skill.ts";
 
 describe("fixed Web E2E repository execution configuration", () => {
@@ -37,6 +38,8 @@ describe("fixed Web E2E repository execution configuration", () => {
       root: "web",
       config: "web/playwright.config.ts",
     });
+    expect(snapshot.verification.projects[0]).not.toHaveProperty("testFileSuffixes");
+    expect(snapshot.automationPathPolicy.projects[0]?.testFileSuffixes).toEqual([".spec.ts"]);
   });
 
   it("selects the affected Playwright project and narrows verification to changed specs", () => {
@@ -55,6 +58,29 @@ describe("fixed Web E2E repository execution configuration", () => {
     expect(webE2EPlaywrightPlans(["web/pages/requests.ts"], configFile)).toMatchObject([
       { id: "web", testFiles: [] },
     ]);
+  });
+
+  it("rejects Case paths that the frozen Playwright project cannot discover", () => {
+    const policy = {
+      projects: [{
+        id: "dogfood",
+        testRoot: "tests/browser",
+        testFileSuffixes: [".e2e.spec.ts"],
+      }],
+    };
+
+    expect(() => assertWebE2EAutomationPaths([
+      { automationPath: "tests/browser/admin-ui.spec.ts" },
+    ], policy)).toThrow(/not discoverable/u);
+    expect(() => assertWebE2EAutomationPaths([
+      { automationPath: "tests/browser/navigation.e2e.spec.ts" },
+    ], policy)).not.toThrow();
+  });
+
+  it("keeps local discovery suffixes out of the sandbox protocol", () => {
+    const configuration = webE2EConfigurationFromSkill(configFile);
+    expect(ChangedProjectPlaywrightVerificationSchema.parse(configuration.verification)).toEqual(configuration.verification);
+    expect(JSON.stringify(configuration.verification)).not.toContain("testFileSuffixes");
   });
 
   it("fails closed when changes do not belong to a configured project", () => {

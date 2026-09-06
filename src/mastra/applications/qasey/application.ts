@@ -12,7 +12,7 @@ export interface QaseyApplicationModules {
  * Agent tools that create immutable change plans.
  *
  * The composition root supplies code-registered primitives. File-discovered
- * Agents remain catalog metadata here and are instantiated once by the Mastra
+ * Agents remain catalog metadata here and are instantiated by the Mastra
  * generated entry. Importing this definition must not construct infrastructure.
  */
 export function createQaseyApplication(modules: QaseyApplicationModules): AgentApplicationBundle {
@@ -29,7 +29,7 @@ export function createQaseyApplication(modules: QaseyApplicationModules): AgentA
       accent: "indigo",
     },
     agents: {},
-    filesystemAgents: ["qasey-main"],
+    filesystemAgents: ["qasey-main", "qasey-e2e-author"],
     workflows: {
       "qasey-e2e-lifecycle": e2eModule.e2eLifecycleWorkflow,
     },
@@ -39,6 +39,7 @@ export function createQaseyApplication(modules: QaseyApplicationModules): AgentA
         // Authenticated UI, API, and service callers share the same RBAC gate.
         // Signed channel ingress remains isolated to its dedicated adapter.
         "qasey-main": { permission: "qasey.agent.execute", audiences: ["admin-ui", "api", "service"] },
+        "qasey-e2e-author": { permission: "qasey.e2e.execute", audiences: ["admin-ui", "service"] },
       },
       workflows: {
         "qasey-e2e-lifecycle": { permission: "qasey.e2e.execute", audiences: ["admin-ui", "api", "service"] },
