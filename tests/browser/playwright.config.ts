@@ -27,7 +27,12 @@ export default defineConfig({
     video: { mode: "on", size: { width: 1280, height: 720 } },
   },
   projects: [
-    { name: "setup", testMatch: /auth\.setup\.ts/u },
+    {
+      name: "setup", testMatch: /auth\.setup\.ts/u,
+      // API request traces include login bodies and session cookies. Keep the
+      // credential-bearing setup out of all evidence while retaining browser runs.
+      use: { trace: "off", video: "off", screenshot: "off" },
+    },
     {
       name: "chromium",
       dependencies: ["setup"],
