@@ -1,3 +1,5 @@
+import { CollaborationExecutionBridge } from "../../packages/domain/src/collaboration-execution.ts";
+import { CollaborationRepository } from "../../packages/domain/src/collaboration-repository.ts";
 import "../load-env.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes } from "node:crypto";
@@ -11,12 +13,13 @@ import type { CodeModeTransport, ToolObserve } from "@mastra/core/tools";
 import { QuickJsCodeModeTransport } from "@mastra/quickjs";
 import { ObservabilityStoragePostgresVNext, PostgresStore } from "@mastra/pg";
 import { z } from "zod";
-import { AgentProgressInputSchema, CreateCaseHubChangeSetSchema, QaseyRequestContextSchema } from "../../packages/contracts/src/index.ts";
-import type { E2ERun, QaseyRequestContext } from "../../packages/contracts/src/index.ts";
+import { AgentProgressInputSchema, CreateCaseHubChangeSetSchema, CreateCaseReviewPlanSchema, GenerateE2EConversationActionSchema, QaseyRequestContextSchema } from "../../packages/contracts/src/index.ts";
+import type { E2ERun, QaseyRequestContext, RequirementDraft, RequirementSnapshot } from "../../packages/contracts/src/index.ts";
 import { AgentProgressSession, freezeE2EContext } from "../../packages/domain/src/index.ts";
 import type { ToolsInput } from "@mastra/core/agent";
 import {
-  InMemoryCaseHubRepository, InMemoryRunRepository, PrismaCaseHubRepository, PrismaRunRepository,
+  InMemoryCaseHubRepository, InMemoryQaseyConversationRepository, InMemoryRunRepository,
+  PrismaCaseHubRepository, PrismaQaseyConversationRepository, PrismaRunRepository,
 } from "../../packages/domain/src/index.ts";
 import { assertOpenAICompatibleToolSchemas, createGitHubClient, GitHubPublisher, loadConfig, QaseyMcpCatalog, JiraClient, ReadConnectorCatalog, resolveCredentialKeyring } from "../../packages/adapters/src/index.ts";
 import {
@@ -59,6 +62,7 @@ export const studioMcpPreviewEnabled = config.QASEY_ENABLE_STUDIO_MCP_PREVIEW
   ?? false;
 export const QASEY_REQUEST_CONTEXT_REQUIRED_MESSAGE = "Qasey request context has not been initialized";
 export const applicationDatabase = config.DATABASE_URL ? createApplicationDatabase(config.DATABASE_URL) : undefined;
+export const collaborationRepository = new CollaborationRepository(applicationDatabase?.client);
 export const buildMetadata = resolveBuildMetadata(projectRoot);
 
 /**
@@ -77,6 +81,9 @@ export const runRepository = applicationDatabase ? new PrismaRunRepository(appli
 export const caseHubRepository = applicationDatabase
   ? new PrismaCaseHubRepository(applicationDatabase.client)
   : new InMemoryCaseHubRepository();
+export const conversationRepository = applicationDatabase
+  ? new PrismaQaseyConversationRepository(applicationDatabase.client)
+  : new InMemoryQaseyConversationRepository();
 export const failureInboxStore = applicationDatabase
   ? new PrismaFailureInboxStore(applicationDatabase.client)
   : new InMemoryFailureInboxStore();
@@ -135,6 +142,7 @@ runtimeReadiness.register("mastra-storage", async () => {
 if (applicationDatabase) runtimeReadiness.register("application-database", () => applicationDatabase.healthCheck());
 runtimeReadiness.register("run-repository", () => runRepository.healthCheck?.() ?? Promise.resolve());
 runtimeReadiness.register("case-hub-repository", () => caseHubRepository.healthCheck?.() ?? Promise.resolve());
+runtimeReadiness.register("conversation-repository", () => conversationRepository.healthCheck?.() ?? Promise.resolve());
 runtimeReadiness.register("failure-inbox", () => failureInboxStore.healthCheck?.() ?? Promise.resolve());
 runtimeReadiness.register("effect-receipts", () => effectReceiptStore.healthCheck?.() ?? Promise.resolve());
 runtimeReadiness.register("channel-delivery-inbox", () => channelDeliveryInbox.healthCheck?.() ?? Promise.resolve());
@@ -215,6 +223,7 @@ export const e2eCoordinator = new E2ECoordinator(
   draftPrBroker,
   {
     maxRepairs: config.QASEY_MAX_REPAIRS,
+    instructions: new CollaborationExecutionBridge(collaborationRepository),
     reviewBaseUrl: config.QASEY_PUBLIC_BASE_URL,
     effects: sideEffectExecutor,
     ...(codeTaskRunnerProvider ? { codeTasks: codeTaskRunnerProvider } : {}),
@@ -231,19 +240,22 @@ export function initializeQaseyInfrastructure(): Promise<void> {
     applicationDatabase?.init(),
     runRepository.init?.(),
     caseHubRepository.init?.(),
+    conversationRepository.init?.(),
     failureInboxStore.init?.(),
     effectReceiptStore.init?.(),
     channelDeliveryInbox.init?.(),
     sandboxLeaseStore?.init(),
     externalConnectionStore.init?.(),
     mcpCatalog.init(),
-  ]).then(() => undefined);
+  ]).then(async () => {
+    await conversationRepository.failStale(new Date(Date.now() - config.QASEY_AGENT_TIMEOUT_MS * 2));
+  });
   return infrastructureInitialization;
 }
 
 export async function closeQaseyInfrastructure(): Promise<void> {
   const resources: Array<{ close(): Promise<void> }> = [
-    mcpCatalog, externalConnectionStore, effectReceiptStore, failureInboxStore, artifactStore, channelDeliveryInbox, caseHubRepository, runRepository, runtimeStore.storage,
+    mcpCatalog, externalConnectionStore, effectReceiptStore, failureInboxStore, artifactStore, channelDeliveryInbox, conversationRepository, caseHubRepository, runRepository, runtimeStore.storage,
     ...(sandboxLeaseStore ? [sandboxLeaseStore] : []),
     ...(applicationDatabase ? [applicationDatabase] : []),
   ];
@@ -413,26 +425,70 @@ function e2eTools() {
         return { cases: await caseHubRepository.listCases(ownerScopeFromRequestContext(requestContext), query) };
       },
     }),
-    caseHubCreateChangeSet: createTool({
-      id: "case_hub_create_change_set",
-      description: "冻结当前需求并提交不可变 Case Change Plan；随后在隔离 sandbox 中生成和验证 Web Playwright。存在 blocking question 时拒绝启动。",
-      inputSchema: CreateCaseHubChangeSetSchema,
-      execute: async (input, { mastra, requestContext }) => {
+    caseHubCreateReviewPlan: createTool({
+      id: "case_hub_create_review_plan",
+      description: "冻结当前需求并创建结构化文字测试用例 Review Plan。此工具只创建待审文字用例，绝不启动 E2E。存在 blocking question 时拒绝创建。",
+      inputSchema: CreateCaseReviewPlanSchema,
+      execute: async (input, { requestContext }) => {
         if (!requestContext) throw new Error("Trusted request context is required");
+        if (input.requirement.blockingQuestions.length > 0) throw new Error("Resolve blocking questions before creating a Case Review Plan");
         const owner = ownerScopeFromRequestContext(requestContext);
-        if (input.requirement.blockingQuestions.length > 0) throw new Error("Resolve blocking questions before creating a Case Hub change set");
         const requestId = String(requestContext.get("requestId"));
         const sessionId = String(requestContext.get("sessionId"));
         const resourceId = String(requestContext.get(MASTRA_RESOURCE_ID_KEY));
         const threadId = String(requestContext.get(MASTRA_THREAD_ID_KEY) ?? sessionId);
         const taskRunId = String(requestContext.get("taskId") ?? requestContext.get("executionId") ?? requestId);
-        const webE2EConfiguration = webE2EConfigurationFromSkill();
-        const preflight = await e2ePreflight.assertReady(owner, webE2EConfiguration);
         const actorId = getRuntimeContext(requestContext)["qasey-context"].actor.id;
         const requirement = freezeE2EContext(input.requirement, { sessionId, threadId, taskRunId, requestId, resourceId });
-        const changeSet = await caseHubRepository.createChangeSet(owner, {
-          requirement,
-          proposals: input.proposals,
+        return caseHubRepository.createReviewPlan(owner, {
+          conversationId: sessionId, threadId, subjectId: actorId, requirement,
+          proposals: input.proposals, createdBy: actorId,
+        });
+      },
+    }),
+    caseHubCreateChangeSet: createTool({
+      id: "case_hub_create_change_set",
+      description: "已停用的旧入口。必须先创建并人工批准文字用例 Review Plan，再调用 case_hub_start_e2e。",
+      inputSchema: CreateCaseHubChangeSetSchema,
+      execute: async () => {
+        throw Object.assign(new Error("Text case review is required before E2E generation"), { code: "text_case_review_required" });
+      },
+    }),
+    caseHubStartE2E: createTool({
+      id: "case_hub_start_e2e",
+      description: "为当前 AI session 的 Review Plan 中精确指定的已批准文字 Case Versions 启动一个 Web Playwright E2E Run。单条或批量都只创建一个 Run/PR。",
+      inputSchema: z.object({ planId: z.string().uuid(), caseVersionIds: z.array(z.string().uuid()).min(1).max(100) }).strict(),
+      execute: async (input, { mastra, requestContext }) => {
+        if (!requestContext) throw new Error("Trusted request context is required");
+        const owner = ownerScopeFromRequestContext(requestContext);
+        const requestId = String(requestContext.get("requestId"));
+        const sessionId = String(requestContext.get("sessionId"));
+        const resourceId = String(requestContext.get(MASTRA_RESOURCE_ID_KEY));
+        const threadId = String(requestContext.get(MASTRA_THREAD_ID_KEY) ?? sessionId);
+        const taskRunId = String(requestContext.get("taskId") ?? requestContext.get("executionId") ?? requestId);
+        const actorId = getRuntimeContext(requestContext)["qasey-context"].actor.id;
+        const action = GenerateE2EConversationActionSchema.safeParse(requestContext.get("qasey-conversation-action"));
+        if (!action.success || action.data.planId !== input.planId
+          || action.data.caseVersionIds.length !== input.caseVersionIds.length
+          || action.data.caseVersionIds.some((id, index) => id !== input.caseVersionIds[index])) {
+          throw new Error("case_hub_start_e2e requires the exact trusted conversation action selection");
+        }
+        const detail = await caseHubRepository.getReviewPlan(owner, input.planId, actorId);
+        if (!detail) throw new Error(`Case Review Plan ${input.planId} not found`);
+        if (!detail.editable || detail.plan.conversationId !== sessionId || detail.plan.threadId !== threadId) throw new Error("Review Plan does not belong to the current user and AI session");
+        if (input.caseVersionIds.length > 1 && detail.plan.status !== "ready") throw new Error("Batch E2E generation requires every Review item to be resolved");
+        const approvedIds = new Set(detail.items.filter(item => item.status === "approved").flatMap(item => item.publishedCaseVersionId ? [item.publishedCaseVersionId] : []));
+        if (new Set(input.caseVersionIds).size !== input.caseVersionIds.length || input.caseVersionIds.some(id => !approvedIds.has(id))) {
+          throw new Error("E2E can only target exact approved Case Versions from this Review Plan");
+        }
+        const statuses = await caseHubRepository.automationStatuses(owner, input.caseVersionIds);
+        const unavailable = input.caseVersionIds.filter(id => statuses[id] === "verified" || statuses[id] === "generating" || statuses[id] === "awaiting_review");
+        if (unavailable.length) throw new Error(`Case Versions already covered or in progress: ${unavailable.join(", ")}`);
+        const webE2EConfiguration = webE2EConfigurationFromSkill();
+        const preflight = await e2ePreflight.assertReady(owner, webE2EConfiguration);
+        const changeSet = await caseHubRepository.createAutomationChangeSet(owner, {
+          requirement: detail.plan.requirement,
+          caseVersionIds: input.caseVersionIds,
           repository: webE2EConfiguration.target,
           createdBy: actorId,
           baseSha: preflight.baseSha,
@@ -440,7 +496,7 @@ function e2eTools() {
         });
         const created = await e2eCoordinator.create(owner, {
           changeSetId: changeSet.id,
-          handoff: input.requirement,
+          handoff: requirementDraft(detail.plan.requirement),
           platform: "web",
           framework: "playwright",
           requestId,
@@ -449,6 +505,7 @@ function e2eTools() {
           testEnvironment: webE2EConfiguration.environment,
           playwrightVerification: webE2EConfiguration.verification,
         }, { sessionId, threadId, taskRunId, requestId, resourceId });
+        await collaborationRepository.joinRun({ ...owner, subjectId: actorId, conversationId: sessionId }, created.id);
         if (!mastra) throw new Error("Mastra runtime is required to start the E2E workflow");
         const run = await mastra.getWorkflow("qasey-e2e-lifecycle").createRun({ runId: created.id, resourceId: actorId });
         try {
@@ -457,7 +514,7 @@ function e2eTools() {
           await e2eCoordinator.fail(owner, created.id, error);
           throw error;
         }
-        return { changeSet, run: created };
+        return { changeSet, run: await runRepository.get(owner, created.id) ?? created };
       },
     }),
     caseHubGetChangeSet: createTool({
@@ -493,12 +550,15 @@ function e2eTools() {
         if (!previous) throw new Error(`Run ${runId} not found`);
         const changeSet = await caseHubRepository.getChangeSet(owner, previous.changeSetId);
         if (!changeSet) throw new Error(`Case Hub change set ${previous.changeSetId} not found`);
-        if (changeSet.status === "blocked_product" || changeSet.status === "blocked_environment") {
+        if (changeSet.status === "blocked_product" || changeSet.status === "blocked_environment" || changeSet.status === "failed") {
           await caseHubRepository.updateChangeSet(owner, changeSet.id, changeSet.revision, { status: "verifying" });
         } else if (changeSet.status !== "verifying") {
           throw new Error(`Case Hub result rerun requires a blocked Change Set, received ${changeSet.status}`);
         }
         const created = await e2eCoordinator.rerun(owner, runId);
+        const latestChangeSet = await caseHubRepository.getChangeSet(owner, changeSet.id);
+        if (!latestChangeSet) throw new Error(`Case Hub change set ${changeSet.id} not found after rerun creation`);
+        await caseHubRepository.updateChangeSet(owner, latestChangeSet.id, latestChangeSet.revision, { runId: created.id });
         if (!mastra) throw new Error("Mastra runtime is required to start the E2E workflow");
         const resourceId = getRuntimeContext(requestContext)["qasey-context"].actor.id;
         const workflowRun = await mastra.getWorkflow("qasey-e2e-lifecycle").createRun({ runId: created.id, resourceId });
@@ -507,6 +567,11 @@ function e2eTools() {
       },
     }),
   };
+}
+
+function requirementDraft(snapshot: RequirementSnapshot): RequirementDraft {
+  const { version: _version, source: _source, createdAt: _createdAt, snapshotHash: _snapshotHash, ...draft } = snapshot;
+  return draft;
 }
 
 export async function toolsForRequest(requestContext?: RequestContext<any>) {

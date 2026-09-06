@@ -41,6 +41,14 @@ export interface AgentApplication {
   accent: "indigo" | "teal" | "amber" | "coral" | "blue";
 }
 
+export interface QaseyConversation {
+  id: string;
+  title: string;
+  activeTurnId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type RunStatus =
   | "queued"
   | "preparing_workspace"
@@ -62,6 +70,7 @@ export interface Artifact {
 }
 
 export interface QaseyRun {
+  statusHistory?: RunStatus[];
   id: string;
   status: RunStatus;
   framework: "playwright" | "maestro";
@@ -77,21 +86,21 @@ export interface QaseyRun {
 }
 
 export interface CaseHubCase {
-  id: string; suitePath: string; title: string; activeVersionId?: string; proposedVersionIds: string[]; updatedAt: string;
+  id: string; suitePath: string; title: string; activeVersionId?: string; proposedVersionIds: string[]; automationStatus?: CaseAutomationStatus; systemTags?: "e2e"[]; updatedAt: string;
 }
 
 export interface CaseHubChangeSet {
   id: string; status: string; revision: number; caseVersionIds: string[]; runId?: string; branch?: string; pullRequestUrl?: string;
-  requirement: { goal: string; requirementSummary: string }; updatedAt: string;
+  automationPaths?: Record<string, string>; requirement: { goal: string; requirementSummary: string }; updatedAt: string;
 }
 
 export interface CaseHubCaseVersion {
   id: string; caseId: string; version: number; suitePath: string; title: string; description: string; priority: "P0" | "P1" | "P2" | "P3";
-  target: "web"; preconditions: string[]; steps: Array<{ action: string; expected: string[] }>; tags: string[]; automationPath: string; contentHash: string; status: string; createdAt: string;
+  target: "web"; preconditions: string[]; steps: Array<{ action: string; expected: string[] }>; testData: Record<string, unknown>; tags: string[]; automationPath?: string; automationStatus?: CaseAutomationStatus; systemTags?: "e2e"[]; contentHash: string; status: string; createdAt: string;
 }
 
 export interface CaseHubResult {
-  id: string; changeSetId: string; runId: string; caseId: string; caseVersionId: string; attempt: number; executionStatus: string; reviewStatus: string; feedback?: string; artifacts: Artifact[];
+  id: string; changeSetId: string; runId: string; caseId: string; caseVersionId: string; attempt: number; executionStatus: string; reviewStatus: string; feedback?: string; durationMs?: number; artifacts: Artifact[];
 }
 
 export interface AuditRecord {
@@ -116,24 +125,6 @@ export interface ApiTokenRecord {
   expiresAt?: string;
   lastUsedAt?: string;
   revokedAt?: string;
-}
-
-export interface SandboxSessionState {
-  sessionId: string;
-  workspaceId: string;
-  generation: number;
-  ordinal: number;
-  lastActivityAt: string;
-  browser: { running: boolean; url?: string; title?: string };
-  desktop: {
-    running: boolean;
-    available: boolean;
-    display?: string;
-    width?: number;
-    height?: number;
-    recording?: boolean;
-    applications?: string[];
-  };
 }
 
 export type TriggerConnectionStatus = "awaiting_webhook" | "active" | "disabled" | "error";
@@ -189,3 +180,9 @@ export interface TriggerConnection {
   createdAt: string;
   updatedAt: string;
 }
+import { QaseyUIMessageSchema, type CaseAutomationStatus, type CaseReviewContent, type CaseReviewItem, type CaseReviewPlan, type CaseReviewPlanDetail, type QaseyProgressData, type QaseyUIMessage as SharedQaseyUIMessage } from "@qasey/contracts";
+
+export type QaseyUIMessage = SharedQaseyUIMessage;
+export type { QaseyProgressData };
+export type { CaseAutomationStatus, CaseReviewContent, CaseReviewItem, CaseReviewPlan, CaseReviewPlanDetail };
+export { QaseyUIMessageSchema };

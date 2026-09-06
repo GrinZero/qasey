@@ -11,15 +11,18 @@ allowBuilds:
   prisma: true
   utf-8-validate: true
 minimumReleaseAgeExclude:
-  - '@mastra/core@1.58.0'
-  - '@mastra/mcp@1.16.0'
-  - '@mastra/memory@1.26.1'
-  - '@mastra/pg@1.20.0'
-  - '@mastra/schema-compat@1.3.6'
+  - '@ai-sdk/openai@4.0.58'
+  - '@ai-sdk/react@4.0.94'
+  - '@mastra/core@1.64.0'
+  - '@mastra/mcp@1.17.3'
+  - '@mastra/memory@1.28.2'
+  - '@mastra/pg@1.22.3'
+  - '@mastra/schema-compat@1.3.8'
   - '@mastra/slack@1.6.1'
-  - '@mastra/deployer@1.58.0'
-  - '@mastra/server@1.58.0'
-  - mastra@1.24.0
+  - '@mastra/deployer@1.64.0'
+  - '@mastra/server@1.64.0'
+  - 'ai@7.0.92'
+  - mastra@1.27.3
   - '@trycua/cua-driver-darwin-arm64@0.21.0'
   - '@trycua/cua-driver-darwin-x64@0.21.0'
   - '@trycua/cua-driver-linux-arm64-gnu@0.21.0'
@@ -27,10 +30,8 @@ minimumReleaseAgeExclude:
   - '@trycua/cua-driver-win32-arm64-msvc@0.21.0'
   - '@trycua/cua-driver-win32-x64-msvc@0.21.0'
   - '@trycua/cua-driver@0.21.0'
+  - '@ai-sdk/gateway@4.0.74'
 overrides:
-  # Mastra still aliases the affected provider-utils 3.x line for AI SDK v5.
-  # The imported runtime surface is locked by dependency-compatibility.test.ts.
-  '@mastra/core@1.59.0>@ai-sdk/provider-utils-v5': 'npm:@ai-sdk/provider-utils@4.0.48'
   # Prisma 7.2 remains pinned for API and license-closure stability; these exact
   # vulnerable transitive releases are replaced with their first safe lines.
   '@hono/node-server@1.19.6': '1.19.17'
@@ -41,6 +42,5 @@ overrides:
   'lodash@4.17.21': '4.18.1'
   'valibot@1.2.0': '1.4.2'
 patchedDependencies:
-  '@mastra/core@1.59.0': patches/@mastra__core@1.59.0.patch
-  '@mastra/deployer@1.59.0': patches/@mastra__deployer@1.59.0.patch
-  mastra@1.25.0: patches/mastra@1.25.0.patch
+  '@mastra/deployer@1.64.0': patches/@mastra__deployer@1.64.0.patch
+  mastra@1.27.3: patches/mastra@1.27.3.patch

@@ -26,14 +26,14 @@ describe("patched Mastra deployer pnpm output", () => {
     ]);
     await Promise.all([
       writeFile(join(sourceRoot, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", "utf8"),
-      writeFile(join(sourceRoot, "patches", "core.patch"), "core patch\n", "utf8"),
+      writeFile(join(sourceRoot, "patches", "deployer.patch"), "deployer patch\n", "utf8"),
       writeFile(join(sourceRoot, "patches", "cli.patch"), "cli patch\n", "utf8"),
       writeFile(join(sourceRoot, "pnpm-workspace.yaml"), [
         "packages:",
         "  - '.'",
         "patchedDependencies:",
-        "  '@mastra/core@1.59.0': patches/core.patch",
-        "  mastra@1.25.0: patches/cli.patch",
+        "  '@mastra/deployer@1.64.0': patches/deployer.patch",
+        "  mastra@1.27.3: patches/cli.patch",
         "",
       ].join("\n"), "utf8"),
     ]);
@@ -51,14 +51,14 @@ describe("patched Mastra deployer pnpm output", () => {
 
     const outputWorkspace = await readFile(join(outputRoot, "pnpm-workspace.yaml"), "utf8");
     expect(outputWorkspace).toContain("patchedDependencies:");
-    expect(outputWorkspace).toContain('"@mastra/core@1.59.0": ".mastra-patches/0-core.patch"');
-    expect(outputWorkspace).toContain('"mastra@1.25.0": ".mastra-patches/1-cli.patch"');
+    expect(outputWorkspace).toContain('"@mastra/deployer@1.64.0": ".mastra-patches/0-deployer.patch"');
+    expect(outputWorkspace).toContain('"mastra@1.27.3": ".mastra-patches/1-cli.patch"');
     expect(outputWorkspace).toContain("allowUnusedPatches: true");
 
     const copiedPatchNames = await readdir(join(outputRoot, ".mastra-patches"));
-    expect(copiedPatchNames.sort()).toEqual(["0-core.patch", "1-cli.patch"]);
-    await expect(readFile(join(outputRoot, ".mastra-patches", "0-core.patch"), "utf8"))
-      .resolves.toBe("core patch\n");
+    expect(copiedPatchNames.sort()).toEqual(["0-deployer.patch", "1-cli.patch"]);
+    await expect(readFile(join(outputRoot, ".mastra-patches", "0-deployer.patch"), "utf8"))
+      .resolves.toBe("deployer patch\n");
     await expect(readFile(join(outputRoot, ".mastra-patches", "1-cli.patch"), "utf8"))
       .resolves.toBe("cli patch\n");
   });

@@ -101,6 +101,42 @@ describe("Prisma repository initialization", () => {
       data: expect.objectContaining({ revision: { increment: 1 } }),
     }));
   });
+
+  it("decodes persisted runs that still contain the former test-file discovery field", async () => {
+    const owner: OwnerScope = { applicationId: "qasey", tenantId: "tenant-1" };
+    const run = testRun(owner, "legacy-run");
+    const legacyVerification = {
+      strategy: "changed-project-playwright",
+      projects: [{
+        id: "web",
+        root: "web",
+        testRoot: "web/tests",
+        testFileSuffixes: [".spec.ts"],
+        config: "web/playwright.config.ts",
+        playwrightProject: "chromium",
+      }],
+    };
+    const findMany = vi.fn(async () => [{
+      payload: { ...run, playwrightVerification: legacyVerification },
+      revision: 1,
+    }]);
+    const legacyDatabase = {
+      $connect: vi.fn(async () => undefined),
+      agentApplicationRun: { findMany },
+    } as unknown as PrismaClient;
+    const repository = new PrismaRunRepository(legacyDatabase);
+    await repository.init();
+
+    const [decoded] = await repository.list(owner);
+
+    expect(decoded?.playwrightVerification?.projects[0]).toEqual({
+      id: "web",
+      root: "web",
+      testRoot: "web/tests",
+      config: "web/playwright.config.ts",
+      playwrightProject: "chromium",
+    });
+  });
 });
 
 function testRun(owner: OwnerScope, id: string): E2ERun {

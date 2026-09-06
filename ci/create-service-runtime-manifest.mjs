@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 
 const [sourcePath, sourceLockPath, destinationPath, destinationLockPath, ...optionArgs] = process.argv.slice(2);
 if (!sourcePath || !sourceLockPath || !destinationPath || !destinationLockPath) {
@@ -21,7 +22,7 @@ const source = JSON.parse(await readFile(sourcePath, "utf8"));
 const sourceLock = await readFile(sourceLockPath, "utf8");
 const importer = parseRootImporter(sourceLock);
 const dependencyNames = options.profile === "sandbox"
-  ? ["@ai-sdk/openai", "@mastra/core", "@playwright/test", "@trycua/cua-driver", "jose", "zod"]
+  ? ["@ai-sdk/openai", "@mastra/core", "@mastra/observability", "@playwright/test", "@trycua/cua-driver", "jose", "zod"]
   : [
       ...Object.keys(source.dependencies ?? {})
         .filter(name => name !== "@playwright/test" && name !== "@trycua/cua-driver"),
@@ -46,6 +47,9 @@ const manifest = {
   engines: source.engines,
   dependencies,
 };
+for (const path of [destinationPath, destinationLockPath, options.destinationWorkspacePath].filter(Boolean)) {
+  await mkdir(dirname(path), { recursive: true });
+}
 await writeFile(destinationPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o644 });
 await writeFile(destinationLockPath, serviceLockfile(sourceLock, lockDependencies), { mode: 0o644 });
 if (options.sourceWorkspacePath && options.destinationWorkspacePath) {
@@ -58,7 +62,7 @@ if (options.sourceWorkspacePath && options.destinationWorkspacePath) {
   }
   await writeFile(
     options.destinationWorkspacePath,
-    runtimeWorkspace(sourceWorkspace, workspaceOverrides, lockDependencies),
+    runtimeWorkspace(sourceWorkspace, workspaceOverrides),
     { mode: 0o644 },
   );
 }
@@ -104,13 +108,8 @@ function serviceLockfile(sourceLockfile, dependencies) {
   const settings = topLevelSection(sourceLockfile, "settings")?.trimEnd();
   const overrides = topLevelSection(sourceLockfile, "overrides")?.trimEnd();
   const packagesIndex = sourceLockfile.indexOf("\npackages:\n");
-  const coreVersion = dependencies.get("@mastra/core")?.specifier;
-  const escapedCoreVersion = coreVersion?.replaceAll(".", "\\.");
-  const corePatch = escapedCoreVersion
-    ? new RegExp(`^  ['\"]?@mastra/core@${escapedCoreVersion}['\"]?: (.+)$`, "mu").exec(sourceLockfile)?.[1]
-    : undefined;
-  if (!version || !settings || !overrides || packagesIndex < 0 || !coreVersion || !corePatch) {
-    throw new Error("pnpm-lock.yaml is missing required lockfile, settings, overrides, package, or Mastra patch metadata");
+  if (!version || !settings || !overrides || packagesIndex < 0) {
+    throw new Error("pnpm-lock.yaml is missing required lockfile, settings, overrides, or package metadata");
   }
 
   const importerLines = [];
@@ -128,9 +127,6 @@ function serviceLockfile(sourceLockfile, dependencies) {
     "",
     overrides,
     "",
-    "patchedDependencies:",
-    `  ${yamlKey(`@mastra/core@${coreVersion}`)}: ${corePatch}`,
-    "",
     "importers:",
     "",
     "  .:",
@@ -141,23 +137,15 @@ function serviceLockfile(sourceLockfile, dependencies) {
   ].join("\n");
 }
 
-function runtimeWorkspace(sourceWorkspace, overrides, dependencies) {
+function runtimeWorkspace(sourceWorkspace, overrides) {
   const allowBuilds = topLevelSection(sourceWorkspace, "allowBuilds")?.trimEnd();
-  const coreVersion = dependencies.get("@mastra/core")?.specifier;
-  const sourcePatches = topLevelSection(sourceWorkspace, "patchedDependencies");
-  const patchPath = coreVersion && sourcePatches
-    ? new RegExp(`^  ['\"]?@mastra/core@${coreVersion.replaceAll(".", "\\.")}['\"]?: (.+)$`, "mu")
-      .exec(sourcePatches)?.[1]
-    : undefined;
-  if (!allowBuilds || !coreVersion || !patchPath) {
-    throw new Error("pnpm-workspace.yaml is missing required allowBuilds or Mastra patch metadata");
+  if (!allowBuilds) {
+    throw new Error("pnpm-workspace.yaml is missing required allowBuilds metadata");
   }
   return [
     "packages: []",
     allowBuilds,
     overrides.trimEnd(),
-    "patchedDependencies:",
-    `  ${yamlKey(`@mastra/core@${coreVersion}`)}: ${patchPath}`,
     "",
   ].join("\n");
 }

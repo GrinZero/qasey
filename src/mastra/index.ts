@@ -1,13 +1,16 @@
+import { startCollaborationWorker } from "./applications/qasey/collaboration.ts";
 import { registerDatadogContextBridge } from "./instrumentation.ts";
+import { createRequire } from "node:module";
 import { Mastra } from "@mastra/core/mastra";
 import type { CustomSpanFormatter } from "@mastra/core/observability";
+import type { IMastraEditor } from "@mastra/core/editor";
 import { DatadogBridge } from "@mastra/datadog";
 import { MastraStorageExporter, Observability } from "@mastra/observability";
 import { RedisServerCache } from "@mastra/redis";
 import { RedisStreamsPubSub } from "@mastra/redis-streams";
 import Redis from "ioredis";
 import { QASEY_TRACE_REQUEST_CONTEXT_KEYS } from "./applications/qasey/observability.ts";
-import { applicationDatabase, closeQaseyInfrastructure, config, createMastraRuntimeStorage, credentialKeyring, e2eFixtureLeaseService, externalConnectionStore, failureInboxStore, initializeQaseyInfrastructure, runRepository, sandboxPoolClient } from "./runtime.ts";
+import { applicationDatabase, closeQaseyInfrastructure, config, conversationRepository, createMastraRuntimeStorage, credentialKeyring, e2eFixtureLeaseService, externalConnectionStore, failureInboxStore, initializeQaseyInfrastructure, runRepository, sandboxPoolClient } from "./runtime.ts";
 import { createQaseyApplication } from "./applications/qasey/application.ts";
 import * as e2eModule from "./workflows/e2e-workflow.ts";
 import * as scorerModule from "./scorers/eval-scorers.ts";
@@ -49,6 +52,7 @@ import { TriggerProviderRegistry } from "../platform/triggers/trigger-provider-r
 import { SlackTriggerProvider } from "../platform/triggers/slack-trigger-provider.ts";
 import { StaleRunReconciler } from "../platform/recovery/failure-inbox.ts";
 import { ReconcilerLoop } from "../platform/recovery/reconciler-loop.ts";
+import { StaleConversationReconciler } from "../platform/recovery/conversation-reconciler.ts";
 import { InMemoryOrganizationStore, PrismaOrganizationStore } from "../platform/auth/organization-store.ts";
 import { createBrowserCsrfMiddleware } from "../platform/http/browser-csrf.ts";
 import { createRequestTelemetryMiddleware } from "../platform/http/request-telemetry.ts";
@@ -85,6 +89,7 @@ function organizationSlug(tenantId: string): string {
 
 const EXPENSIVE_ROUTE_IDS = new Set([
   "qasey-task",
+  "qasey-conversation-message",
   "run-create",
   "run-rerun",
   "run-verdict",
@@ -267,14 +272,27 @@ const passwordAuth = new PasswordAuthService({
 });
 await seedServiceRolePermissions(permissionService, config.QASEY_SINGLE_TENANT_ID ?? "trusted-ingress");
 const staleRunReconciler = new StaleRunReconciler(runRepository, failureInboxStore, config.QASEY_RUN_HEARTBEAT_TIMEOUT_MS);
-const runReconcilerLoop = config.QASEY_DEPLOYMENT_MODE === "standalone" || config.MASTRA_WORKERS === "orchestration"
+const reconciliationEnabled = config.QASEY_DEPLOYMENT_MODE === "standalone" || config.MASTRA_WORKERS === "orchestration";
+const runReconcilerLoop = reconciliationEnabled
   ? new ReconcilerLoop(
       () => staleRunReconciler.runOnce().then(() => undefined),
       config.QASEY_RUN_RECONCILER_INTERVAL_MS,
       error => console.error(JSON.stringify({ event: "run.reconciler.failed", message: error.message })),
     ).start()
   : undefined;
+const staleConversationReconciler = new StaleConversationReconciler(
+  conversationRepository,
+  config.QASEY_AGENT_TIMEOUT_MS * 2,
+);
+const conversationReconcilerLoop = reconciliationEnabled
+  ? new ReconcilerLoop(
+      () => staleConversationReconciler.runOnce().then(() => undefined),
+      config.QASEY_CONVERSATION_RECONCILER_INTERVAL_MS,
+      error => console.error(JSON.stringify({ event: "conversation.reconciler.failed", message: error.message })),
+    ).start()
+  : undefined;
 if (runReconcilerLoop) runtimeReadiness.register("run-reconciler", () => runReconcilerLoop.healthCheck());
+if (conversationReconcilerLoop) runtimeReadiness.register("conversation-reconciler", () => conversationReconcilerLoop.healthCheck());
 const qaseyApplication = createQaseyApplication({
   e2eModule,
   scorerModule,
@@ -283,6 +301,9 @@ const qaseyApplication = createQaseyApplication({
 const qaseyCatalog = flattenApplicationRegistry([qaseyApplication]).catalog;
 const adminUiApplication = createAdminUiApplication({
   publicBaseUrl: config.QASEY_PUBLIC_BASE_URL,
+  ...(config.QASEY_ADDITIONAL_TRUSTED_ORIGINS ? {
+    additionalTrustedOrigins: config.QASEY_ADDITIONAL_TRUSTED_ORIGINS,
+  } : {}),
   applicationCatalog: qaseyCatalog,
   applications: [qaseyApplication],
   permissions: permissionService,
@@ -308,6 +329,7 @@ const adminUiApplication = createAdminUiApplication({
 const lifecycle = new LifecycleContainer();
 lifecycle.own({ close: closeQaseyInfrastructure });
 if (runReconcilerLoop) lifecycle.own(runReconcilerLoop);
+if (conversationReconcilerLoop) lifecycle.own(conversationReconcilerLoop);
 if (permissionStore.close) lifecycle.own({ close: () => permissionStore.close!() });
 if (apiTokenStore.close) lifecycle.own({ close: () => apiTokenStore.close!() });
 if (organizationStore.close) lifecycle.own({ close: () => organizationStore.close!() });
@@ -468,6 +490,7 @@ const sharedRuntime = createSharedMastraConfig({
         }
         const ingressToken = request.header("authorization")?.replace(/^Bearer\s+/iu, "")
           ?? request.header("x-qasey-webhook-token");
+        if (!ingressToken) return undefined;
         const jiraIngress = request.path.includes("jira");
         const workerIngress = !jiraIngress && verifyWebhookToken(ingressToken, config.WORKER_TOKEN);
         const platformIngress = !jiraIngress && verifyWebhookToken(ingressToken, config.PLATFORM_SERVICE_TOKEN);
@@ -507,7 +530,12 @@ const sharedRuntime = createSharedMastraConfig({
         console.error(JSON.stringify({ event: "traffic.governance.store_error", operation }));
       },
     });
-    const browserCsrf = createBrowserCsrfMiddleware({ publicBaseUrl: config.QASEY_PUBLIC_BASE_URL });
+    const browserCsrf = createBrowserCsrfMiddleware({
+      publicBaseUrl: config.QASEY_PUBLIC_BASE_URL,
+      ...(config.QASEY_ADDITIONAL_TRUSTED_ORIGINS ? {
+        additionalTrustedOrigins: config.QASEY_ADDITIONAL_TRUSTED_ORIGINS,
+      } : {}),
+    });
     return config.NODE_ENV === "development"
       ? [requestBodyLimit, requestTelemetry, closeDevelopmentConnections, authorization, trafficGovernance, browserCsrf, applyStudioNetworkPolicy]
       : [requestBodyLimit, requestTelemetry, authorization, trafficGovernance, browserCsrf, applyStudioNetworkPolicy];
@@ -516,8 +544,21 @@ const sharedRuntime = createSharedMastraConfig({
 // The shared runtime adds registered routes and authorization middleware.
 Object.assign(server, sharedRuntime.config.server!);
 
+// The published @mastra/editor package also contains an Enterprise Edition
+// subpath. Load only its Apache-licensed root entry point, and only for local
+// development. Keep the package id non-literal so Mastra's release dependency
+// analyzer does not copy the mixed-license development artifact into the
+// deployable output; Node resolves it from the dev container's root modules.
+const developmentEditorPackage = ["@mastra", "editor"].join("/");
+const developmentEditor = config.NODE_ENV === "development"
+  ? new ((createRequire(import.meta.url)(developmentEditorPackage) as {
+      MastraEditor: new (options: { source: "db" }) => IMastraEditor;
+    }).MastraEditor)({ source: "db" })
+  : undefined;
+
 export const mastra = new Mastra({
   ...sharedRuntime.config,
+  ...(developmentEditor ? { editor: developmentEditor } : {}),
   channels: { slack: managedSlackProvider },
   server,
   recovery: { durableAgents: "auto" },
@@ -548,6 +589,13 @@ if (devRuntimeTunnelServerEnabled(config)) {
   void qaseySlackTunnelCommandRegistration.catch(error => {
     mastra.getLogger().error("Failed to register /qasey-local", error);
   });
+}
+const collaborationWorker = reconciliationEnabled
+  ? startCollaborationWorker(mastra, permissionService, routeModule.executeConversationTurn)
+  : undefined;
+if (collaborationWorker) {
+  lifecycle.own(collaborationWorker);
+  runtimeReadiness.register("conversation-collaboration", () => collaborationWorker.healthCheck());
 }
 const devRuntimeTunnelClient = startDevRuntimeTunnelClient(mastra, config);
 if (devRuntimeTunnelClient) lifecycle.own({ close: () => devRuntimeTunnelClient.close() });

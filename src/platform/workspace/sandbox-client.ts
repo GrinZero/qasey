@@ -12,10 +12,11 @@ import {
   type CodeTaskState,
 } from "../../../packages/contracts/src/index.ts";
 import type { CodeTaskSecrets } from "../../../packages/code-task/src/index.ts";
-import type {
-  SandboxBrowserActionSchema, SandboxDesktopActionSchema, SandboxDesktopApplicationSchema,
-  SandboxDesktopStartSchema, SandboxDesktopToolSchema, SandboxLease, SandboxLeaseScope,
-  SandboxSessionState,
+import {
+  SandboxCodeTaskReleaseResultSchema,
+  type SandboxBrowserActionSchema, type SandboxDesktopActionSchema, type SandboxDesktopApplicationSchema,
+  type SandboxDesktopStartSchema, type SandboxDesktopToolSchema, type SandboxLease, type SandboxLeaseScope,
+  type SandboxSessionState,
 } from "./sandbox-protocol.ts";
 import { assertSandboxControlKey, signSandboxControlToken } from "./sandbox-control-token.ts";
 import { SandboxCapacityError, type SandboxLeaseStore } from "./sandbox-lease-store.ts";
@@ -127,7 +128,10 @@ export class SandboxPoolClient {
   }
 
   sandbox(scope: SandboxLeaseScope): RemoteWorkspaceSandbox {
-    return new RemoteWorkspaceSandbox(() => this.session(scope));
+    return new RemoteWorkspaceSandbox(
+      () => this.session(scope),
+      () => this.release(scope),
+    );
   }
 
   async release(scope: SandboxLeaseScope): Promise<void> {
@@ -260,6 +264,14 @@ export class SandboxRuntimeSession {
       body: JSON.stringify({ reason }),
     });
     return CodeTaskStateSchema.parse(result);
+  }
+
+  async codeTaskRelease(taskId: string): Promise<boolean> {
+    const result = await this.request(
+      `/v1/sessions/${encodeURIComponent(this.lease.sessionId)}/code-tasks/${encodeURIComponent(taskId)}`,
+      { method: "DELETE" },
+    );
+    return SandboxCodeTaskReleaseResultSchema.parse(result).released;
   }
 
   async browserStart(input: { url?: string; width?: number; height?: number } = {}): Promise<SandboxSessionState> {
@@ -447,11 +459,18 @@ export class RemoteWorkspaceSandbox implements WorkspaceSandbox {
   readonly provider = "qasey-sandbox";
   status: SandboxInfo["status"] = "pending";
 
-  constructor(private readonly resolveSession: () => Promise<SandboxRuntimeSession>) {}
+  constructor(
+    private readonly resolveSession: () => Promise<SandboxRuntimeSession>,
+    private readonly releaseSession?: () => Promise<void>,
+  ) {}
 
   async start(): Promise<void> { await this.resolveSession(); this.status = "running"; }
   async stop(): Promise<void> { const session = await this.resolveSession(); await session.stop(); this.status = "stopped"; }
-  async destroy(): Promise<void> { await this.stop(); this.status = "destroyed"; }
+  async destroy(): Promise<void> {
+    if (this.releaseSession) await this.releaseSession();
+    else await this.stop();
+    this.status = "destroyed";
+  }
   async snapshot(): Promise<void> {}
   async isReady(): Promise<boolean> { return this.status === "running"; }
   getInstructions(): string { return "Commands run in a persistent Qasey session directory inside an isolated remote sandbox runtime."; }

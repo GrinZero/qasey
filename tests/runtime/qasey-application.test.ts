@@ -13,7 +13,7 @@ describe("Qasey application access policy", () => {
     } as unknown as QaseyApplicationModules);
 
     expect(application.agents).toEqual({});
-    expect(application.filesystemAgents).toEqual(["qasey-main"]);
+    expect(application.filesystemAgents).toEqual(["qasey-main", "qasey-e2e-author"]);
     expect(application.workflows).not.toHaveProperty("qasey-task");
     expect(application.access.agents["qasey-main"]?.audiences).toEqual([
       "admin-ui",
@@ -21,6 +21,14 @@ describe("Qasey application access policy", () => {
       "service",
     ]);
     expect(application.access.agents["qasey-main"]?.audiences).not.toContain("channel");
+    expect(application.access.agents["qasey-e2e-author"]).toEqual({
+      permission: "qasey.e2e.execute",
+      audiences: ["admin-ui", "service"],
+    });
+    for (const agentId of application.filesystemAgents ?? []) {
+      expect(application.access.agents[agentId]?.audiences, `${agentId} must be usable in Studio`)
+        .toContain("admin-ui");
+    }
     expect(application.access.agents).not.toHaveProperty("qasey-intent-router");
     for (const workflow of Object.values(application.access.workflows)) {
       expect(workflow.audiences).toEqual(["admin-ui", "api", "service"]);

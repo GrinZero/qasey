@@ -6,7 +6,12 @@ Within one Sandbox replica, one canonical repository has one trusted Git mirror
 used only to prepare attempts. Every attempt receives a full, independent
 checkout pinned to an immutable base SHA. The checkout has its own `.git`
 directory and copied object files: it has no worktree pointer, alternates file,
-or hardlink back to the shared mirror.
+or hardlink back to the shared mirror. Once the control plane has copied the
+patch, logs, and reports into durable storage and consumed the publishable file
+contents, it explicitly releases the logical Code Task and the Sandbox removes
+all of that task's attempt checkouts. Terminal attempts that never receive this
+acknowledgement are removed by `QASEY_CODE_TASK_RETENTION_MS` (one hour by
+default), independently of the longer interactive workspace retention policy.
 
 ```text
 Sandbox replica
@@ -25,8 +30,8 @@ and performs `git clone --local --no-hardlinks --no-checkout`, followed by an
 exact detached checkout and `HEAD` verification. The mirror is never mounted
 into a task namespace. This deliberately trades some disk deduplication for a
 security invariant: untrusted Git commands cannot mutate or traverse metadata
-shared by another tenant or attempt. Attempt data is removed by the configured
-workspace retention policy.
+shared by another tenant or attempt. The small shared Git preparation cache is
+not part of an attempt and therefore survives attempt release.
 
 ## Authorization boundary
 
@@ -55,13 +60,37 @@ Git lifecycle is owned by `CodeTaskRunner` and the Sandbox runtime:
 5. Collect and validate the patch and artifacts.
 
 Inside the worker, Mastra `LocalFilesystem` is rooted at that checkout with
-containment enabled. A dedicated native Mastra `Agent` receives the repository
-Workspace and discovers only the frozen repository-local Skill paths. Write
-tools are guarded both by the frozen `allowedPaths` and by canonical nearest-
+containment enabled. `src/mastra/agents/qasey-e2e-author` owns a first-class
+file-based Agent definition: stable identity, model policy, instructions,
+validation tool, and completion processor. Mastra registers that definition in
+the Qasey application catalog, while the isolated execution plane assembles the
+same definition once per worker process and binds its attempt-scoped model and
+Workspace through `RequestContext`. The runtime instance is short-lived because
+the checkout and credentials are attempt-scoped; the Agent design is not generated
+from the task id. Write tools are guarded both by the frozen `allowedPaths` and by canonical nearest-
 ancestor checks, so an allowed lexical path cannot escape through a symlink.
 Delete and arbitrary shell tools are not exposed. Mastra provides the Agent's
 file boundary; it does not clone repositories, choose checkouts, or decide
 which checks to run.
+
+The author and repair profiles expose one controlled
+`validate-e2e-candidate` tool. It runs the server-owned dependency install,
+allowed-path validation, Case/version annotation mapping, and Playwright
+discovery against the current checkout, with no E2E authentication secrets.
+An Agent-owned output processor rejects completion until the latest candidate
+validation passes, with a bounded processor retry budget. This lets the same
+Agent repair structural failures before it returns. The
+worker still repeats the fixed checks after Agent completion, and only the
+non-Agent clean verifier receives deployment authentication and executes the
+browser suite.
+
+The workflow operation span is propagated to CodeTask as W3C trace ids. Native
+Mastra Agent, model, and tool tracing events are sanitized in the worker,
+streamed through the CodeTask event cursor, validated by the control plane, and
+attached beneath that operation in the main observability store. Cross-trace or
+malformed worker events are dropped. Consequently one E2E Run remains the
+business lifecycle while the dedicated code Agent appears as a visible child
+span instead of an uncorrelated dynamic invocation.
 
 Model credentials are excluded from the worker's initial environment and sent
 once as a bounded JSON line over the worker's stdin. They remain in the trusted

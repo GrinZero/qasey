@@ -18,9 +18,12 @@ describe("qasey-main intent Skills", () => {
     expect(source).not.toContain("qasey_select_task_mode");
   });
 
-  it("keeps Case Hub writes behind an immutable change set", async () => {
+  it("keeps text approval in front of E2E delivery", async () => {
     const source = await readFile(join(skillsRoot, "e2e-lifecycle", "SKILL.md"), "utf8");
     expect(source).toContain("`case_hub_create_change_set`");
+    expect(source).toContain("`case_hub_create_review_plan`");
+    expect(source).toContain("`case_hub_start_e2e`");
+    expect(source).toContain("text_case_review_required");
     expect(source).toContain("Case Hub");
   });
 

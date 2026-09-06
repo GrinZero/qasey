@@ -42,6 +42,7 @@ interface SandboxRuntimeOptions {
   browserAllowedOrigins?: readonly string[];
   commandTimeoutMs: number;
   workspaceRetentionMs: number;
+  codeTaskRetentionMs?: number;
   desktopEnabled?: boolean;
   desktopDisplay?: number;
   desktopWidth?: number;
@@ -143,6 +144,7 @@ interface ActiveSession {
   browserStartReservation?: object;
   activeCodeTask?: ActiveCodeTask;
   codeTaskStartReservation?: CodeTaskStartReservation;
+  codeTaskReleaseReservation?: string;
   closing?: boolean;
   closePromise?: Promise<void>;
   lastActivityAt: number;
@@ -195,6 +197,7 @@ export class QaseySandboxRuntime {
   private readonly dataRoot: string;
   private readonly repositoryCache: SharedRepositoryCache;
   private sessionLifecycleLock: Promise<void> = Promise.resolve();
+  private codeTaskStorageLock: Promise<void> = Promise.resolve();
   private boundPort?: number;
   private desktopHost?: DesktopController;
   private desktopLease?: DesktopLease;
@@ -344,6 +347,7 @@ export class QaseySandboxRuntime {
           return sendJson(response, 200, await this.cancelCodeTask(session, taskId, SandboxCodeTaskCancelSchema.parse(await readJson(request)).reason));
         }
         if (method === "GET" && taskId && !action) return sendJson(response, 200, await this.codeTaskState(session, taskId));
+        if (method === "DELETE" && taskId && !action) return sendJson(response, 200, await this.releaseCodeTask(session, taskId));
         throw new HttpError(405, "Method not allowed");
       } finally {
         lease.release();
@@ -395,6 +399,18 @@ export class QaseySandboxRuntime {
     const predecessor = this.sessionLifecycleLock;
     let release!: () => void;
     this.sessionLifecycleLock = new Promise<void>(resolveLock => { release = resolveLock; });
+    await predecessor;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  private async withCodeTaskStorageLock<T>(operation: () => Promise<T>): Promise<T> {
+    const predecessor = this.codeTaskStorageLock;
+    let release!: () => void;
+    this.codeTaskStorageLock = new Promise<void>(resolveLock => { release = resolveLock; });
     await predecessor;
     try {
       return await operation();
@@ -559,6 +575,9 @@ export class QaseySandboxRuntime {
     if (session.codeTaskStartReservation) {
       throw new HttpError(409, `Sandbox session is already starting code task ${session.codeTaskStartReservation.taskId}`);
     }
+    if (session.codeTaskReleaseReservation) {
+      throw new HttpError(409, `Sandbox session is releasing code task ${session.codeTaskReleaseReservation}`);
+    }
     const reservation: CodeTaskStartReservation = { taskId: spec.taskId, attemptId: spec.attemptId };
     session.codeTaskStartReservation = reservation;
     try {
@@ -580,22 +599,24 @@ export class QaseySandboxRuntime {
     const taskSegment = safeTaskSegment(spec.taskId);
     const attemptSegment = safeTaskSegment(spec.attemptId);
     const taskRoot = containedPath(this.codeTaskWorkspaceRoot(session.workspaceId), join(taskSegment, attemptSegment));
-    if (await fileExists(taskRoot)) throw new HttpError(409, "Code task attempt already exists");
     reservation.taskRoot = taskRoot;
     const controlRoot = join(taskRoot, "control");
     const artifactRoot = join(taskRoot, "artifacts");
     const checkRoot = join(taskRoot, "check-output");
     const home = join(taskRoot, "home");
     const packageStoreRoot = join(this.options.dataRoot, "package-cache", "pnpm");
-    await Promise.all([
-      mkdir(controlRoot, { recursive: true, mode: 0o700 }),
-      mkdir(artifactRoot, { recursive: true, mode: 0o700 }),
-      mkdir(checkRoot, { recursive: true, mode: 0o700 }),
-      mkdir(join(home, ".config"), { recursive: true, mode: 0o700 }),
-      mkdir(join(home, ".cache"), { recursive: true, mode: 0o700 }),
-      mkdir(join(home, ".local", "share"), { recursive: true, mode: 0o700 }),
-      mkdir(packageStoreRoot, { recursive: true, mode: 0o700 }),
-    ]);
+    await this.withCodeTaskStorageLock(async () => {
+      if (await fileExists(taskRoot)) throw new HttpError(409, "Code task attempt already exists");
+      await Promise.all([
+        mkdir(controlRoot, { recursive: true, mode: 0o700 }),
+        mkdir(artifactRoot, { recursive: true, mode: 0o700 }),
+        mkdir(checkRoot, { recursive: true, mode: 0o700 }),
+        mkdir(join(home, ".config"), { recursive: true, mode: 0o700 }),
+        mkdir(join(home, ".cache"), { recursive: true, mode: 0o700 }),
+        mkdir(join(home, ".local", "share"), { recursive: true, mode: 0o700 }),
+        mkdir(packageStoreRoot, { recursive: true, mode: 0o700 }),
+      ]);
+    });
     const prepared = this.options.codeTaskRepositoryPreparer
       ? await this.prepareCustomCodeTaskRepository(session, spec, taskRoot)
       : await this.prepareCodeTaskRepositories(session, spec, taskRoot);
@@ -818,6 +839,43 @@ export class QaseySandboxRuntime {
     return lost;
   }
 
+  private async releaseCodeTask(session: ActiveSession, taskId: string): Promise<{ released: boolean }> {
+    if (session.activeCodeTask?.taskId === taskId || session.codeTaskStartReservation?.taskId === taskId) {
+      throw new HttpError(409, "Code task cannot be released while it is active");
+    }
+    if (session.codeTaskReleaseReservation) {
+      throw new HttpError(409, `Sandbox session is already releasing code task ${session.codeTaskReleaseReservation}`);
+    }
+    session.codeTaskReleaseReservation = taskId;
+    try {
+      return await this.withCodeTaskStorageLock(async () => {
+        if (session.activeCodeTask?.taskId === taskId || session.codeTaskStartReservation?.taskId === taskId) {
+          throw new HttpError(409, "Code task cannot be released while it is active");
+        }
+        const taskRoot = containedPath(this.codeTaskWorkspaceRoot(session.workspaceId), safeTaskSegment(taskId));
+        if (!await fileExists(taskRoot)) return { released: false };
+        const terminal = await this.codeTaskDirectoryTerminalState(taskRoot);
+        if (!terminal) throw new HttpError(409, "Code task cannot be released before every attempt is terminal");
+        const attemptIds = await this.codeTaskAttemptIds(taskRoot);
+        await rm(taskRoot, { recursive: true, force: true });
+        await this.deleteCodeTaskInputPatches(session, taskId, attemptIds).catch(error => {
+          this.reportBackgroundFailure("sandbox.code_task.input_cleanup_failed", error, { taskId });
+        });
+        return { released: true };
+      });
+    } finally {
+      if (session.codeTaskReleaseReservation === taskId) delete session.codeTaskReleaseReservation;
+    }
+  }
+
+  private async deleteCodeTaskInputPatches(session: ActiveSession, taskId: string, attemptIds: string[]): Promise<void> {
+    const root = join(session.root, "repo", "code-task-inputs");
+    await Promise.all(attemptIds.map(attemptId => rm(
+      containedPath(root, `${encodeURIComponent(taskId)}-${encodeURIComponent(attemptId)}.patch`),
+      { force: true },
+    )));
+  }
+
   private async cancelActiveCodeTask(session: ActiveSession, active: ActiveCodeTask, reason: string): Promise<CodeTaskState> {
     const current = await this.codeTaskState(session, active.taskId);
     if (["succeeded", "failed", "cancelled", "lost"].includes(current.status)) return current;
@@ -954,7 +1012,7 @@ export class QaseySandboxRuntime {
       NO_BROWSER: "1",
       GH_PROMPT_DISABLED: "1",
       GIT_TERMINAL_PROMPT: "0",
-      QASEY_MASTRA_VERSION: "1.59.0",
+      QASEY_MASTRA_VERSION: "1.64.0",
       QASEY_CODE_AGENT_MODEL: process.env.QASEY_CODE_AGENT_MODEL?.trim() || "gpt-5.6-sol",
       QASEY_CODE_AGENT_MAX_STEPS: process.env.QASEY_CODE_AGENT_MAX_STEPS?.trim() || "80",
       ...(this.options.imageDigest ? { QASEY_IMAGE_DIGEST: this.options.imageDigest } : {}),
@@ -1492,7 +1550,73 @@ export class QaseySandboxRuntime {
       await this.closeSession(session);
       if (this.sessions.get(sessionId) === session) this.sessions.delete(sessionId);
     }
+    await this.deleteExpiredCodeTasks();
     await this.deleteExpiredWorkspaces();
+  }
+
+  private async deleteExpiredCodeTasks(): Promise<void> {
+    const codeTaskRoot = join(this.dataRoot, "code-tasks");
+    const cutoff = Date.now() - (this.options.codeTaskRetentionMs ?? 60 * 60_000);
+    const workspaces = await readdir(codeTaskRoot, { withFileTypes: true }).catch(() => []);
+    for (const workspace of workspaces.filter(entry => entry.isDirectory() && /^[a-f0-9]{64}$/u.test(entry.name))) {
+      const workspaceRoot = containedPath(codeTaskRoot, workspace.name);
+      const tasks = await readdir(workspaceRoot, { withFileTypes: true }).catch(() => []);
+      for (const task of tasks.filter(entry => entry.isDirectory())) {
+        try {
+          if (this.codeTaskDirectoryProtected(workspace.name, task.name)) continue;
+          const taskRoot = containedPath(workspaceRoot, task.name);
+          const terminal = await this.codeTaskDirectoryTerminalState(taskRoot, cutoff);
+          if (!terminal) continue;
+          await this.withCodeTaskStorageLock(async () => {
+            if (this.codeTaskDirectoryProtected(workspace.name, task.name)) return;
+            if (await this.codeTaskDirectoryTerminalState(taskRoot, cutoff)) {
+              await rm(taskRoot, { recursive: true, force: true });
+            }
+          });
+        } catch (error) {
+          this.reportBackgroundFailure("sandbox.code_task.gc_task_failed", error, {
+            workspaceId: workspace.name,
+            taskSegment: task.name,
+          });
+        }
+      }
+    }
+  }
+
+  private codeTaskDirectoryProtected(workspaceId: string, taskSegment: string): boolean {
+    for (const session of this.sessions.values()) {
+      if (session.workspaceId !== workspaceId) continue;
+      if (session.activeCodeTask && safeTaskSegment(session.activeCodeTask.taskId) === taskSegment) return true;
+      if (session.codeTaskStartReservation && safeTaskSegment(session.codeTaskStartReservation.taskId) === taskSegment) return true;
+      if (session.codeTaskReleaseReservation && safeTaskSegment(session.codeTaskReleaseReservation) === taskSegment) return true;
+    }
+    return false;
+  }
+
+  private async codeTaskDirectoryTerminalState(taskRoot: string, cutoff?: number): Promise<boolean> {
+    const attempts = await readdir(taskRoot, { withFileTypes: true }).catch(() => []);
+    const attemptDirectories = attempts.filter(entry => entry.isDirectory());
+    if (attemptDirectories.length === 0) return false;
+    const states = await Promise.all(attemptDirectories.map(attempt => {
+      const statePath = join(taskRoot, attempt.name, "control", "state.json");
+      return readFile(statePath, "utf8")
+        .then(value => CodeTaskStateSchema.parse(JSON.parse(value)))
+        .catch(() => undefined);
+    }));
+    if (states.some(state => !state || !isTerminalCodeTaskStatus(state.status))) return false;
+    if (cutoff === undefined) return true;
+    return states.every(state => Date.parse(state!.updatedAt) <= cutoff);
+  }
+
+  private async codeTaskAttemptIds(taskRoot: string): Promise<string[]> {
+    const attempts = await readdir(taskRoot, { withFileTypes: true }).catch(() => []);
+    const states = await Promise.all(attempts.filter(entry => entry.isDirectory()).map(attempt => {
+      const statePath = join(taskRoot, attempt.name, "control", "state.json");
+      return readFile(statePath, "utf8")
+        .then(value => CodeTaskStateSchema.parse(JSON.parse(value)))
+        .catch(() => undefined);
+    }));
+    return states.flatMap(state => state ? [state.attemptId] : []);
   }
 
   private async touchWorkspace(session: ActiveSession): Promise<void> {
@@ -1657,6 +1781,7 @@ export function sandboxRuntimeOptions(env: NodeJS.ProcessEnv = process.env): San
     browserAllowedOrigins,
     commandTimeoutMs: positiveInteger(env.QASEY_SANDBOX_COMMAND_TIMEOUT_MS, 30 * 60_000),
     workspaceRetentionMs: positiveInteger(env.QASEY_WORKSPACE_RETENTION_MS, 7 * 24 * 60 * 60_000),
+    codeTaskRetentionMs: positiveInteger(env.QASEY_CODE_TASK_RETENTION_MS, 60 * 60_000),
     desktopEnabled,
     desktopDisplay: positiveInteger(env.QASEY_SANDBOX_DESKTOP_DISPLAY, 99),
     desktopWidth: positiveInteger(env.QASEY_SANDBOX_DESKTOP_WIDTH, 1440),
@@ -1807,6 +1932,10 @@ function safeTaskSegment(value: string): string {
   const segment = value.replace(/[^A-Za-z0-9._-]/gu, "-").replace(/^\.+$/u, "-").slice(0, 160);
   if (!segment) throw new HttpError(400, "Code task identifier contains no safe path segment");
   return segment === value ? segment : `${segment.slice(0, 140)}-${createHash("sha256").update(value).digest("hex").slice(0, 16)}`;
+}
+
+function isTerminalCodeTaskStatus(status: CodeTaskState["status"]): boolean {
+  return status === "succeeded" || status === "failed" || status === "cancelled" || status === "lost";
 }
 
 function killProcessGroup(pid: number, signal: NodeJS.Signals): void {

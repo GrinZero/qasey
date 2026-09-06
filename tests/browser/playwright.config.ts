@@ -23,7 +23,8 @@ export default defineConfig({
     baseURL,
     trace: "on",
     screenshot: "only-on-failure",
-    video: "on",
+    // Playwright otherwise scales recordings down to fit its 800px default video box.
+    video: { mode: "on", size: { width: 1280, height: 720 } },
   },
   projects: [
     { name: "setup", testMatch: /auth\.setup\.ts/u },

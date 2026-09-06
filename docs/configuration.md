@@ -39,6 +39,7 @@ manager, then recreate the affected service.
 | `QASEY_DEPLOYMENT_ID` | `NODE_ENV` | Stable, portable Redis namespace shared by every replica in one deployment. Required in production. |
 | `QASEY_INSTANCE_ID` | none | Unique process/replica identifier for metrics and incident attribution. Required in production; never use it to partition shared state. |
 | `QASEY_PUBLIC_BASE_URL` | `http://localhost:4111` | Browser-visible origin used for callbacks and same-origin checks. |
+| `QASEY_ADDITIONAL_TRUSTED_ORIGINS` | none | Optional comma-separated exact HTTP(S) origins for intentional internal browser/test aliases; wildcards and URL paths are rejected. |
 | `DATABASE_URL` | none | PostgreSQL connection for application and Mastra state; required in production. |
 | `OBSERVABILITY_DATABASE_URL` | local DuckDB in development; `DATABASE_URL` in standalone production | Optional separate Mastra observability PostgreSQL connection. |
 | `QASEY_OBSERVABILITY_DB_PATH` | `.qasey/observability.duckdb` | Development DuckDB path when no observability URL is supplied. |
@@ -126,6 +127,7 @@ organizations.
 | `QASEY_CODE_AGENT_MODEL` | `gpt-5.6-sol` | Model for isolated repository code tasks. |
 | `QASEY_CODE_AGENT_MAX_STEPS` | `80` | Maximum model steps per code task (`1..500`). |
 | `QASEY_AGENT_TIMEOUT_MS` | `3000000` | End-to-end Agent deadline. |
+| `QASEY_CONVERSATION_RECONCILER_INTERVAL_MS` | `30000` | Interval for marking abandoned conversation turns failed after twice the Agent deadline. |
 | `QASEY_INTENT_TIMEOUT_MS` | `60000` | Intent-routing deadline. |
 | `QASEY_MAX_REPAIRS` | `2` | Maximum E2E repair attempts (`0..5`). |
 | `QASEY_MEMORY_MESSAGE_TOKENS` | `30000` | Recent-message memory budget. |
@@ -229,11 +231,14 @@ one for the new revision.
 
 ## Feature flags and observability
 
-The community build deliberately does not ship Mastra Studio Editor because its
-published artifact contains separately licensed code without the corresponding
-license text. `QASEY_ENABLE_STUDIO_EDITOR=true` and `EDITOR_DATABASE_URL` are
-rejected at startup; use the audited Admin UI instead. Studio MCP Preview, Code
-Mode, local Code Mode, and Datadog are off by default and use
+Local development enables Mastra Studio Editor for code-defined agents. The
+dependency stays development-only, and Qasey imports only its Apache-licensed
+root entry point; the separately licensed `@mastra/editor/ee` Agent Builder is
+not used or shipped in release runtimes. Editor changes use the existing Mastra
+PostgreSQL storage configured by `DATABASE_URL`. Production still rejects
+`QASEY_ENABLE_STUDIO_EDITOR=true` and `EDITOR_DATABASE_URL`; use the audited
+Admin UI there. Studio MCP Preview, Code Mode, local Code Mode, and Datadog are
+off by default and use
 `QASEY_ENABLE_STUDIO_MCP_PREVIEW`, `QASEY_ENABLE_CODE_MODE`,
 `QASEY_ENABLE_LOCAL_CODE_MODE`, and `QASEY_ENABLE_DATADOG` respectively.
 Code Mode limits are `QASEY_CODE_MODE_TIMEOUT_MS` (default `180000`) and
@@ -258,6 +263,7 @@ Production code authoring uses `QASEY_SANDBOX_ENDPOINT_TEMPLATE` containing
 - `QASEY_SANDBOX_REQUEST_TIMEOUT_MS` (`1800000`)
 - `QASEY_SANDBOX_SHUTDOWN_TIMEOUT_MS` (`25000`; keep below the workload termination grace period)
 - `QASEY_WORKSPACE_RETENTION_MS` (`604800000`)
+- `QASEY_CODE_TASK_RETENTION_MS` (`3600000`; fallback TTL for terminal attempts that were not explicitly released)
 - `QASEY_SANDBOX_DESKTOP_ENABLED` (`false`)
 - `QASEY_SANDBOX_DESKTOP_DISPLAY` (`99`)
 - `QASEY_SANDBOX_DESKTOP_WIDTH` (`1440`)

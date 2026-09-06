@@ -116,6 +116,41 @@ describe("permission route coverage", () => {
     expect(studioLoginRedirect(request(asset))).toBeUndefined();
   });
 
+  it.each([
+    { method: "GET", path: "/studio/", header: false },
+    { method: "GET", path: "/studio/api/agents", header: true },
+    { method: "POST", path: "/studio/api/agents/alpha-main/stream", header: true },
+  ] as const)("opens authenticated Studio without per-resource grants: $method $path", async ({ method, path, header }) => {
+    const middleware = createAuthorizationMiddleware({
+      catalog: [{ ...entries[0]!, audiences: ["admin-ui"] }],
+      permissions: new PermissionService(new InMemoryPermissionStore()),
+      audit: { write: vi.fn(async () => undefined) },
+      studioUiEnabled: true,
+      resolvePrincipal: () => OAuthPrincipalSchema.parse({
+        subjectId: "studio-user", tenantId: "tenant-1", roles: ["user"], audience: "admin-ui",
+      }),
+    });
+    const raw = new Request(`http://localhost:4111${path}`, { method });
+    const requestContext = new RequestContext();
+    const next = vi.fn(async () => undefined);
+    const json = vi.fn();
+
+    await (middleware as Exclude<typeof middleware, { path: string }>)({
+      req: {
+        path,
+        method,
+        raw,
+        header: (name: string) => header && name.toLowerCase() === "x-mastra-client-type" ? "studio" : undefined,
+      },
+      get: (key: string) => key === "requestContext" ? requestContext : undefined,
+      json,
+    } as never, next);
+
+    expect(next).toHaveBeenCalledOnce();
+    expect(json).not.toHaveBeenCalled();
+    expect(requestContext.get("ingressSource")).toBe("mastra-studio");
+  });
+
   it("lets API Tokens with platform.runtime.inspect read Studio observability traces", async () => {
     const next = vi.fn(async () => undefined);
     const middleware = createAuthorizationMiddleware({
@@ -198,6 +233,7 @@ describe("permission route coverage", () => {
     expect(requestContext.get(MASTRA_THREAD_ID_KEY)).toBeUndefined();
     expect(requestContext.get("sessionId")).toBe("alpha:tenant-1:private:user-1");
     expect(requestContext.get("ingressSource")).toBe(expectedIngress);
+    expect(requestContext.get("platform-resource-action")).toBe("execute");
   });
 
   it("uses the owning agent application across the Studio memory route surface", async () => {
@@ -400,7 +436,7 @@ describe("permission route coverage", () => {
     }));
   });
 
-  it("classifies the pinned Mastra 1.59 route surface and denies unknown routes", () => {
+  it("classifies the pinned Mastra 1.64 route surface and denies unknown routes", () => {
     const catalog = new Map(entries.map(entry => [`${entry.resourceType}:${entry.resourceId}`, entry]));
     for (const expected of manifest) {
       const actual = classifyRuntimeRoute(expected.path, expected.method, catalog, []);
@@ -501,7 +537,7 @@ describe("permission route coverage", () => {
     }
   });
 
-  it("does not turn platform management routes into tenant-role grants", async () => {
+  it("keeps authenticated Studio management routes usable without tenant-role grants", async () => {
     const middleware = createAuthorizationMiddleware({
       catalog: entries,
       permissions: new PermissionService(new InMemoryPermissionStore()),
@@ -526,8 +562,8 @@ describe("permission route coverage", () => {
       json,
     } as never, next);
 
-    expect(next).not.toHaveBeenCalled();
-    expect(json).toHaveBeenCalledWith(expect.objectContaining({ error: "not_found" }), 404);
+    expect(next).toHaveBeenCalledOnce();
+    expect(json).not.toHaveBeenCalled();
   });
 
   it("preserves public custom-route metadata for pre-login shells", () => {

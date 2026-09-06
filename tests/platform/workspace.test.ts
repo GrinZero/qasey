@@ -70,7 +70,9 @@ describe("native scoped workspace", () => {
     expect((await merged.get("git-repository-workspace"))?.instructions).toContain("Search first");
     expect((await merged.get("git-repository-workspace"))?.instructions).toContain("verify/<run-id>");
     expect((await merged.get("qa-review"))?.instructions).toContain("QA 评审");
-    expect((await merged.get("e2e-lifecycle"))?.instructions).toContain("case_hub_create_change_set");
+    expect((await merged.get("e2e-lifecycle"))?.instructions).toContain("case_hub_create_review_plan");
+    expect((await merged.get("e2e-lifecycle"))?.instructions).toContain("case_hub_start_e2e");
+    expect((await merged.get("e2e-lifecycle"))?.instructions).toContain("text_case_review_required");
     await workspace.close();
   });
 });

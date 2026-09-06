@@ -15,9 +15,11 @@ import {
 import { caseHubVersionToTestCase, type CaseExecutionObservation } from "../../../packages/domain/src/index.ts";
 import { artifactStore, caseHubRepository, config, e2eCoordinator, e2ePreflight, getRuntimeContext, githubClient, runRepository } from "../runtime.ts";
 import { webE2EConfigurationFromSkill } from "../../platform/code-task/e2e-repository-skill.ts";
+import type { CodeTaskExecutionTelemetry } from "../../../packages/e2e/src/coordinator.ts";
 import { ownerScopeFromRequestContext } from "../../platform/context/owner-scope.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY, PlatformRequestContextSchema } from "../../platform/context/schema.ts";
 import { startQaseyCorrelatedSpan } from "../applications/qasey/observability.ts";
+import { codeTaskExecutionTelemetry } from "./code-task-tracing.ts";
 
 const WorkflowInputSchema = z.object({
   runId: z.string().min(1),
@@ -36,6 +38,7 @@ const freezeExecutionBriefStep = createStep({
   requestContextSchema: PlatformRequestContextSchema,
   execute: async ({ inputData, requestContext, abortSignal, mastra }) => {
     const owner = ownerScopeFromRequestContext(requestContext);
+    try {
     const run = await runRepository.get(owner, inputData.runId);
     if (!run) throw new Error(`E2E run ${inputData.runId} not found`);
     if (run.executionBrief) return inputData;
@@ -92,6 +95,11 @@ const freezeExecutionBriefStep = createStep({
       await caseHubRepository.updateChangeSet(owner, changeSet.id, latestChangeSet.revision, { status: "verifying", baseSha, runId: run.id });
     }
     return inputData;
+    } catch (error) {
+      await e2eCoordinator.fail(owner, inputData.runId, error);
+      await failChangeSet(owner, inputData.runId, error);
+      throw error;
+    }
   },
 });
 
@@ -104,7 +112,8 @@ const authorAndPersistPatch = createStep({
   execute: async ({ inputData, requestContext, mastra }) => {
     const owner = ownerScopeFromRequestContext(requestContext);
     try {
-      await tracedE2EOperation(mastra, requestContext, "qasey e2e author", { runId: inputData.runId }, () => e2eCoordinator.authorAndPersistPatch(owner, inputData.runId, inputData.qaFeedback));
+      await tracedE2EOperation(mastra, requestContext, "qasey e2e author", { runId: inputData.runId }, telemetry => e2eCoordinator.authorAndPersistPatch(owner, inputData.runId, inputData.qaFeedback, telemetry));
+      await persistAutomationPaths(owner, inputData.runId);
     } catch (error) {
       await e2eCoordinator.fail(owner, inputData.runId, error);
       await failChangeSet(owner, inputData.runId, error);
@@ -123,7 +132,7 @@ const cleanVerifyAndPublish = createStep({
   execute: async ({ inputData, requestContext, mastra }) => {
     const owner = ownerScopeFromRequestContext(requestContext);
     try {
-      await tracedE2EOperation(mastra, requestContext, "qasey e2e verifier and draft pr", { runId: inputData.runId }, () => e2eCoordinator.cleanVerifyAndPublish(owner, inputData.runId));
+      await tracedE2EOperation(mastra, requestContext, "qasey e2e verifier and draft pr", { runId: inputData.runId }, telemetry => e2eCoordinator.cleanVerifyAndPublish(owner, inputData.runId, false, telemetry));
     } catch (error) {
       await e2eCoordinator.fail(owner, inputData.runId, error);
       await failChangeSet(owner, inputData.runId, error);
@@ -154,7 +163,7 @@ export const awaitQaVerdictStep = createStep({
   suspendSchema: z.object({ runId: z.string(), reason: z.string(), reviewUrl: z.string().url() }),
   resumeSchema: QaVerdictSchema,
   requestContextSchema: PlatformRequestContextSchema,
-  execute: async ({ inputData, resumeData, suspend, requestContext }) => {
+  execute: async ({ inputData, resumeData, suspend, requestContext, mastra }) => {
     const owner = ownerScopeFromRequestContext(requestContext);
     if (!resumeData) {
       return await suspend({
@@ -166,7 +175,7 @@ export const awaitQaVerdictStep = createStep({
 
     if (resumeData.verdict === "approve") {
       try {
-        await e2eCoordinator.cleanVerifyAndPublish(owner, inputData.runId, true);
+        await tracedE2EOperation(mastra, requestContext, "qasey e2e approval verification", { runId: inputData.runId }, telemetry => e2eCoordinator.cleanVerifyAndPublish(owner, inputData.runId, true, telemetry));
         const updated = await e2eCoordinator.verdict(owner, inputData.runId, resumeData);
         return { runId: updated.id, status: updated.status };
       } catch (error) {
@@ -178,7 +187,8 @@ export const awaitQaVerdictStep = createStep({
     const updated = await e2eCoordinator.verdict(owner, inputData.runId, resumeData);
 
     try {
-      await e2eCoordinator.authorAndPersistPatch(owner, inputData.runId, resumeData.feedback);
+      await tracedE2EOperation(mastra, requestContext, "qasey e2e qa repair author", { runId: inputData.runId }, telemetry => e2eCoordinator.authorAndPersistPatch(owner, inputData.runId, resumeData.feedback, telemetry));
+      await persistAutomationPaths(owner, inputData.runId);
       const runBeforeVerification = await runRepository.get(owner, inputData.runId);
       const changeSetBeforeVerification = runBeforeVerification
         ? await caseHubRepository.getChangeSet(owner, runBeforeVerification.changeSetId)
@@ -186,7 +196,7 @@ export const awaitQaVerdictStep = createStep({
       if (changeSetBeforeVerification?.status === "revising") {
         await caseHubRepository.updateChangeSet(owner, changeSetBeforeVerification.id, changeSetBeforeVerification.revision, { status: "verifying" });
       }
-      await e2eCoordinator.cleanVerifyAndPublish(owner, inputData.runId);
+      await tracedE2EOperation(mastra, requestContext, "qasey e2e qa repair verifier", { runId: inputData.runId }, telemetry => e2eCoordinator.cleanVerifyAndPublish(owner, inputData.runId, false, telemetry));
     } catch (error) {
       await e2eCoordinator.fail(owner, inputData.runId, error);
       await failChangeSet(owner, inputData.runId, error);
@@ -243,11 +253,12 @@ async function tracedE2EOperation<T>(
   requestContext: RequestContext<any>,
   name: string,
   metadata: Record<string, unknown>,
-  operation: () => Promise<T>,
+  operation: (telemetry?: CodeTaskExecutionTelemetry) => Promise<T>,
 ): Promise<T> {
   const span = startQaseyCorrelatedSpan(mastra, requestContext, name, metadata);
   try {
-    const result = await operation();
+    const telemetry = codeTaskExecutionTelemetry(mastra, span ? { traceId: span.traceId, spanId: span.id } : undefined);
+    const result = await operation(telemetry);
     span?.end();
     return result;
   } catch (error) {
@@ -287,7 +298,20 @@ export async function createAndStartE2ERun(
 
 export async function rerunE2E(mastra: Mastra, owner: OwnerScope, runId: string, requestContext: RequestContext, resourceId?: string): Promise<E2ERun> {
   await e2ePreflight.assertReady(owner, webE2EConfigurationFromSkill());
+  const previous = await runRepository.get(owner, runId);
+  if (!previous) throw new Error(`Run ${runId} not found`);
+  const changeSet = await caseHubRepository.getChangeSet(owner, previous.changeSetId);
+  if (!changeSet) throw new Error(`Case Hub change set ${previous.changeSetId} not found`);
+  if (!["failed", "blocked_product", "blocked_environment", "verifying"].includes(changeSet.status)) {
+    throw new Error(`E2E rerun requires a failed or blocked Change Set, received ${changeSet.status}`);
+  }
   const created = await e2eCoordinator.rerun(owner, runId);
+  const latestChangeSet = await caseHubRepository.getChangeSet(owner, changeSet.id);
+  if (!latestChangeSet) throw new Error(`Case Hub change set ${changeSet.id} not found after rerun creation`);
+  await caseHubRepository.updateChangeSet(owner, latestChangeSet.id, latestChangeSet.revision, {
+    status: "verifying",
+    runId: created.id,
+  });
   const workflow = mastra.getWorkflow("qasey-e2e-lifecycle");
   const run = await workflow.createRun({ runId: created.id, ...(resourceId ? { resourceId } : {}) });
   try {
@@ -314,6 +338,14 @@ export async function resumeE2EWithVerdict(mastra: Mastra, owner: OwnerScope, ru
   return updated;
 }
 
+export async function dispatchE2ERepair(mastra: Mastra, owner: OwnerScope, runId: string, verdict: QaVerdict, requestContext: RequestContext): Promise<void> {
+  if (verdict.verdict !== "request_changes") throw new Error("Only repair verdicts can be dispatched in the background");
+  if (!await runRepository.get(owner, runId)) throw new Error(`Run ${runId} not found`);
+  const workflow = mastra.getWorkflow("qasey-e2e-lifecycle");
+  const run = await workflow.createRun({ runId });
+  await run.resumeAsync({ step: awaitQaVerdictStep, resumeData: verdict, requestContext });
+}
+
 export async function cancelE2ERun(mastra: Mastra, owner: OwnerScope, runId: string): Promise<E2ERun> {
   const current = await runRepository.get(owner, runId);
   if (!current) throw new Error(`Run ${runId} not found`);
@@ -337,6 +369,14 @@ async function failChangeSet(owner: OwnerScope, runId: string, error: unknown): 
     status: "failed",
     error: error instanceof Error ? error.message : String(error),
   });
+}
+
+async function persistAutomationPaths(owner: OwnerScope, runId: string): Promise<void> {
+  const run = await runRepository.get(owner, runId);
+  if (!run?.automationPaths || Object.keys(run.automationPaths).length === 0) return;
+  const changeSet = await caseHubRepository.getChangeSet(owner, run.changeSetId);
+  if (!changeSet) throw new Error(`Case Hub change set ${run.changeSetId} not found`);
+  await caseHubRepository.updateChangeSet(owner, changeSet.id, changeSet.revision, { automationPaths: run.automationPaths });
 }
 
 async function playwrightObservations(owner: OwnerScope, artifacts: ArtifactRef[], expectedCaseIds: string[]): Promise<CaseExecutionObservation[]> {
@@ -367,7 +407,7 @@ function collectPlaywrightSuites(payload: unknown, observed: Map<string, CaseExe
   if (Array.isArray(record.suites)) for (const suite of record.suites) collectPlaywrightSuites(suite, observed);
 }
 
-function collectPlaywrightTest(test: unknown, fallbackTitle: string, observed: Map<string, CaseExecutionObservation>): void {
+export function collectPlaywrightTest(test: unknown, fallbackTitle: string, observed: Map<string, CaseExecutionObservation>): void {
   if (!test || typeof test !== "object") return;
   const record = test as Record<string, unknown>;
   const annotations = Array.isArray(record.annotations) ? record.annotations : [];
@@ -377,7 +417,9 @@ function collectPlaywrightTest(test: unknown, fallbackTitle: string, observed: M
   if (!caseId) return;
   const results = Array.isArray(record.results) ? record.results.filter(result => result && typeof result === "object") as Record<string, unknown>[] : [];
   const statuses = results.map(result => String(result.status ?? ""));
-  const executionStatus: CaseExecutionObservation["executionStatus"] = statuses.some(status => ["failed", "timedOut", "interrupted"].includes(status))
+  const executionStatus: CaseExecutionObservation["executionStatus"] = results.length === 0
+    ? "blocked"
+    : statuses.some(status => ["failed", "timedOut", "interrupted"].includes(status))
     ? "failed"
     : statuses.length > 0 && statuses.every(status => status === "skipped") ? "skipped" : "passed";
   const durationMs = results.reduce((total, result) => total + (typeof result.duration === "number" ? result.duration : 0), 0);

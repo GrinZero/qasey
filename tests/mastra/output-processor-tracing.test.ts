@@ -29,7 +29,7 @@ describe("Mastra output processor tracing patch", () => {
       id: "trace-probe",
       name: "Trace probe",
       instructions: "Reply briefly.",
-      model: createMockModel({ mockText: "hello", version: "v2" }),
+      model: createMockModel({ mockText: "hello", version: "v2" }) as never,
       // Keep the regression faithful to Qasey without leaving the default
       // durable cleanup timer alive after the test completes.
       durable: { cleanupTimeoutMs: 10 },

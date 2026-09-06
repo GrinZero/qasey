@@ -16,7 +16,7 @@ describe("Skill-driven system prompt", () => {
   it("routes every intent explicitly before Tool Discovery", () => {
     const result = buildSystemPrompt(context("slack"));
 
-    expect(result.version).toBe(15);
+    expect(result.version).toBe(16);
     expect(result.modules).toEqual(["base", "runtime", "channel:slack"]);
     expect(result.text).toContain("意图识别与 Skill 路由（必须先执行）");
     expect(result.text).toContain("intent=qa_quick_query：加载 `qa-quick-query` Skill");
@@ -30,6 +30,8 @@ describe("Skill-driven system prompt", () => {
     expect(result.text).toContain("完成这一步前不得搜索或调用外部工具");
     expect(result.text).toContain("search_tools");
     expect(result.text).toContain("Tool Discovery 只降低上下文成本，不代表授权");
+    expect(result.text).toContain("不得调用已停用的 `case_hub_create_change_set`");
+    expect(result.text).toContain("`case_hub_start_e2e`");
     expect(result.text).toContain("不需要向 Runtime 登记");
     expect(result.text).not.toContain("qasey_select_task_mode");
     expect(result.text).toContain("最终答复恰好发送一次");

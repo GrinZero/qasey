@@ -63,7 +63,7 @@ describe("Admin UI browser gate", () => {
   });
 
   it("connects live dogfood verification to the repository-owned login setup", () => {
-    expect(dogfoodPlaywrightConfig).toContain('video: "on"');
+    expect(dogfoodPlaywrightConfig).toContain('video: { mode: "on", size: { width: 1280, height: 720 } }');
     expect(dogfoodPlaywrightConfig).toContain('trace: "on"');
     expect(dogfoodPlaywrightConfig).toContain('["json"');
     expect(dogfoodPlaywrightConfig).toContain('["html"');
