@@ -307,6 +307,46 @@ test("authenticated user can open the platform and navigate the Qasey applicatio
   await expect(page.getByRole("heading", { name: "所有 Agent 的工作轨迹" })).toBeVisible();
 });
 
+test("sidebar edge control collapses the rail, remembers the choice and stays out of the mobile drawer", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/admin/apps/qasey");
+  const sidebar = page.locator("#app-sidebar");
+  const main = page.locator("main.main-area");
+  const collapse = page.getByRole("button", { name: "收起侧边栏", exact: true });
+  await expect(collapse).toBeVisible();
+  await expect(collapse).toHaveAttribute("aria-expanded", "true");
+  const sidebarBox = await sidebar.boundingBox();
+  const toggleBox = await collapse.boundingBox();
+  expect(sidebarBox).not.toBeNull();
+  expect(toggleBox).not.toBeNull();
+  expect(toggleBox!.x + toggleBox!.width / 2).toBe(sidebarBox!.x + sidebarBox!.width);
+  await collapse.focus();
+  await page.keyboard.press("Enter");
+  await expect(sidebar).toHaveCSS("width", "76px");
+  await expect(main).toHaveCSS("margin-left", "76px");
+  const expand = page.getByRole("button", { name: "展开侧边栏", exact: true });
+  await expect(expand).toBeFocused();
+  await expect(expand).toHaveAttribute("aria-expanded", "false");
+  await page.getByRole("button", { name: "测试运行", exact: true }).click();
+  await expect(page).toHaveURL(/\/admin\/apps\/qasey\/runs$/u);
+  await page.reload();
+  await expect(sidebar).toHaveCSS("width", "76px");
+  await expect(expand).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(expand).toBeHidden();
+  await page.getByRole("button", { name: "打开导航", exact: true }).click();
+  await expect(sidebar).toHaveCSS("width", "238px");
+  await expect(sidebar.getByText("Agent Runtime", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "关闭导航", exact: true }).first().click();
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await expand.click();
+  await expect(sidebar).toHaveCSS("width", "238px");
+  await expect(main).toHaveCSS("margin-left", "238px");
+  await page.reload();
+  await expect(collapse).toBeVisible();
+  await expect(sidebar).toHaveCSS("width", "238px");
+});
+
 test("short desktop sidebar scrolls independently while account controls stay in the viewport", async ({ page }) => {
   await page.route("**/admin/api/tokens", route => route.fulfill({ json: { tokens: [], availableScopes: [] } }));
   await page.route("**/admin/api/audit", route => route.fulfill({ json: { records: [] } }));
