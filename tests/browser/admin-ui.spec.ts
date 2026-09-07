@@ -442,16 +442,21 @@ test("Qasey streams a multi-turn conversation and restores it from the deep link
 
   await expect(page).toHaveURL(new RegExp(`/admin/apps/qasey\\?conversation=${conversationId}$`, "u"));
   await expect(page.locator("summary").getByText("正在分析需求", { exact: true })).toBeVisible();
-  await expect(page.locator(".conversation-tools > summary")).toContainText("工具调用");
-  const groupedToolSummary = page.locator(".conversation-tool-group > summary");
-  await expect(groupedToolSummary).toBeVisible();
-  await expect(groupedToolSummary).toContainText("读取 GitHub");
-  await expect(groupedToolSummary.locator("code")).toHaveText("github_get_pull_request_diff");
-  await groupedToolSummary.click();
-  await expect(page.getByText("已读取 PR #42，发现 3 个文件变更…", { exact: true })).toBeVisible();
-  await expect(page.getByText("已补充读取 PR #42 的文件列表。", { exact: true })).toBeVisible();
+  const toolSummary = page.getByRole("region", { name: "工具调用摘要" });
+  await expect(toolSummary).toContainText("调用 2 次 · 2 次成功");
+  await expect(page.getByRole("dialog", { name: "执行过程" })).toHaveCount(0);
+  await toolSummary.getByRole("button", { name: "查看过程", exact: true }).click();
+  const toolDrawer = page.getByRole("dialog", { name: "执行过程" });
+  const toolRows = toolDrawer.locator(".tool-log-row");
+  await expect(toolRows).toHaveCount(2);
+  await toolRows.nth(0).locator("summary").click();
+  await expect(toolRows.nth(0).getByText("github_get_pull_request_diff", { exact: true })).toBeVisible();
+  await expect(toolRows.nth(0).getByText("已读取 PR #42，发现 3 个文件变更…", { exact: true })).toBeVisible();
+  await toolRows.nth(1).locator("summary").click();
+  await expect(toolRows.nth(1).getByText("已补充读取 PR #42 的文件列表。", { exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(toolSummary.getByRole("button", { name: "查看过程", exact: true })).toBeFocused();
   await expect(page.getByText("已找到关键风险。测试运行已启动。", { exact: true })).toBeVisible();
-  await expect(page.locator(".conversation-tool-group > div code")).toHaveCount(2);
   await expect(page.getByText("example/sample-app", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "复制回复" })).toBeVisible();
   await expect(page.getByText("Qasey 返回了无法识别的消息格式。")).toHaveCount(0);
@@ -459,10 +464,10 @@ test("Qasey streams a multi-turn conversation and restores it from the deep link
   await page.reload();
   await expect(page.getByRole("heading", { name: "验证预约改期流程", exact: true })).toBeVisible();
   await expect(page.getByText("已找到关键风险。测试运行已启动。", { exact: true })).toBeVisible();
-  const restoredToolSummary = page.locator(".conversation-tools > summary");
-  await expect(restoredToolSummary).toContainText("2 次");
-  await expect(page.locator(".conversation-tool-group")).toHaveCount(1);
-  await expect(page.locator(".conversation-tool-content strong em")).toHaveText("×2");
+  const restoredToolSummary = page.getByRole("region", { name: "工具调用摘要" });
+  await expect(restoredToolSummary).toContainText("调用 2 次 · 2 次成功");
+  await expect(page.getByRole("dialog", { name: "执行过程" })).toHaveCount(0);
+
 });
 
 test("Qasey keeps long conversation history inside the workspace scroll region", async ({ page }) => {
@@ -815,8 +820,11 @@ test("Qasey resumes an active turn after the persisted cursor without duplicatin
 
   await page.goto(`/admin/apps/qasey?conversation=${conversationId}`);
   await expect(page.getByText("已经确认签名，回放测试也通过了。", { exact: true })).toBeVisible();
-  const restoredExecutionSummary = page.locator(".conversation-tools > summary");
-  await expect(restoredExecutionSummary).toContainText("本轮执行已完成");
+  const restoredExecutionSummary = page.getByRole("region", { name: "工具调用摘要" });
+  await expect(restoredExecutionSummary).toContainText("执行结束");
+  await expect(restoredExecutionSummary).toContainText("调用 1 次 · 1 次成功");
+  await restoredExecutionSummary.getByRole("button", { name: "查看过程", exact: true }).click();
+  await page.getByRole("dialog", { name: "执行过程" }).locator(".tool-log-row > summary").click();
   await expect(page.getByText("case_hub_search_cases", { exact: true })).toHaveCount(1);
   await expect(page.getByText("已读取 Case Hub 用例与审核状态…", { exact: true })).toBeVisible();
   expect(["0", "7"]).toContain(reconnectAfter);
@@ -1166,9 +1174,15 @@ test("multiple named agents receive explicit mentions while E2E keeps running an
   await expect(e2eMessages).toHaveCount(1);
   await expect(e2eMessages).toContainText("验证结果");
   await expect(e2eMessages).toContainText("发现短视口存在导航溢出");
-  await expect(e2eMessages.getByText("mastra_workspace_read_file", { exact: true })).toBeVisible();
-  await expect(e2eMessages.getByText("validate_e2e_candidate", { exact: true })).toBeVisible();
-  await expect(e2eMessages.getByText("正在检查测试实现", { exact: true })).toBeVisible();
+  await e2eMessages.getByRole("button", { name: "查看实时过程" }).click();
+  const executionDrawer = page.getByRole("dialog", { name: "执行过程" });
+  await expect(executionDrawer.locator(".tool-log-row")).toHaveCount(2);
+  await executionDrawer.locator(".tool-log-row > summary").nth(0).click();
+  await executionDrawer.locator(".tool-log-row > summary").nth(1).click();
+  await expect(executionDrawer.getByText("mastra_workspace_read_file", { exact: true })).toBeVisible();
+  await expect(executionDrawer.getByText("validate_e2e_candidate", { exact: true })).toBeVisible();
+  await expect(executionDrawer.getByText("正在检查测试实现", { exact: true }).first()).toBeVisible();
+  await executionDrawer.getByRole("button", { name: "关闭执行过程" }).click();
   await expect(e2eMessages.locator(".conversation-progress")).toHaveCount(1);
   await expect(e2eMessages.locator(".conversation-tools")).toHaveCount(1);
   await expect(page.getByText("执行记录", { exact: true })).toHaveCount(0);
@@ -1430,3 +1444,148 @@ test("ends failed text review and cancels stranded verification from the inbox",
   await expect(page.getByRole("button", { name: "结束本次审核", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "取消本次验证", exact: true })).toHaveCount(0);
 });
+
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  test(`Qasey keeps 102 tool calls compact and makes failures searchable at ${viewport.width}px`, async ({ page }, testInfo) => {
+    const conversationId = "12121212-1212-4212-8212-121212121212";
+    const turnId = "34343434-3434-4434-8434-343434343434";
+    const occurredAt = "2026-09-04T04:30:00.000Z";
+    const conversation = { id: conversationId, title: "工具调用摘要验证", createdAt: occurredAt, updatedAt: occurredAt };
+    const tools = Array.from({ length: 102 }, (_, index) => ({
+      type: "dynamic-tool", toolCallId: `call-${index + 1}`, toolName: "mastra_workspace_read_file", title: "读取文件",
+      input: { summary: `读取示例文件 ${index + 1}` },
+      ...(index < 3 ? { state: "output-error", errorText: `示例文件 ${index + 1} 不存在` } : { state: "output-available", output: { summary: `已读取示例文件 ${index + 1}` } }),
+    }));
+    const messages = [{ id: turnId, role: "assistant", metadata: { conversationId, turnId, createdAt: occurredAt, latestSequence: 1, collaborationStatus: "completed" }, parts: [...tools, { type: "text", text: "已完成分析，请查看生成的用例。", state: "done" }] }];
+    await page.route("**/*", async route => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/v1/qasey/conversations") return json(route, { conversations: [conversation] });
+      if (url.pathname === `/v1/qasey/conversations/${conversationId}`) return json(route, { conversation, messages });
+      if (url.pathname === `/v1/qasey/conversations/${conversationId}/events`) return route.fulfill({ status: 200, contentType: "text/event-stream", body: `event: snapshot\ndata: ${JSON.stringify({ revision: 1, participants: [], messages })}\n\n` });
+      await route.fallback();
+    });
+    await page.setViewportSize(viewport);
+    await page.goto(`/admin/apps/qasey?conversation=${conversationId}`);
+    const summary = page.getByRole("region", { name: "工具调用摘要" });
+    await expect(summary).toContainText("调用 102 次 · 99 次成功 · 3 次失败");
+    await expect(summary).not.toContainText("需要注意");
+    expect((await summary.boundingBox())!.height).toBeLessThan(200);
+    await expect(page.getByText("已完成分析，请查看生成的用例。", { exact: true })).toBeInViewport();
+    await expect(page.getByText("示例文件 1 不存在", { exact: true })).not.toBeVisible();
+    await summary.locator(".tool-activity-failures > summary").click();
+    await expect(summary.locator(".tool-log-row")).toHaveCount(3);
+    await summary.locator(".tool-log-row > summary").first().click();
+    await expect(summary.getByText("示例文件 1 不存在", { exact: true })).toBeVisible();
+    await summary.getByRole("button", { name: "查看全部失败记录" }).click();
+    const drawer = page.getByRole("dialog", { name: "执行过程" });
+    await expect(drawer.getByRole("button", { name: "失败", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(drawer.locator(".tool-log-row")).toHaveCount(3);
+    await drawer.getByRole("button", { name: "全部", exact: true }).click();
+    await expect(drawer.locator(".tool-log-row")).toHaveCount(102);
+    expect(await drawer.locator(".tool-log-list").evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true);
+    await drawer.getByRole("button", { name: "关闭执行过程" }).focus();
+    await page.keyboard.press("Tab");
+    await expect(drawer.getByRole("button", { name: "全部", exact: true })).toBeFocused();
+    await summary.getByRole("button", { name: "查看全部失败记录" }).evaluate(el => el.focus());
+    await expect(drawer.getByRole("button", { name: "全部", exact: true })).toBeFocused();
+    await drawer.getByRole("searchbox", { name: "搜索调用记录" }).fill("call-102");
+    await expect(drawer.locator(".tool-log-row")).toHaveCount(1);
+    await drawer.locator(".tool-log-row > summary").click();
+    await expect(drawer.getByText("已读取示例文件 102", { exact: true })).toBeVisible();
+    expect(await drawer.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath("tool-log-drawer.png") });
+    await drawer.getByRole("searchbox", { name: "搜索调用记录" }).fill("不存在的关键词");
+    await expect(drawer.getByText("没有匹配的调用记录，试试其他关键词。")).toBeVisible();
+    await drawer.getByRole("searchbox", { name: "搜索调用记录" }).fill("");
+    await page.keyboard.press("Escape");
+    await expect(drawer).toHaveCount(0);
+    await expect(summary.getByRole("button", { name: "查看全部失败记录" })).toBeFocused();
+    await summary.locator(".tool-activity-failures > summary").click();
+    await page.screenshot({ path: testInfo.outputPath("tool-activity-summary.png") });
+  });
+}
+
+test("Qasey keeps an inspected tool record open when execution completes", async ({ page }) => {
+  const conversationId = "56565656-5656-4656-8656-565656565656";
+  const turnId = "78787878-7878-4878-8878-787878787878";
+  const occurredAt = "2026-09-04T04:30:00.000Z";
+  const conversation = { id: conversationId, title: "运行中工具调用", createdAt: occurredAt, updatedAt: occurredAt };
+  let completed = false;
+  const messages = () => [{ id: turnId, role: "assistant", metadata: { conversationId, turnId, createdAt: occurredAt, latestSequence: completed ? 2 : 1, collaborationStatus: completed ? "completed" : "running" }, parts: [
+    { type: "dynamic-tool", toolCallId: "live-call", toolName: "mastra_workspace_read_file", title: "读取文件", input: { summary: "读取示例文件" }, ...(completed ? { state: "output-available", output: { summary: "文件读取完成" } } : { state: "input-available" }) },
+  ] }];
+  await page.route("**/*", async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/v1/qasey/conversations") return json(route, { conversations: [conversation] });
+    if (url.pathname === `/v1/qasey/conversations/${conversationId}`) return json(route, { conversation, messages: messages() });
+    if (url.pathname === `/v1/qasey/conversations/${conversationId}/events`) return route.fulfill({ status: 200, contentType: "text/event-stream", body: `event: snapshot\ndata: ${JSON.stringify({ revision: completed ? 2 : 1, participants: [], messages: messages() })}\n\n` });
+    await route.fallback();
+  });
+  await page.goto(`/admin/apps/qasey?conversation=${conversationId}`);
+  const summary = page.getByRole("region", { name: "工具调用摘要" });
+  await expect(summary).toContainText("正在执行：读取文件");
+  await expect(page.getByRole("dialog", { name: "执行过程" })).toHaveCount(0);
+  await summary.getByRole("button", { name: "查看实时过程" }).click();
+  const drawer = page.getByRole("dialog", { name: "执行过程" });
+  await drawer.locator(".tool-log-row > summary").click();
+  await expect(drawer.locator(".tool-log-row")).toHaveAttribute("open", "");
+  completed = true;
+  await expect(drawer.getByText("文件读取完成", { exact: true })).toBeVisible();
+  await expect(drawer.locator(".tool-log-row")).toHaveAttribute("open", "");
+  await expect(summary).toContainText("执行结束");
+  await expect(drawer).toBeVisible();
+  await drawer.getByRole("button", { name: "关闭执行过程" }).click();
+  await expect(summary.getByRole("button", { name: "查看过程", exact: true })).toBeFocused();
+});
+
+for (const width of [1440, 390]) {
+  test(`case hub bulk deletion retains failures and scopes selection (${width}px)`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    const records = [1, 2, 3].map(index => ({ id: `QASEY-${index}`, title: `Public example ${index}`, suitePath: "Public / Navigation", proposedVersionIds: [], updatedAt: "2026-09-03T01:00:00.000Z" }));
+    const deleted = new Set<string>();
+    const attempts: string[] = [];
+    await page.route("**/v1/case-hub/cases**", async route => {
+      const url = new URL(route.request().url());
+      if (route.request().method() === "DELETE") {
+        const id = decodeURIComponent(url.pathname.split("/").at(-1)!);
+        attempts.push(id);
+        if (id === "QASEY-2" && attempts.filter(item => item === id).length === 1) return json(route, { message: "Please retry" }, 409);
+        deleted.add(id);
+        return json(route, { deleted: true });
+      }
+      return json(route, { cases: records.filter(item => !deleted.has(item.id) && (!url.searchParams.get("q") || item.id === "QASEY-3")) });
+    });
+    await page.goto("/admin/apps/qasey/cases");
+    const all = page.getByRole("checkbox", { name: "全选当前搜索结果", exact: true });
+    await page.getByRole("checkbox", { name: "选择 QASEY-1", exact: true }).check();
+    await expect(all).toHaveJSProperty("indeterminate", true);
+    await expect(page).toHaveURL(/\/cases$/);
+    await page.getByRole("textbox", { name: "搜索用例", exact: true }).fill("QASEY-3");
+    await expect(page.getByRole("checkbox", { name: "选择 QASEY-1", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("toolbar", { name: "批量操作" })).toHaveCount(0);
+    await all.check();
+    await expect(page.getByRole("toolbar")).toContainText("已选择 1 条用例");
+    await page.getByRole("textbox", { name: "搜索用例", exact: true }).fill("");
+    await expect(page.getByRole("checkbox", { name: "选择 QASEY-1", exact: true })).toBeVisible();
+    await all.check();
+    await page.getByRole("button", { name: "批量删除", exact: true }).click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toContainText("删除所选 3 条用例？");
+    await dialog.getByRole("button", { name: "取消", exact: true }).click();
+    expect(attempts).toEqual([]);
+    await page.getByRole("button", { name: "批量删除", exact: true }).click();
+    await dialog.getByRole("button", { name: "删除 3 条用例", exact: true }).click();
+    await expect(dialog.getByRole("alert")).toContainText("已删除 2 条，1 条删除失败（QASEY-2）");
+    await expect(dialog).toContainText("删除所选 1 条用例？");
+    await dialog.getByRole("button", { name: "删除 1 条用例", exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(attempts).toEqual(["QASEY-1", "QASEY-2", "QASEY-3", "QASEY-2"]);
+    const toast = page.getByRole("status").filter({ hasText: "已删除 1 条用例" });
+    await expect(toast).toBeVisible();
+    expect(await toast.evaluate(element => getComputedStyle(element).position)).toBe("fixed");
+    await page.screenshot({ path: testInfo.outputPath("bulk-delete-toast.png") });
+    if (width === 390) await page.getByRole("button", { name: "关闭提示", exact: true }).click();
+    await expect(toast).toHaveCount(0, { timeout: 7000 });
+    await expect(page.getByText("Case Hub 还是空的", { exact: true })).toBeVisible();
+  });
+}

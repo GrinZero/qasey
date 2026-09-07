@@ -1,3 +1,6 @@
+import { FeedbackToast } from "./components/ui/feedback-toast";
+import { ConfirmDialog } from "./components/ui/confirm-dialog";
+import { ToolActivity } from "./components/tool-activity";
 import { CaseRowActions } from "./components/case-row-actions";
 import { MissingEvidence, QaEvidenceViewer } from "./components/qa-evidence-viewer";
 import { groupExecutionMessages, executionHeadline } from "./components/execution-progress";
@@ -51,18 +54,15 @@ import {
   TestTube2,
   Trash2,
   UserRound,
-  Wrench,
   X,
   XCircle,
 } from "lucide-react";
 import { useChat } from "@ai-sdk/react";
-import { isDynamicToolUIPart, type DynamicToolUIPart } from "ai";
+import { isDynamicToolUIPart } from "ai";
 import {
   QaseyCursorDataSchema,
   QaseyCaseReviewDataSchema,
   QaseyProgressDataSchema,
-  QaseyPublicToolInputSchema,
-  QaseyPublicToolOutputSchema,
   QaseyRunDataSchema,
   QaseyUIMessageMetadataSchema,
   QaseyUIMessageSchema,
@@ -909,7 +909,7 @@ function QaseyChatMessage({ message, footer, streaming, onMention, onRetry, onGe
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1_500);
   };
-  return <article className="conversation-turn conversation-turn--assistant"><Message from="assistant"><span className="assistant-avatar"><Sparkles size={16} /></span><MessageContent><div className="agent-message-heading"><button type="button" onClick={() => onMention?.(message.metadata?.authorAgentId ?? MAIN_AGENT_ID)}>{message.metadata?.authorAgentId === E2E_AGENT_ID ? "E2E Agent" : "Qasey"}</button>{message.metadata?.messageKind === "execution" && <span>执行状态</span>}{message.metadata?.messageKind === "handoff" && <span>协作交接</span>}{message.metadata?.messageKind !== "execution" && message.metadata?.collaborationStatus && <span>{({ queued: "等待回复", running: "正在处理", completed: "已回复", failed: "处理失败" })[message.metadata.collaborationStatus]}</span>}</div>{progress.length > 0 && <QaseyProgressPart progress={progress.map(part => part.data)} running={streaming} />}{tools.length > 0 && <QaseyToolParts tools={tools} />}{reviews.map(review => <CaseReviewPanel key={review.data.planId} planId={review.data.planId} compact onGenerate={(_, ids) => onGenerateE2E(review.data.planId, ids)} onChanged={onReviewChanged} />)}{showText && (message.metadata?.messageKind === "execution" && text.length > 400 ? <details className="execution-message-details"><summary>执行状态详情</summary><pre>{text}</pre></details> : <MessageResponse mode={streaming ? "streaming" : "static"}>{text}</MessageResponse>)}{streaming && !text && <p className="assistant-pending"><LoaderCircle className="spin" size={15} />正在整理回复…</p>}{failed && <div className="turn-error" role="alert"><span><CircleAlert size={15} />{failed.data.detail}</span>{onRetry && <button type="button" onClick={onRetry}><RotateCcw size={14} />重试这条消息</button>}</div>}{footer}{text && <div className="message-actions"><button className="message-action" type="button" aria-label={copied ? "已复制" : "复制回复"} title={copied ? "已复制" : "复制回复"} onClick={() => void copy()}>{copied ? <Check size={14} /> : <Copy size={14} />}</button></div>}</MessageContent></Message></article>;
+  return <article className="conversation-turn conversation-turn--assistant"><Message from="assistant"><span className="assistant-avatar"><Sparkles size={16} /></span><MessageContent><div className="agent-message-heading"><button type="button" onClick={() => onMention?.(message.metadata?.authorAgentId ?? MAIN_AGENT_ID)}>{message.metadata?.authorAgentId === E2E_AGENT_ID ? "E2E Agent" : "Qasey"}</button>{message.metadata?.messageKind === "execution" && <span>执行状态</span>}{message.metadata?.messageKind === "handoff" && <span>协作交接</span>}{message.metadata?.messageKind !== "execution" && message.metadata?.collaborationStatus && <span>{({ queued: "等待回复", running: "正在处理", completed: "已回复", failed: "处理失败" })[message.metadata.collaborationStatus]}</span>}</div>{progress.length > 0 && <QaseyProgressPart progress={progress.map(part => part.data)} running={streaming} />}{tools.length > 0 && <ToolActivity tools={tools} running={streaming} />}{reviews.map(review => <CaseReviewPanel key={review.data.planId} planId={review.data.planId} compact onGenerate={(_, ids) => onGenerateE2E(review.data.planId, ids)} onChanged={onReviewChanged} />)}{showText && (message.metadata?.messageKind === "execution" && text.length > 400 ? <details className="execution-message-details"><summary>执行状态详情</summary><pre>{text}</pre></details> : <MessageResponse mode={streaming ? "streaming" : "static"}>{text}</MessageResponse>)}{streaming && !text && <p className="assistant-pending"><LoaderCircle className="spin" size={15} />正在整理回复…</p>}{failed && <div className="turn-error" role="alert"><span><CircleAlert size={15} />{failed.data.detail}</span>{onRetry && <button type="button" onClick={onRetry}><RotateCcw size={14} />重试这条消息</button>}</div>}{footer}{text && <div className="message-actions"><button className="message-action" type="button" aria-label={copied ? "已复制" : "复制回复"} title={copied ? "已复制" : "复制回复"} onClick={() => void copy()}>{copied ? <Check size={14} /> : <Copy size={14} />}</button></div>}</MessageContent></Message></article>;
 }
 
 function ConversationRunCard({ runId, history, onContinue }: { runId: string | undefined; history: QaseyUIMessage[]; onContinue: () => void }) {
@@ -961,85 +961,6 @@ function QaseyProgressPart({ progress, running }: { progress: QaseyProgressData[
   return <details className="conversation-progress"><summary>{running ? <LoaderCircle className="spin-slow" size={14} /> : latest?.status === "failed" ? <CircleAlert size={14} /> : <CheckCircle2 size={14} />}{latest?.title ?? "处理进度"}</summary>{progress.map(item => <p key={item.sequence}><strong>{item.title}</strong><span>{item.detail}</span></p>)}</details>;
 }
 
-function QaseyToolParts({ tools }: { tools: DynamicToolUIPart[] }) {
-  const views = tools.map(qaseyToolView);
-  const runningCount = views.filter(view => view.tone === "running").length;
-  const failedCount = views.filter(view => view.tone === "failed").length;
-  const completedCount = tools.length - runningCount - failedCount;
-  const activeToolIndex = views.findLastIndex(view => view.tone === "running");
-  const activeTool = activeToolIndex >= 0 ? tools[activeToolIndex] : undefined;
-  const headline = activeTool
-    ? `正在执行：${activeTool.title ?? "内部工具"}`
-    : failedCount > 0
-      ? `执行完成，${failedCount} 项需要注意`
-      : "本轮执行已完成";
-  const groups = groupConsecutiveTools(tools);
-  return <details open className={`conversation-tools conversation-tools--${runningCount > 0 ? "running" : failedCount > 0 ? "failed" : "completed"}`}>
-    <summary aria-label={`${headline}，共 ${tools.length} 次工具调用`}>
-      <span className="conversation-tools-icon">{runningCount > 0 ? <LoaderCircle className="spin-slow" size={14} /> : failedCount > 0 ? <CircleAlert size={14} /> : <Wrench size={14} />}</span>
-      <span className="conversation-tools-heading"><strong>工具调用</strong><small>{headline}</small></span>
-      <span className="conversation-tools-summary">{tools.length} 次{completedCount > 0 && ` · ${completedCount} 完成`}{failedCount > 0 && ` · ${failedCount} 失败`}</span>
-      <ChevronRight className="conversation-tools-chevron" size={14} />
-    </summary>
-    <div>{groups.map(group => <QaseyToolPart key={group[0]?.toolCallId} tools={group} />)}</div>
-  </details>;
-
-}
-
-function groupConsecutiveTools(tools: DynamicToolUIPart[]): DynamicToolUIPart[][] {
-  const groups: DynamicToolUIPart[][] = [];
-  for (const tool of tools) {
-    const current = groups.at(-1);
-    const previous = current?.at(-1);
-    if (current && previous?.toolName === tool.toolName && previous.title === tool.title) current.push(tool);
-    else groups.push([tool]);
-  }
-  return groups;
-}
-
-function QaseyToolPart({ tools }: { tools: DynamicToolUIPart[] }) {
-  const views = tools.map(qaseyToolView);
-  const runningIndex = views.findLastIndex(view => view.tone === "running");
-  const failedIndex = views.findLastIndex(view => view.tone === "failed");
-  const representativeIndex = runningIndex >= 0 ? runningIndex : failedIndex >= 0 ? failedIndex : views.length - 1;
-  const tool = tools[representativeIndex]!;
-  const view = views[representativeIndex]!;
-  const groupedSummary = view.tone === "running"
-    ? `正在执行第 ${tools.length} 次，展开查看每次进度。`
-    : view.tone === "failed"
-      ? `${views.filter(item => item.tone === "failed").length} 次执行失败，展开查看每次结果。`
-      : `已连续完成 ${tools.length} 次，展开查看每次结果。`;
-  const row = <>
-    <div className="conversation-tool-icon">{toolStateIcon(view.tone)}</div>
-    <div className="conversation-tool-content"><div><strong>{tool.title ?? "执行内部工具"}{tools.length > 1 && <em>×{tools.length}</em>}</strong><code>{tool.toolName}</code></div><p>{tools.length > 1 ? groupedSummary : view.summary}</p></div>
-    <span className="conversation-tool-state">{view.status}</span>
-    {tools.length > 1 && <ChevronRight className="conversation-tool-group-chevron" size={13} />}
-  </>;
-  if (tools.length > 1) return <details className={`conversation-tool-group conversation-tool--${view.tone}`}>
-    <summary className="conversation-tool">{row}</summary>
-    <div>{tools.map(item => <QaseyToolPart key={item.toolCallId} tools={[item]} />)}</div>
-  </details>;
-  return <article className={`conversation-tool conversation-tool--${view.tone}`}>{row}</article>;
-}
-
-function qaseyToolView(tool: DynamicToolUIPart): { tone: "running" | "completed" | "failed"; status: string; summary: string } {
-  const input = QaseyPublicToolInputSchema.safeParse(tool.input);
-  const inputSummary = input.success ? input.data.summary : "工具正在执行。";
-  if (tool.state === "output-error") return { tone: "failed", status: "失败", summary: tool.errorText };
-  if (tool.state === "output-denied") return { tone: "failed", status: "未执行", summary: "工具调用未获批准。" };
-  if (tool.state === "output-available") {
-    const output = QaseyPublicToolOutputSchema.safeParse(tool.output);
-    return { tone: "completed", status: "完成", summary: output.success ? output.data.summary : "工具执行完成。" };
-  }
-  return { tone: "running", status: "执行中", summary: inputSummary };
-}
-
-function toolStateIcon(tone: "running" | "completed" | "failed") {
-  if (tone === "failed") return <CircleAlert size={14} />;
-  if (tone === "completed") return <Check size={14} />;
-  return <LoaderCircle className="spin-slow" size={14} />;
-}
-
 function reconnectTargetFromMessages(conversation: QaseyConversation, messages: QaseyUIMessage[]): QaseyReconnectTarget | undefined {
   if (!conversation.activeTurnId) return undefined;
   const assistant = messages.findLast(message => message.role === "assistant" && message.id === conversation.activeTurnId);
@@ -1072,14 +993,26 @@ function CaseHubView() {
   const [selected, setSelected] = useState<CaseHubDetail | null>(null);
   const [detailLoadingId, setDetailLoadingId] = useState("");
   const [notice, setNotice] = useState("");
+  const [checkedIds, setCheckedIds] = useState<string[]>([]);
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const listRequest = useRef(0);
+  const dismissNotice = useCallback(() => setNotice(""), []);
+  const checkedIdSet = new Set(checkedIds);
+  const checkedCases = cases.filter(item => checkedIdSet.has(item.id));
+  const allChecked = cases.length > 0 && checkedCases.length === cases.length;
+  const toggleCase = (id: string) => setCheckedIds(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id]);
   const [query, setQuery] = useState("");
   const [error, setError] = useState("");
   const load = useCallback(async () => {
+    const request = ++listRequest.current;
     setError("");
     try {
       const caseResponse = await api.listCases(query);
+      if (request !== listRequest.current) return;
       setCases(caseResponse.cases);
-    } catch (cause) { setError(errorMessage(cause)); }
+      setCheckedIds(current => current.filter(id => caseResponse.cases.some(item => item.id === id)));
+    } catch (cause) { if (request === listRequest.current) setError(errorMessage(cause)); }
   }, [query]);
   useEffect(() => { void load(); }, [load]);
 
@@ -1107,26 +1040,61 @@ function CaseHubView() {
   }, [loadDetail, requestedCaseId]);
 
   const remove = async (testCase: CaseHubCase) => {
-    await api.deleteCase(testCase.id);
+    const result = await api.deleteCase(testCase.id);
+    if (!result.deleted) throw new Error("用例未删除，请刷新后重试。");
+    ++listRequest.current;
+    setCheckedIds(current => current.filter(id => id !== testCase.id));
     setCases(current => current.filter(item => item.id !== testCase.id));
     if (selected?.case.id === testCase.id) close();
     setNotice(`已删除 ${testCase.id}`);
   };
 
+  const removeChecked = async () => {
+    setDeleting(true);
+    setNotice("");
+    ++listRequest.current;
+    const removed = new Set<string>();
+    const failed: string[] = [];
+    try {
+      for (const testCase of checkedCases) {
+        try {
+          const result = await api.deleteCase(testCase.id);
+          if (!result.deleted) throw new Error("未删除");
+          removed.add(testCase.id);
+        } catch { failed.push(testCase.id); }
+      }
+      setCases(current => current.filter(item => !removed.has(item.id)));
+      setCheckedIds(current => current.filter(id => !removed.has(id)));
+      if (selected && removed.has(selected.case.id)) close();
+      if (failed.length) throw new Error(`已删除 ${removed.size} 条，${failed.length} 条删除失败（${failed.join("、")}）。失败项已保留，可重试。`);
+      setNotice(`已删除 ${removed.size} 条用例`);
+    } finally { setDeleting(false); }
+  };
+
   return <>
-    <PageHeading eyebrow="Case Hub · 用例资产库" title="Case Hub" description="浏览已经沉淀的文字用例、版本与自动化证据。新的文字审批和 E2E 验收统一从“待我审阅”进入。" action={<div className="page-heading-actions"><button className="secondary-button" onClick={() => navigate(adminPaths["qasey-review"])}><ClipboardCheck size={16} />进入待我审阅</button><button className="secondary-button" onClick={() => void load()}><RefreshCw size={16} />刷新</button></div>} />
+    <PageHeading eyebrow="Case Hub · 用例资产库" title="Case Hub" description="浏览已经沉淀的文字用例、版本与自动化证据。新的文字审批和 E2E 验收统一从“待我审阅”进入。" action={<div className="page-heading-actions"><button className="secondary-button" onClick={() => navigate(adminPaths["qasey-review"])}><ClipboardCheck size={16} />进入待我审阅</button><button className="secondary-button" disabled={deleting} onClick={() => void load()}><RefreshCw size={16} />刷新</button></div>} />
     {error && <InlineError message={error} />}
-    {notice && <p role="status">{notice}</p>}
+    {notice && <FeedbackToast message={notice} onDismiss={dismissNotice} />}
     <section className="surface case-library">
       <div className="case-library-head">
         <div><span className="section-icon"><Library size={18} /></span><div><h2>用例库</h2><p>{cases.length} 条符合条件的 QASEY Case</p></div></div>
-        <label className="case-search" htmlFor="case-hub-search"><Search size={17} /><span className="sr-only">搜索用例</span><input id="case-hub-search" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索 Case ID、标题或 Suite" /></label>
+        <label className="case-search" htmlFor="case-hub-search"><Search size={17} /><span className="sr-only">搜索用例</span><input id="case-hub-search" value={query} disabled={deleting} onChange={event => { setCheckedIds([]); setQuery(event.target.value); }} placeholder="搜索 Case ID、标题或 Suite" /></label>
       </div>
-      <div className="case-table-scroll"><table className="case-table"><caption className="sr-only">Case Hub 用例</caption><thead><tr><th>Case</th><th>Suite</th><th>当前版本</th><th>正式交付</th><th>最近更新</th><th>操作</th></tr></thead><tbody>
-        {cases.map(testCase => { const activate = () => open(testCase.id); return <tr className="case-library-row" key={testCase.id} tabIndex={0} aria-label={`打开 ${testCase.id}：${testCase.title}`} onClick={event => { if (!(event.target as Element).closest("button, a, input")) activate(); }} onKeyDown={event => { if ((event.key === "Enter" || event.key === " ") && event.target === event.currentTarget) { event.preventDefault(); activate(); } }}><td><button className="case-open" onClick={activate}><span className="run-icon"><TestTube2 size={16} /></span><span><strong>{testCase.id}</strong><small>{testCase.title}</small></span></button></td><td>{testCase.suitePath}</td><td>{testCase.activeVersionId ? <span className="status-badge success">已生效</span> : <span className="status-badge">暂无</span>}</td><td><AutomationStatusBadge status={testCase.automationStatus ?? "none"} /></td><td className="updated">{formatRelative(testCase.updatedAt)}</td><td><CaseRowActions testCase={testCase} loading={detailLoadingId === testCase.id} onView={activate} onDelete={() => remove(testCase)} /></td></tr>; })}
+      {checkedCases.length > 0 && <div className="case-selection-toolbar" role="toolbar" aria-label="批量操作">
+        <span>已选择 <strong>{checkedCases.length}</strong> 条用例</span>
+        <button type="button" className="secondary-button" disabled={deleting} onClick={() => setCheckedIds([])}>取消选择</button>
+        <button type="button" className="destructive-button" disabled={deleting} onClick={() => setBulkOpen(true)}><Trash2 size={15} />批量删除</button>
+      </div>}
+      <div className="case-table-scroll"><table className="case-table"><caption className="sr-only">Case Hub 用例</caption><thead><tr><th><div className="case-select-cell"><input type="checkbox" aria-label="全选当前搜索结果" checked={allChecked} ref={node => { if (node) node.indeterminate = checkedCases.length > 0 && !allChecked; }} disabled={deleting || cases.length === 0} onChange={() => setCheckedIds(allChecked ? [] : cases.map(item => item.id))} /><span>Case</span></div></th><th>Suite</th><th>当前版本</th><th>正式交付</th><th>最近更新</th><th>操作</th></tr></thead><tbody>
+        {cases.map(testCase => { const activate = () => open(testCase.id); return <tr className={`case-library-row${checkedIdSet.has(testCase.id) ? " is-selected" : ""}`} key={testCase.id} tabIndex={0} aria-label={`打开 ${testCase.id}：${testCase.title}`} onClick={event => { if (!(event.target as Element).closest("button, a, input")) activate(); }} onKeyDown={event => { if ((event.key === "Enter" || event.key === " ") && event.target === event.currentTarget) { event.preventDefault(); activate(); } }}><td><div className="case-select-cell"><input type="checkbox" aria-label={`选择 ${testCase.id}`} checked={checkedIdSet.has(testCase.id)} disabled={deleting} onChange={() => toggleCase(testCase.id)} /><button className="case-open" onClick={activate}><span className="run-icon"><TestTube2 size={16} /></span><span><strong>{testCase.id}</strong><small>{testCase.title}</small></span></button></div></td><td>{testCase.suitePath}</td><td>{testCase.activeVersionId ? <span className="status-badge success">已生效</span> : <span className="status-badge">暂无</span>}</td><td><AutomationStatusBadge status={testCase.automationStatus ?? "none"} /></td><td className="updated">{formatRelative(testCase.updatedAt)}</td><td><CaseRowActions testCase={testCase} loading={deleting || detailLoadingId === testCase.id} onView={activate} onDelete={() => remove(testCase)} /></td></tr>; })}
         {cases.length === 0 && <tr><td colSpan={6}><div className="case-empty"><Library size={23} /><strong>{query ? "没有匹配的用例" : "Case Hub 还是空的"}</strong><span>{query ? "换一个 Case ID、标题或 Suite 试试。" : "通过需求分析创建的用例会出现在这里。"}</span></div></td></tr>}
       </tbody></table></div>
     </section>
+    <ConfirmDialog open={bulkOpen} onOpenChange={setBulkOpen} title={`删除所选 ${checkedCases.length} 条用例？`} confirmLabel={`删除 ${checkedCases.length} 条用例`}
+      description="所选用例将从用例库移除，无法再发起新的 E2E。历史版本与执行证据仍会保留。"
+      onConfirm={removeChecked} onRestoreFocus={() => document.getElementById("case-hub-search")?.focus()}>
+      <div className="bulk-delete-subjects">{checkedCases.map(item => <div key={item.id} className="confirm-dialog-subject"><span>{item.id}</span><strong>{item.title}</strong></div>)}</div>
+    </ConfirmDialog>
     {selected && <CaseDetailDialog key={selected.case.id} detail={selected} onClose={close} />}
   </>;
 }
