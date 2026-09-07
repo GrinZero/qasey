@@ -269,13 +269,13 @@ export function App() {
           <div><strong>{displayName(auth.session)}</strong><span>{auth.session.tenantId}</span></div>
           <button className="icon-button" onClick={logout} aria-label="退出登录" title="退出登录"><LogOut size={17} /></button>
         </div>
+        <button className="icon-button sidebar-toggle" onClick={toggleSidebar} aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} aria-expanded={!sidebarCollapsed} aria-controls="app-sidebar">
+          {sidebarCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+        </button>
       </aside>
       {menuOpen && <button className="sidebar-scrim" onClick={() => setMenuOpen(false)} aria-label="关闭导航" />}
       <main className="main-area">
         <header className="topbar">
-          <button className="icon-button sidebar-toggle" onClick={toggleSidebar} aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} aria-expanded={!sidebarCollapsed} aria-controls="app-sidebar">
-            {sidebarCollapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
-          </button>
           <button className="icon-button mobile-menu" onClick={() => setMenuOpen(true)} aria-label="打开导航"><Menu size={21} /></button>
           <div className="breadcrumbs"><span>Qasey</span><ChevronRight size={14} />{qaseyActive && <><span>QA Agent</span><ChevronRight size={14} /></>}<strong>{currentLabel}</strong></div>
           <div className="topbar-actions">
