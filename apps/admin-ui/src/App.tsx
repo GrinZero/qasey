@@ -598,7 +598,25 @@ function UnifiedInbox({ runs, onOpenQaseyReview }: { runs: QaseyRun[]; onOpenQas
 }
 
 function ActivityView({ runs, loading, onRefresh }: { runs: QaseyRun[]; loading: boolean; onRefresh: () => Promise<void> }) {
-  return <><PageHeading eyebrow="Platform activity" title="所有 Agent 的工作轨迹" description="跨 Application 查看进行中、等待人工处理和已完成的工作。" action={<button className="secondary-button" onClick={() => void onRefresh()} disabled={loading}><RefreshCw className={loading ? "spin" : ""} size={16} />刷新</button>} /><section className="surface runs-surface platform-runs"><div className="filter-row"><div className="segmented"><button className="active">全部 <span>{runs.length}</span></button><button>进行中 <span>{runs.filter(run => activeStatuses.includes(run.status)).length}</span></button><button>需介入 <span>{runs.filter(run => run.status === "awaiting_qa").length}</span></button></div><button className="filter-button"><Boxes size={15} />全部 Applications</button></div><RunTable runs={runs} loading={loading} expanded /></section></>;
+  const [filter, setFilter] = useState<"all" | "active" | "review">("all");
+  const filteredRuns = useMemo(() => runs.filter(run =>
+    filter === "all" || (filter === "active" ? activeStatuses.includes(run.status) : run.status === "awaiting_qa")
+  ), [filter, runs]);
+
+  return <>
+    <PageHeading eyebrow="Platform activity" title="所有 Agent 的工作轨迹" description="跨 Application 查看进行中、等待人工处理和已完成的工作。" action={<button className="secondary-button" onClick={() => void onRefresh()} disabled={loading}><RefreshCw className={loading ? "spin" : ""} size={16} />刷新</button>} />
+    <section className="surface runs-surface platform-runs">
+      <div className="filter-row">
+        <div className="segmented" aria-label="筛选运行">
+          {([["all", "全部"], ["active", "进行中"], ["review", "需介入"]] as const).map(([id, label]) =>
+            <button key={id} className={filter === id ? "active" : ""} aria-pressed={filter === id} onClick={() => setFilter(id)}>{label} <span>{countFor(runs, id)}</span></button>
+          )}
+        </div>
+        <button className="filter-button"><Boxes size={15} />全部 Applications</button>
+      </div>
+      <RunTable runs={filteredRuns} loading={loading} expanded />
+    </section>
+  </>;
 }
 
 function Overview({ catalog, runs, loading, onRefresh, onOpenRuns }: { catalog: CatalogEntry[]; runs: QaseyRun[]; loading: boolean; onRefresh: () => Promise<void>; onOpenRuns: () => void }) {
