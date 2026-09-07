@@ -1,3 +1,4 @@
+import { configureQaseyToolPermissions } from "./applications/qasey/tool-permissions.ts";
 import { startCollaborationWorker } from "./applications/qasey/collaboration.ts";
 import { registerDatadogContextBridge } from "./instrumentation.ts";
 import { createRequire } from "node:module";
@@ -186,6 +187,7 @@ const permissionStore = config.NODE_ENV === "production" && config.DATABASE_URL
   ? new PrismaPermissionStore(applicationDatabase!.client)
   : new InMemoryPermissionStore();
 const permissionService = new PermissionService(permissionStore);
+configureQaseyToolPermissions(permissionService);
 const organizationStore = config.NODE_ENV !== "test" && config.DATABASE_URL
   ? new PrismaOrganizationStore(applicationDatabase!.client)
   : new InMemoryOrganizationStore();

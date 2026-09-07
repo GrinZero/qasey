@@ -1,4 +1,4 @@
-import { GetObjectCommand, HeadBucketCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import { GetObjectCommand, HeadBucketCommand, HeadObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +7,9 @@ import type { ArtifactRef, OwnerScope } from "../../packages/contracts/src/index
 import {
   ArtifactIntegrityError,
   ArtifactOwnershipError,
+  ArtifactRangeNotSatisfiableError,
   LocalArtifactStore,
+  parseArtifactByteRange,
   S3ArtifactStore,
 } from "../../packages/e2e/src/index.ts";
 
@@ -19,6 +21,13 @@ afterEach(async () => {
 });
 
 describe("artifact ownership boundary", () => {
+  it("parses one bounded, open-ended, or suffix byte range and rejects multi-ranges", () => {
+    expect(parseArtifactByteRange("bytes=3-5", 10)).toEqual({ start: 3, end: 5 });
+    expect(parseArtifactByteRange("bytes=7-", 10)).toEqual({ start: 7, end: 9 });
+    expect(parseArtifactByteRange("bytes=-4", 10)).toEqual({ start: 6, end: 9 });
+    expect(() => parseArtifactByteRange("bytes=0-1,3-4", 10)).toThrow(ArtifactRangeNotSatisfiableError);
+  });
+
   it("streams local artifacts only inside the authenticated owner root", async () => {
     const root = await mkdtemp(join(tmpdir(), "qasey-artifacts-"));
     temporaryDirectories.push(root);
@@ -28,6 +37,18 @@ describe("artifact ownership boundary", () => {
     const opened = await store.open(owner, ref);
     await expect(new Response(opened.body).text()).resolves.toContain("diff --git");
     await expect(store.open({ ...owner, tenantId: "tenant-b" }, ref)).rejects.toBeInstanceOf(ArtifactOwnershipError);
+  });
+
+  it("streams a local byte range without loading the artifact into memory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qasey-artifacts-"));
+    temporaryDirectories.push(root);
+    const store = new LocalArtifactStore(root);
+    const ref = await store.savePatch(owner, "run-1", "0123456789");
+
+    expect(await store.size(owner, ref)).toBe(10);
+    const opened = await store.open(owner, ref, { start: 3, end: 6 });
+    await expect(new Response(opened.body).text()).resolves.toBe("3456");
+    expect(opened.contentLength).toBe(4);
   });
 
   it("stores shared artifacts with encryption, checksum and retention metadata", async () => {
@@ -79,6 +100,19 @@ describe("artifact ownership boundary", () => {
     await expect(store.open(owner, tampered)).rejects.toBeInstanceOf(ArtifactIntegrityError);
   });
 
+  it("forwards a bounded byte range to S3 and streams its partial response", async () => {
+    const client = new FakeS3Client();
+    const store = new S3ArtifactStore({ bucket: "bucket", region: "region", client });
+    const ref = await store.savePatch(owner, "run-1", "0123456789");
+
+    expect(await store.size(owner, ref)).toBe(10);
+    const opened = await store.open(owner, ref, { start: 2, end: 5 });
+    await expect(new Response(opened.body).text()).resolves.toBe("2345");
+    expect(opened.contentLength).toBe(4);
+    const get = client.commands.findLast(command => command instanceof GetObjectCommand) as GetObjectCommand;
+    expect(get.input.Range).toBe("bytes=2-5");
+  });
+
   it("uses collision-free owner prefixes for IDs that normalize to the same slug", async () => {
     const client = new FakeS3Client();
     const store = new S3ArtifactStore({ bucket: "bucket", region: "region", client });
@@ -111,14 +145,21 @@ class FakeS3Client {
     if (command instanceof GetObjectCommand) {
       const stored = this.objects.get(String(command.input.Key));
       if (!stored) throw new Error("NoSuchKey");
+      const range = command.input.Range ? /^bytes=(\d+)-(\d+)$/u.exec(command.input.Range) : undefined;
+      const body = range ? stored.body.subarray(Number(range[1]), Number(range[2]) + 1) : stored.body;
       return {
         Metadata: stored.metadata,
-        ContentLength: stored.body.length,
+        ContentLength: body.length,
         Body: {
-          transformToByteArray: async () => new Uint8Array(stored.body),
-          transformToWebStream: () => new Blob([Uint8Array.from(stored.body)]).stream(),
+          transformToByteArray: async () => new Uint8Array(body),
+          transformToWebStream: () => new Blob([Uint8Array.from(body)]).stream(),
         },
       };
+    }
+    if (command instanceof HeadObjectCommand) {
+      const stored = this.objects.get(String(command.input.Key));
+      if (!stored) throw new Error("NoSuchKey");
+      return { Metadata: stored.metadata, ContentLength: stored.body.length };
     }
     if (command instanceof HeadBucketCommand) return {};
     throw new Error(`Unexpected command ${command.constructor.name}`);

@@ -197,9 +197,9 @@ export class PrismaQaseyConversationRepository implements QaseyConversationRepos
   async createConversation(owner: OwnerScope, subjectId: string): Promise<QaseyConversation> {
     await this.ready();
     const now = this.now();
-    const conversation = QaseyConversationSchema.parse({ ...owner, id: randomUUID(), subjectId, title: "新 QA 任务", createdAt: now.toISOString(), updatedAt: now.toISOString() });
+    const conversation = QaseyConversationSchema.parse({ ...persistenceOwner(owner), id: randomUUID(), subjectId, title: "新 QA 任务", createdAt: now.toISOString(), updatedAt: now.toISOString() });
     await this.prisma.qaseyConversationRecord.create({ data: {
-      ...owner, id: conversation.id, subjectId, title: conversation.title, createdAt: now, updatedAt: now,
+      ...persistenceOwner(owner), id: conversation.id, subjectId, title: conversation.title, createdAt: now, updatedAt: now,
     } });
     return conversation;
   }
@@ -207,21 +207,21 @@ export class PrismaQaseyConversationRepository implements QaseyConversationRepos
   async listConversations(owner: OwnerScope, subjectId: string, limit = 50): Promise<QaseyConversation[]> {
     await this.ready();
     const rows = await this.prisma.qaseyConversationRecord.findMany({
-      where: { ...owner, subjectId }, orderBy: [{ updatedAt: "desc" }, { id: "asc" }], take: boundedLimit(limit),
+      where: { ...persistenceOwner(owner), subjectId }, orderBy: [{ updatedAt: "desc" }, { id: "asc" }], take: boundedLimit(limit),
     });
     return rows.map(conversationFromRow);
   }
 
   async getConversation(owner: OwnerScope, subjectId: string, id: string): Promise<QaseyConversation | undefined> {
     await this.ready();
-    const row = await this.prisma.qaseyConversationRecord.findUnique({ where: { applicationId_tenantId_id: { ...owner, id } } });
+    const row = await this.prisma.qaseyConversationRecord.findUnique({ where: { applicationId_tenantId_id: { ...persistenceOwner(owner), id } } });
     return row?.subjectId === subjectId ? conversationFromRow(row) : undefined;
   }
 
   async listTurns(owner: OwnerScope, subjectId: string, conversationId: string): Promise<QaseyConversationTurn[]> {
     if (!await this.getConversation(owner, subjectId, conversationId)) return [];
     const rows = await this.prisma.qaseyConversationTurnRecord.findMany({
-      where: { ...owner, conversationId }, orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      where: { ...persistenceOwner(owner), conversationId }, orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     });
     return rows.map(turnFromRow);
   }
@@ -231,14 +231,14 @@ export class PrismaQaseyConversationRepository implements QaseyConversationRepos
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         return await this.prisma.$transaction(async transaction => {
-          const conversation = await transaction.qaseyConversationRecord.findUnique({ where: { applicationId_tenantId_id: { ...owner, id: conversationId } } });
+          const conversation = await transaction.qaseyConversationRecord.findUnique({ where: { applicationId_tenantId_id: { ...persistenceOwner(owner), id: conversationId } } });
           if (!conversation || conversation.subjectId !== subjectId) throw new Error("Qasey conversation not found");
           const existing = await transaction.qaseyConversationTurnRecord.findUnique({
-            where: { applicationId_tenantId_conversationId_clientMessageId: { ...owner, conversationId, clientMessageId } },
+            where: { applicationId_tenantId_conversationId_clientMessageId: { ...persistenceOwner(owner), conversationId, clientMessageId } },
           });
           if (existing) {
             const acceptedRow = await transaction.qaseyConversationEventRecord.findUnique({
-              where: { applicationId_tenantId_turnId_sequence: { ...owner, turnId: existing.id, sequence: 1 } },
+              where: { applicationId_tenantId_turnId_sequence: { ...persistenceOwner(owner), turnId: existing.id, sequence: 1 } },
             });
             if (!acceptedRow) throw new Error("Conversation turn is missing its accepted event");
             return { turn: turnFromRow(existing), accepted: eventFromRow(acceptedRow), created: false };
@@ -246,22 +246,22 @@ export class PrismaQaseyConversationRepository implements QaseyConversationRepos
 
           const now = this.now();
           const turn = QaseyConversationTurnSchema.parse({
-            ...owner, id: randomUUID(), conversationId, clientMessageId, userMessage: message,
+            ...persistenceOwner(owner), id: randomUUID(), conversationId, clientMessageId, userMessage: message,
             status: "running", createdAt: now.toISOString(), updatedAt: now.toISOString(),
           });
           const accepted = QaseyConversationEventSchema.parse({
-            ...owner, conversationId, turnId: turn.id, sequence: 1, type: "accepted", payload: { message, ...(e2eContext ? { e2eContext: QaseyE2EContextSchema.parse(e2eContext) } : {}) }, occurredAt: now.toISOString(),
+            ...persistenceOwner(owner), conversationId, turnId: turn.id, sequence: 1, type: "accepted", payload: { message, ...(e2eContext ? { e2eContext: QaseyE2EContextSchema.parse(e2eContext) } : {}) }, occurredAt: now.toISOString(),
           });
           await transaction.qaseyConversationTurnRecord.create({ data: {
-            ...owner, id: turn.id, conversationId, clientMessageId, userMessage: message,
+            ...persistenceOwner(owner), id: turn.id, conversationId, clientMessageId, userMessage: message,
             assistantText: "", status: "running", eventSequence: 1, createdAt: now, updatedAt: now,
           } });
           await transaction.qaseyConversationEventRecord.create({ data: {
-            ...owner, turnId: turn.id, conversationId, sequence: 1, type: accepted.type,
+            ...persistenceOwner(owner), turnId: turn.id, conversationId, sequence: 1, type: accepted.type,
             payload: accepted.payload as Prisma.InputJsonValue, occurredAt: now,
           } });
           await transaction.qaseyConversationRecord.update({
-            where: { applicationId_tenantId_id: { ...owner, id: conversationId } },
+            where: { applicationId_tenantId_id: { ...persistenceOwner(owner), id: conversationId } },
             data: {
               activeTurnId: turn.id,
               ...(conversation.title === "新 QA 任务" ? { title: conversationTitle(message) } : {}),
@@ -274,11 +274,11 @@ export class PrismaQaseyConversationRepository implements QaseyConversationRepos
         if (prismaErrorCode(error) === "P2034" && attempt < 2) continue;
         if (prismaErrorCode(error) === "P2002") {
           const existing = await this.prisma.qaseyConversationTurnRecord.findUnique({
-            where: { applicationId_tenantId_conversationId_clientMessageId: { ...owner, conversationId, clientMessageId } },
+            where: { applicationId_tenantId_conversationId_clientMessageId: { ...persistenceOwner(owner), conversationId, clientMessageId } },
           });
           if (existing) {
             const acceptedRow = await this.prisma.qaseyConversationEventRecord.findUnique({
-              where: { applicationId_tenantId_turnId_sequence: { ...owner, turnId: existing.id, sequence: 1 } },
+              where: { applicationId_tenantId_turnId_sequence: { ...persistenceOwner(owner), turnId: existing.id, sequence: 1 } },
             });
             if (acceptedRow) return { turn: turnFromRow(existing), accepted: eventFromRow(acceptedRow), created: false };
           }
@@ -295,18 +295,18 @@ export class PrismaQaseyConversationRepository implements QaseyConversationRepos
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
           return await this.prisma.$transaction(async transaction => {
-          const conversation = await transaction.qaseyConversationRecord.findUnique({ where: { applicationId_tenantId_id: { ...owner, id: conversationId } } });
-          const turn = await transaction.qaseyConversationTurnRecord.findUnique({ where: { applicationId_tenantId_id: { ...owner, id: turnId } } });
+          const conversation = await transaction.qaseyConversationRecord.findUnique({ where: { applicationId_tenantId_id: { ...persistenceOwner(owner), id: conversationId } } });
+          const turn = await transaction.qaseyConversationTurnRecord.findUnique({ where: { applicationId_tenantId_id: { ...persistenceOwner(owner), id: turnId } } });
           if (!conversation || conversation.subjectId !== subjectId || !turn || turn.conversationId !== conversationId) throw new Error("Qasey conversation turn not found");
           if (turn.status !== "running") throw new ConversationTurnClosedError(turnId);
           const now = this.now();
           const sequence = turn.eventSequence + 1;
-          const event = QaseyConversationEventSchema.parse({ ...owner, conversationId, turnId, sequence, type, payload, occurredAt: now.toISOString() });
+          const event = QaseyConversationEventSchema.parse({ ...persistenceOwner(owner), conversationId, turnId, sequence, type, payload, occurredAt: now.toISOString() });
           const delta = type === "assistant.delta" && typeof payload.text === "string" ? payload.text : "";
           const completedText = type === "completed" && typeof payload.text === "string" ? payload.text : undefined;
           const status = type === "completed" ? "completed" : type === "failed" ? "failed" : turn.status;
           await transaction.qaseyConversationTurnRecord.update({
-            where: { applicationId_tenantId_id: { ...owner, id: turnId } },
+            where: { applicationId_tenantId_id: { ...persistenceOwner(owner), id: turnId } },
             data: {
               eventSequence: sequence,
               ...(completedText !== undefined ? { assistantText: completedText } : delta ? { assistantText: `${turn.assistantText}${delta}` } : {}),
@@ -318,10 +318,10 @@ export class PrismaQaseyConversationRepository implements QaseyConversationRepos
             },
           });
           await transaction.qaseyConversationEventRecord.create({ data: {
-            ...owner, conversationId, turnId, sequence, type, payload: payload as Prisma.InputJsonValue, occurredAt: now,
+            ...persistenceOwner(owner), conversationId, turnId, sequence, type, payload: payload as Prisma.InputJsonValue, occurredAt: now,
           } });
           await transaction.qaseyConversationRecord.update({
-            where: { applicationId_tenantId_id: { ...owner, id: conversationId } },
+            where: { applicationId_tenantId_id: { ...persistenceOwner(owner), id: conversationId } },
             data: { ...(status === "running" || conversation.activeTurnId !== turnId ? {} : { activeTurnId: null }), updatedAt: now },
           });
           return event;
@@ -338,7 +338,7 @@ export class PrismaQaseyConversationRepository implements QaseyConversationRepos
   async events(owner: OwnerScope, subjectId: string, conversationId: string, turnId: string, after = 0): Promise<QaseyConversationEvent[]> {
     if (!await this.getConversation(owner, subjectId, conversationId)) return [];
     const rows = await this.prisma.qaseyConversationEventRecord.findMany({
-      where: { ...owner, conversationId, turnId, sequence: { gt: Math.max(0, after) } }, orderBy: { sequence: "asc" },
+      where: { ...persistenceOwner(owner), conversationId, turnId, sequence: { gt: Math.max(0, after) } }, orderBy: { sequence: "asc" },
     });
     return rows.map(eventFromRow);
   }
@@ -391,6 +391,10 @@ function prismaErrorCode(error: unknown): string | undefined {
   return error && typeof error === "object" && typeof (error as { code?: unknown }).code === "string"
     ? (error as { code: string }).code
     : undefined;
+}
+// Callers may pass a richer collaboration scope; Prisma must receive only owner columns.
+function persistenceOwner(owner: OwnerScope): OwnerScope {
+  return { applicationId: owner.applicationId, tenantId: owner.tenantId };
 }
 function ownerPrefix(owner: OwnerScope): string { return `${owner.applicationId}\u0000${owner.tenantId}\u0000`; }
 function ownerKey(owner: OwnerScope, id: string): string { return `${ownerPrefix(owner)}${id}`; }

@@ -7,9 +7,11 @@ import { Readable } from "node:stream";
 import {
   GetObjectCommand,
   HeadBucketCommand,
+  HeadObjectCommand,
   PutObjectCommand,
   S3Client,
   type GetObjectCommandOutput,
+  type HeadObjectCommandOutput,
   type S3ClientConfig,
 } from "@aws-sdk/client-s3";
 import type { ArtifactRef, E2EExecutionBrief, OwnerScope } from "../../contracts/src/index.ts";
@@ -28,8 +30,14 @@ export interface OpenArtifact {
   contentLength?: number;
 }
 
+export interface ArtifactByteRange {
+  start: number;
+  end: number;
+}
+
 export interface DownloadableArtifactStore extends ArtifactStore {
-  open(owner: OwnerScope, artifact: ArtifactRef): Promise<OpenArtifact>;
+  size(owner: OwnerScope, artifact: ArtifactRef): Promise<number>;
+  open(owner: OwnerScope, artifact: ArtifactRef, range?: ArtifactByteRange): Promise<OpenArtifact>;
   healthCheck(): Promise<void>;
   close(): Promise<void>;
 }
@@ -111,16 +119,21 @@ export class LocalArtifactStore implements DownloadableArtifactStore {
     return persisted;
   }
 
-  async open(owner: OwnerScope, artifact: ArtifactRef): Promise<OpenArtifact> {
-    if (!artifact.uri.startsWith("file://")) throw new ArtifactNotFoundError();
-    const ownerRoot = await realpath(await this.ownerDirectory(owner));
-    const target = await realpath(fileURLToPath(artifact.uri)).catch(() => { throw new ArtifactNotFoundError(); });
-    if (target !== ownerRoot && !target.startsWith(`${ownerRoot}${sep}`)) throw new ArtifactOwnershipError();
+  async size(owner: OwnerScope, artifact: ArtifactRef): Promise<number> {
+    const target = await this.ownedTarget(owner, artifact);
     const metadata = await stat(target);
     if (!metadata.isFile()) throw new ArtifactNotFoundError();
+    return metadata.size;
+  }
+
+  async open(owner: OwnerScope, artifact: ArtifactRef, range?: ArtifactByteRange): Promise<OpenArtifact> {
+    const target = await this.ownedTarget(owner, artifact);
+    const metadata = await stat(target);
+    if (!metadata.isFile()) throw new ArtifactNotFoundError();
+    const selected = range ? normalizeArtifactRange(range, metadata.size) : undefined;
     return {
-      body: Readable.toWeb(createReadStream(target)) as ReadableStream<Uint8Array>,
-      contentLength: metadata.size,
+      body: Readable.toWeb(createReadStream(target, selected)) as ReadableStream<Uint8Array>,
+      contentLength: selected ? selected.end - selected.start + 1 : metadata.size,
     };
   }
 
@@ -142,6 +155,14 @@ export class LocalArtifactStore implements DownloadableArtifactStore {
     const directory = resolve(this.root, artifactOwnerSegment(owner.applicationId), artifactOwnerSegment(owner.tenantId));
     await mkdir(directory, { recursive: true, mode: 0o700 });
     return directory;
+  }
+
+  private async ownedTarget(owner: OwnerScope, artifact: ArtifactRef): Promise<string> {
+    if (!artifact.uri.startsWith("file://")) throw new ArtifactNotFoundError();
+    const ownerRoot = await realpath(await this.ownerDirectory(owner));
+    const target = await realpath(fileURLToPath(artifact.uri)).catch(() => { throw new ArtifactNotFoundError(); });
+    if (target !== ownerRoot && !target.startsWith(`${ownerRoot}${sep}`)) throw new ArtifactOwnershipError();
+    return target;
   }
 }
 
@@ -261,10 +282,18 @@ export class S3ArtifactStore implements DownloadableArtifactStore {
     return persisted;
   }
 
-  async open(owner: OwnerScope, artifact: ArtifactRef): Promise<OpenArtifact> {
+  async size(owner: OwnerScope, artifact: ArtifactRef): Promise<number> {
+    const key = artifactKeyFromUri(artifact.uri);
+    const object = await this.head(owner, key);
+    if (artifact.sha256 && object.Metadata?.sha256 !== artifact.sha256) throw new ArtifactIntegrityError();
+    if (object.ContentLength === undefined) throw new ArtifactNotFoundError();
+    return object.ContentLength;
+  }
+
+  async open(owner: OwnerScope, artifact: ArtifactRef, range?: ArtifactByteRange): Promise<OpenArtifact> {
     const key = artifactKeyFromUri(artifact.uri);
     this.assertOwnedKey(owner, key);
-    const object = await this.get(owner, key);
+    const object = await this.get(owner, key, range);
     if (artifact.sha256 && object.Metadata?.sha256 !== artifact.sha256) throw new ArtifactIntegrityError();
     if (!object.Body?.transformToWebStream) throw new ArtifactNotFoundError();
     return {
@@ -313,13 +342,27 @@ export class S3ArtifactStore implements DownloadableArtifactStore {
     return { id, kind, name: displayName, uri: artifactUri(key), contentType, sha256: digest.toString("hex") };
   }
 
-  private async get(owner: OwnerScope, key: string): Promise<GetObjectCommandOutput> {
+  private async get(owner: OwnerScope, key: string, range?: ArtifactByteRange): Promise<GetObjectCommandOutput> {
     this.assertOwnedKey(owner, key);
     const result = await this.client.send(new GetObjectCommand({
       Bucket: this.bucket,
       Key: key,
       ChecksumMode: "ENABLED",
+      ...(range ? { Range: `bytes=${range.start}-${range.end}` } : {}),
     })) as GetObjectCommandOutput;
+    if (result.Metadata?.application !== owner.applicationId || result.Metadata?.tenant !== owner.tenantId) {
+      throw new ArtifactOwnershipError();
+    }
+    return result;
+  }
+
+  private async head(owner: OwnerScope, key: string): Promise<HeadObjectCommandOutput> {
+    this.assertOwnedKey(owner, key);
+    const result = await this.client.send(new HeadObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+      ChecksumMode: "ENABLED",
+    })) as HeadObjectCommandOutput;
     if (result.Metadata?.application !== owner.applicationId || result.Metadata?.tenant !== owner.tenantId) {
       throw new ArtifactOwnershipError();
     }
@@ -359,6 +402,41 @@ export class ArtifactIntegrityError extends Error {
   constructor() { super("Artifact checksum metadata does not match its reference"); this.name = "ArtifactIntegrityError"; }
 }
 
+export class ArtifactRangeNotSatisfiableError extends Error {
+  constructor(readonly size: number) {
+    super("Requested artifact range is not satisfiable");
+    this.name = "ArtifactRangeNotSatisfiableError";
+  }
+}
+
+/** Parses exactly one RFC 9110 byte range after the artifact size is known. */
+export function parseArtifactByteRange(value: string, size: number): ArtifactByteRange {
+  if (!Number.isSafeInteger(size) || size < 0) throw new Error("Artifact size is invalid");
+  const match = /^bytes=(\d*)-(\d*)$/u.exec(value.trim());
+  if (!match || !size) throw new ArtifactRangeNotSatisfiableError(size);
+  const [, rawStart, rawEnd] = match;
+  if (!rawStart && !rawEnd) throw new ArtifactRangeNotSatisfiableError(size);
+  if (!rawStart) {
+    const suffixLength = Number(rawEnd);
+    if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) throw new ArtifactRangeNotSatisfiableError(size);
+    return { start: Math.max(0, size - suffixLength), end: size - 1 };
+  }
+  const start = Number(rawStart);
+  if (!Number.isSafeInteger(start) || start < 0 || start >= size) throw new ArtifactRangeNotSatisfiableError(size);
+  if (!rawEnd) return { start, end: size - 1 };
+  const end = Number(rawEnd);
+  if (!Number.isSafeInteger(end) || end < start) throw new ArtifactRangeNotSatisfiableError(size);
+  return { start, end: Math.min(end, size - 1) };
+}
+
+function normalizeArtifactRange(range: ArtifactByteRange, size: number): ArtifactByteRange {
+  if (!Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end)
+    || range.start < 0 || range.end < range.start || range.start >= size) {
+    throw new ArtifactRangeNotSatisfiableError(size);
+  }
+  return { start: range.start, end: Math.min(range.end, size - 1) };
+}
+
 function artifactUri(key: string): string {
   return `qasey-artifact:${encodeURIComponent(key)}`;
 }
@@ -389,6 +467,16 @@ function requiredSegment(value: string, label: string): string {
 async function bodyToBuffer(body: GetObjectCommandOutput["Body"]): Promise<Buffer> {
   if (!body?.transformToByteArray) throw new ArtifactNotFoundError();
   return Buffer.from(await body.transformToByteArray());
+}
+
+/** Select a single verifier execution; older evidence remains on the run for audit. */
+export function latestVerifierArtifacts(run: { id: string; codeTaskIds: string[]; artifacts: ArtifactRef[] }): ArtifactRef[] {
+  const taskId = run.codeTaskIds.findLast(id => id.startsWith(`${run.id}:verifier:`));
+  if (!taskId) throw new Error("Result publication requires a verifier CodeTask");
+  const prefix = `${run.id}:verifier:${safeSegment(`${taskId}:`)}`;
+  const artifacts = run.artifacts.filter(artifact => artifact.id.startsWith(prefix));
+  if (!artifacts.length) throw new Error("Result publication requires evidence from the latest verifier CodeTask");
+  return artifacts;
 }
 
 function safeSegment(value: string): string {

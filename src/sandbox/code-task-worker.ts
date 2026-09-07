@@ -44,7 +44,7 @@ let readOnlyRepositorySnapshots: RepositoryIntegritySnapshot[] = [];
 const abortController = new AbortController();
 let repositoryInstallResult: Promise<CheckResult> | undefined;
 let candidateValidationCalls = 0;
-let agentSummary = "Deterministic execution profile; no coding agent was started.";
+let agentSummary = profile.useAgent ? "" : "Deterministic execution profile; no coding agent was started.";
 process.once("SIGTERM", () => abortController.abort(new Error("Code task cancelled")));
 process.once("SIGINT", () => abortController.abort(new Error("Code task cancelled")));
 
@@ -79,6 +79,7 @@ try {
   const result = CodeTaskResultSchema.parse({
     status: passed ? "succeeded" : "failed",
     summary: passed ? agentSummary : `${agentSummary}\n${checks.filter(check => !check.passed).map(check => check.summary).join("\n")}`,
+    ...(profile.useAgent ? { analysisSummary: agentSummary.slice(0, 8000) } : {}),
     changedPaths: finalPaths,
     changes,
     ...(patchRef ? { patchRef } : {}),
@@ -98,6 +99,7 @@ try {
       ...(profile.useAgent ? [agentSummary] : []),
       integrityError?.message ?? (error instanceof Error ? error.message : String(error)),
     ].join("\n")),
+    ...(profile.useAgent && agentSummary ? { analysisSummary: agentSummary.slice(0, 8000) } : {}),
     changedPaths: await changedPaths(manifest.workspaceRoot).catch(() => []),
     changes: [],
     checks: [],

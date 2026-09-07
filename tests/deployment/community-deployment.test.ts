@@ -57,6 +57,10 @@ describe("community deployment", () => {
     expect(runtimeCompose).toContain("QASEY_SANDBOX_ENDPOINT_TEMPLATE: http://sandbox-{ordinal}:4120");
     expect(runtimeCompose).toContain("${QASEY_APP_PORT:-4111}:4111");
     expect(developmentCompose).toContain("target: development");
+    for (const stack of [developmentCompose, runtimeCompose]) {
+      expect(stack.match(/OPENAI_BASE_URL: \$\{OPENAI_BASE_URL:-https:\/\/api\.openai\.com\/v1\}/gu)).toHaveLength(2);
+      expect(stack).not.toContain("OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}");
+    }
     expect(developmentCompose).toContain("name: qasey-dev");
     expect(developmentCompose).toContain("target: sandbox-runtime");
     expect(developmentCompose).toContain('command: ["sh", "-lc", "pnpm db:generate && exec pnpm db:migrate:deploy"]');
@@ -81,7 +85,8 @@ describe("community deployment", () => {
     expect(devScript).toContain('argument !== "--external-sandbox"');
     expect(devScript).toContain('"http://sandbox-{ordinal}:4120"');
     expect(devScript).toContain('".devcontainer/mastra.env"');
-    expect(devScript).toContain('import "../src/load-env.ts"');
+    expect(devScript).toContain('await import("../src/load-env.ts")');
+    expect(devScript.indexOf("process.exit(startContainerDevelopment())")).toBeLessThan(devScript.indexOf('await import("../src/load-env.ts")'));
     expect(devScript.indexOf('["db:generate"]')).toBeLessThan(devScript.indexOf('["admin-ui:build"]'));
     expect(mastraEnv).toContain("NODE_ENV=development");
     expect(mastraEnv).not.toMatch(/(?:KEY|PASSWORD|TOKEN)=\S+/u);

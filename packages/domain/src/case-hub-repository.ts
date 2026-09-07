@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import {
   CaseHubCaseSchema,
+  CaseHubCaseDetailSchema,
   CaseHubCaseVersionSchema,
   CaseHubChangeSetSchema,
   CaseReviewItemSchema,
@@ -10,8 +11,11 @@ import {
   CaseHubResultSchema,
   type ArtifactRef,
   type CaseHubCase,
+  type CaseHubCaseDetail,
   type CaseHubCaseProposal,
   type CaseHubCaseVersion,
+  type CaseHubCaseVersionPresentation,
+  type CaseAutomationProjection,
   type CaseHubChangeSet,
   type CaseHubChangeSetStatus,
   type CaseHubResult,
@@ -72,6 +76,7 @@ export interface CaseHubRepository {
   createReviewPlan(owner: OwnerScope, command: CreateCaseReviewPlanCommand): Promise<CaseReviewPlanDetail>;
   getReviewPlan(owner: OwnerScope, id: string, viewerId: string): Promise<CaseReviewPlanDetail | undefined>;
   listReviewPlans(owner: OwnerScope, viewerId: string, limit?: number): Promise<CaseReviewPlanDetail[]>;
+  cancelReviewPlan(owner: OwnerScope, planId: string, actorId: string, expectedRevision: number): Promise<CaseReviewPlanDetail>;
   updateReviewItem(owner: OwnerScope, planId: string, itemId: string, actorId: string, expectedRevision: number, content: CaseReviewContent): Promise<CaseReviewPlanDetail>;
   setReviewItemRemoved(owner: OwnerScope, planId: string, itemId: string, actorId: string, expectedRevision: number, removed: boolean): Promise<CaseReviewPlanDetail>;
   approveReviewItems(owner: OwnerScope, planId: string, actorId: string, items: Array<{ itemId: string; expectedRevision: number }>): Promise<CaseReviewPlanDetail>;
@@ -82,6 +87,7 @@ export interface CaseHubRepository {
   updateChangeSet(owner: OwnerScope, id: string, expectedRevision: number, patch: CaseHubChangeSetPatch): Promise<CaseHubChangeSet>;
   listCases(owner: OwnerScope, query?: string): Promise<CaseHubCase[]>;
   getCase(owner: OwnerScope, id: string): Promise<CaseHubCase | undefined>;
+  deleteCase(owner: OwnerScope, id: string): Promise<boolean>;
   versionsForCase(owner: OwnerScope, caseId: string): Promise<CaseHubCaseVersion[]>;
   versionsForChangeSet(owner: OwnerScope, changeSetId: string): Promise<CaseHubCaseVersion[]>;
   createPendingResults(owner: OwnerScope, changeSetId: string, runId: string, artifacts?: ArtifactRef[], caseVersionIds?: string[], observations?: CaseExecutionObservation[]): Promise<CaseHubResult[]>;
@@ -119,6 +125,7 @@ export class CaseReviewForbiddenError extends Error {
 
 export class InMemoryCaseHubRepository implements CaseHubRepository {
   private readonly cases = new Map<string, CaseHubCase>();
+  private readonly deletedCases = new Set<string>();
   private readonly versions = new Map<string, CaseHubCaseVersion>();
   private readonly changeSets = new Map<string, CaseHubChangeSet>();
   private readonly results = new Map<string, CaseHubResult>();
@@ -158,6 +165,18 @@ export class InMemoryCaseHubRepository implements CaseHubRepository {
     const plans = [...this.reviewPlans.entries()].filter(([key]) => key.startsWith(ownerPrefix(owner)))
       .map(([, plan]) => plan).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)).slice(0, boundedLimit(limit));
     return Promise.all(plans.map(plan => this.reviewDetail(owner, plan, viewerId)));
+  }
+
+  async cancelReviewPlan(owner: OwnerScope, planId: string, actorId: string, expectedRevision: number): Promise<CaseReviewPlanDetail> {
+    const plan = this.reviewPlans.get(ownerKey(owner, planId));
+    if (!plan) throw new Error("Case review plan not found");
+    const detail = this.reviewDetail(owner, plan, actorId);
+    if (plan.subjectId !== actorId || plan.createdBy !== actorId) throw new CaseReviewForbiddenError();
+    if (plan.status === "cancelled") return detail;
+    if (plan.revision !== expectedRevision) throw new CaseReviewRevisionConflictError(planId);
+    const updated = CaseReviewPlanSchema.parse({ ...plan, status: "cancelled", revision: plan.revision + 1, updatedAt: this.now().toISOString() });
+    this.reviewPlans.set(ownerKey(owner, planId), updated);
+    return this.reviewDetail(owner, updated, actorId);
   }
 
   async updateReviewItem(owner: OwnerScope, planId: string, itemId: string, actorId: string, expectedRevision: number, content: CaseReviewContent): Promise<CaseReviewPlanDetail> {
@@ -238,7 +257,7 @@ export class InMemoryCaseHubRepository implements CaseHubRepository {
     if (selected.some(version => !version || version.status !== "active")) throw new Error("E2E requires active approved Case Versions");
     for (const version of selected) {
       const record = this.cases.get(ownerKey(owner, version!.caseId));
-      if (record?.activeVersionId !== version!.id) throw new Error(`Case Version ${version!.id} is stale`);
+      if (this.deletedCases.has(ownerKey(owner, version!.caseId)) || record?.activeVersionId !== version!.id) throw new Error(`Case Version ${version!.id} is stale`);
     }
     const timestamp = this.now().toISOString();
     const changeSet = CaseHubChangeSetSchema.parse({
@@ -325,7 +344,7 @@ export class InMemoryCaseHubRepository implements CaseHubRepository {
   async listCases(owner: OwnerScope, query = ""): Promise<CaseHubCase[]> {
     const normalized = query.trim().toLowerCase();
     const cases = [...this.cases.entries()]
-      .filter(([key]) => key.startsWith(ownerPrefix(owner)))
+      .filter(([key]) => key.startsWith(ownerPrefix(owner)) && !this.deletedCases.has(key))
       .map(([, value]) => structuredClone(value))
       .filter(value => Boolean(value.activeVersionId))
       .filter(value => !normalized || `${value.id} ${value.title} ${value.suitePath}`.toLowerCase().includes(normalized))
@@ -337,7 +356,15 @@ export class InMemoryCaseHubRepository implements CaseHubRepository {
   }
 
   async getCase(owner: OwnerScope, id: string): Promise<CaseHubCase | undefined> {
+    if (this.deletedCases.has(ownerKey(owner, id))) return undefined;
     return clone(this.cases.get(ownerKey(owner, id)));
+  }
+
+  async deleteCase(owner: OwnerScope, id: string): Promise<boolean> {
+    const key = ownerKey(owner, id);
+    if (!this.cases.get(key)?.activeVersionId) return false;
+    this.deletedCases.add(key);
+    return true;
   }
 
   async versionsForCase(owner: OwnerScope, caseId: string): Promise<CaseHubCaseVersion[]> {
@@ -484,13 +511,12 @@ export class InMemoryCaseHubRepository implements CaseHubRepository {
   }
 
   private async automationStatus(owner: OwnerScope, versionId: string): Promise<CaseAutomationStatus> {
-    const changeSets = (await this.listChangeSets(owner, 500)).filter(changeSet => changeSet.caseVersionIds.includes(versionId));
+    const changeSets = (await this.listChangeSets(owner, 500))
+      .filter(changeSet => changeSet.caseVersionIds.includes(versionId))
+      .sort(compareChangeSetRecency);
     for (const changeSet of changeSets) {
-      if (["authoring", "verifying", "revising", "final_verifying"].includes(changeSet.status)) return "generating";
-      const latest = (await this.listResults(owner, changeSet.id)).filter(result => result.caseVersionId === versionId).at(-1);
-      if (latest?.reviewStatus === "approved" && changeSet.status !== "abandoned" && changeSet.status !== "cancelled") return "verified";
-      if (changeSet.status === "awaiting_review" || latest?.reviewStatus === "pending") return "awaiting_review";
-      if (["failed", "blocked_product", "blocked_environment"].includes(changeSet.status) || latest?.executionStatus === "failed" || latest?.reviewStatus === "changes_requested") return "failed";
+      const status = automationStatusForChangeSet(changeSet, latestResultForVersion(await this.listResults(owner, changeSet.id), versionId));
+      if (status !== "none") return status;
     }
     const version = this.versions.get(ownerKey(owner, versionId));
     const caseRecord = version ? this.cases.get(ownerKey(owner, version.caseId)) : undefined;
@@ -608,6 +634,22 @@ export class PrismaCaseHubRepository implements CaseHubRepository {
       where: owner, orderBy: { updatedAt: "desc" }, take: boundedLimit(limit), select: { id: true },
     });
     return (await Promise.all(rows.map(row => this.getReviewPlan(owner, row.id, viewerId)))).filter((value): value is CaseReviewPlanDetail => Boolean(value));
+  }
+
+  async cancelReviewPlan(owner: OwnerScope, planId: string, actorId: string, expectedRevision: number): Promise<CaseReviewPlanDetail> {
+    const detail = await this.getReviewPlan(owner, planId, actorId);
+    if (!detail) throw new Error("Case review plan not found");
+    const { plan } = detail;
+    if (plan.subjectId !== actorId || plan.createdBy !== actorId) throw new CaseReviewForbiddenError();
+    if (plan.status === "cancelled") return detail;
+    if (plan.revision !== expectedRevision) throw new CaseReviewRevisionConflictError(planId);
+    const updated = CaseReviewPlanSchema.parse({ ...plan, status: "cancelled", revision: plan.revision + 1, updatedAt: this.now().toISOString() });
+    const saved = await this.prisma.qaseyCaseReviewPlanRecord.updateMany({
+      where: { ...owner, id: planId, revision: expectedRevision },
+      data: { status: updated.status, revision: { increment: 1 }, payload: updated as unknown as Prisma.InputJsonValue },
+    });
+    if (saved.count !== 1) throw new CaseReviewRevisionConflictError(planId);
+    return (await this.getReviewPlan(owner, planId, actorId))!;
   }
 
   async updateReviewItem(owner: OwnerScope, planId: string, itemId: string, actorId: string, expectedRevision: number, content: CaseReviewContent): Promise<CaseReviewPlanDetail> {
@@ -808,8 +850,8 @@ export class PrismaCaseHubRepository implements CaseHubRepository {
       if (rows.length !== ids.length) throw new Error("One or more Case Versions do not exist");
       const versions = rows.map(row => CaseHubCaseVersionSchema.parse(row.payload));
       for (const version of versions) {
-        const caseRow = await transaction.qaseyCaseRecord.findUnique({ where: { applicationId_tenantId_id: { ...owner, id: version.caseId } }, select: { activeVersionId: true } });
-        if (version.status !== "active" || caseRow?.activeVersionId !== version.id) throw new Error(`Case Version ${version.id} is not the active approved version`);
+        const caseRow = await transaction.qaseyCaseRecord.findUnique({ where: { applicationId_tenantId_id: { ...owner, id: version.caseId } }, select: { activeVersionId: true, deletedAt: true } });
+        if (caseRow?.deletedAt || version.status !== "active" || caseRow?.activeVersionId !== version.id) throw new Error(`Case Version ${version.id} is not the active approved version`);
       }
       const timestamp = this.now().toISOString();
       const changeSet = CaseHubChangeSetSchema.parse({
@@ -834,15 +876,12 @@ export class PrismaCaseHubRepository implements CaseHubRepository {
     const statuses: Record<string, CaseAutomationStatus> = {};
     for (const versionId of caseVersionIds) {
       let status: CaseAutomationStatus = "none";
-      const related = changeSets.filter(changeSet => changeSet.caseVersionIds.includes(versionId));
+      const related = changeSets.filter(changeSet => changeSet.caseVersionIds.includes(versionId)).sort(compareChangeSetRecency);
       for (const changeSet of related) {
-        if (["authoring", "verifying", "revising", "final_verifying"].includes(changeSet.status)) { status = "generating"; break; }
         let results = resultsByChangeSet.get(changeSet.id);
         if (!results) { results = await this.listResults(owner, changeSet.id); resultsByChangeSet.set(changeSet.id, results); }
-        const latest = results.filter(result => result.caseVersionId === versionId).at(-1);
-        if (latest?.reviewStatus === "approved" && !["abandoned", "cancelled"].includes(changeSet.status)) { status = "verified"; break; }
-        if (changeSet.status === "awaiting_review" || latest?.reviewStatus === "pending") { status = "awaiting_review"; break; }
-        if (["failed", "blocked_product", "blocked_environment"].includes(changeSet.status) || latest?.executionStatus === "failed" || latest?.reviewStatus === "changes_requested") status = "failed";
+        status = automationStatusForChangeSet(changeSet, latestResultForVersion(results, versionId));
+        if (status !== "none") break;
       }
       statuses[versionId] = status;
     }
@@ -888,7 +927,7 @@ export class PrismaCaseHubRepository implements CaseHubRepository {
     await this.ready();
     const normalized = query.trim();
     const rows = await this.prisma.qaseyCaseRecord.findMany({
-      where: { ...owner, activeVersionId: { not: null }, ...(normalized ? { OR: [{ id: { contains: normalized, mode: "insensitive" } }, { title: { contains: normalized, mode: "insensitive" } }, { suitePath: { contains: normalized, mode: "insensitive" } }] } : {}) },
+      where: { ...owner, deletedAt: null, activeVersionId: { not: null }, ...(normalized ? { OR: [{ id: { contains: normalized, mode: "insensitive" } }, { title: { contains: normalized, mode: "insensitive" } }, { suitePath: { contains: normalized, mode: "insensitive" } }] } : {}) },
       orderBy: { createdAt: "asc" }, select: { payload: true },
     });
     const cases = rows.map(row => CaseHubCaseSchema.parse(row.payload));
@@ -900,8 +939,19 @@ export class PrismaCaseHubRepository implements CaseHubRepository {
   }
   async getCase(owner: OwnerScope, id: string): Promise<CaseHubCase | undefined> {
     await this.ready();
-    const row = await this.prisma.qaseyCaseRecord.findUnique({ where: { applicationId_tenantId_id: { ...owner, id } }, select: { payload: true } });
+    const row = await this.prisma.qaseyCaseRecord.findUnique({ where: { applicationId_tenantId_id: { ...owner, id }, deletedAt: null }, select: { payload: true } });
     return row ? CaseHubCaseSchema.parse(row.payload) : undefined;
+  }
+  async deleteCase(owner: OwnerScope, id: string): Promise<boolean> {
+    await this.ready();
+    const result = await this.prisma.qaseyCaseRecord.updateMany({
+      where: { ...owner, id, activeVersionId: { not: null }, deletedAt: null },
+      data: { deletedAt: this.now() },
+    });
+    if (result.count > 0) return true;
+    return Boolean(await this.prisma.qaseyCaseRecord.findFirst({
+      where: { ...owner, id, deletedAt: { not: null } }, select: { id: true },
+    }));
   }
   async versionsForCase(owner: OwnerScope, caseId: string): Promise<CaseHubCaseVersion[]> {
     await this.ready();
@@ -1099,6 +1149,65 @@ function assertReviewOwner(plan: CaseReviewPlan, actorId: string): void {
   if (plan.status === "cancelled") throw new Error("Cancelled Case Review Plans cannot be changed");
 }
 
+/**
+ * Build the Case Hub read model without changing immutable Case Versions,
+ * Change Sets, or results. `current` is the canonical Case pointer; `history`
+ * keeps the evidence for every previous version intact.
+ */
+export function projectCaseHubDetail(
+  caseRecord: CaseHubCase,
+  versions: CaseHubCaseVersion[],
+  changeSets: CaseHubChangeSet[],
+  results: CaseHubResult[],
+): CaseHubCaseDetail {
+  const orderedVersions = [...versions].sort((left, right) => left.version - right.version || left.id.localeCompare(right.id));
+  const projections = new Map<string, CaseAutomationProjection>();
+  for (const version of orderedVersions) projections.set(version.id, automationProjectionForVersion(version.id, changeSets, results));
+
+  const currentVersionId = caseRecord.activeVersionId;
+  const currentVersion = currentVersionId ? orderedVersions.find(version => version.id === currentVersionId) : undefined;
+  if (!currentVersion) throw new Error(`Case ${caseRecord.id} has no current Case Version`);
+
+  // An unchanged current version without its own E2E result is explicitly
+  // marked stale only when an older version has verified evidence.
+  const currentProjection = projections.get(currentVersion.id)!;
+  if (currentProjection.status === "none" && [...projections.entries()].some(([id, projection]) => id !== currentVersion.id && projection.status === "verified")) {
+    projections.set(currentVersion.id, { status: "stale" });
+  }
+
+  const present = (version: CaseHubCaseVersion): CaseHubCaseVersionPresentation => {
+    const automation = projections.get(version.id)!;
+    return {
+      ...version,
+      isCurrent: version.id === currentVersion.id,
+      automationStatus: automation.status,
+      systemTags: automation.status === "verified" ? ["e2e"] : [],
+      automation,
+    };
+  };
+  const presentedVersions = orderedVersions.map(present);
+  const presentedCurrent = presentedVersions.find(version => version.isCurrent)!;
+  const currentAutomation = projections.get(currentVersion.id)!;
+  const history = presentedVersions.map(version => ({
+    version,
+    changeSets: changeSets.filter(changeSet => changeSet.caseVersionIds.includes(version.id)).sort(compareChangeSetRecency),
+    results: results.filter(result => result.caseVersionId === version.id).sort(compareResultRecency),
+  }));
+
+  return CaseHubCaseDetailSchema.parse({
+    case: {
+      ...caseRecord,
+      automationStatus: currentAutomation.status,
+      systemTags: currentAutomation.status === "verified" ? ["e2e"] : [],
+    },
+    current: { version: presentedCurrent, automation: currentAutomation },
+    history,
+    versions: presentedVersions,
+    changeSets: [...changeSets].sort(compareChangeSetRecency),
+    results: [...results].sort(compareResultRecency),
+  });
+}
+
 export function caseHubVersionToTestCase(version: CaseHubCaseVersion): TestCaseSpec {
   return {
     id: version.caseId,
@@ -1114,6 +1223,57 @@ export function caseHubVersionToTestCase(version: CaseHubCaseVersion): TestCaseS
     tags: version.tags,
     unresolvedQuestions: [],
   };
+}
+
+function automationProjectionForVersion(versionId: string, changeSets: CaseHubChangeSet[], results: CaseHubResult[]): CaseAutomationProjection {
+  for (const changeSet of changeSets.filter(item => item.caseVersionIds.includes(versionId)).sort(compareChangeSetRecency)) {
+    const result = latestResultForVersion(results.filter(item => item.changeSetId === changeSet.id), versionId);
+    const status = automationStatusForChangeSet(changeSet, result);
+    if (status === "none") continue;
+    return {
+      status,
+      changeSetId: changeSet.id,
+      changeSetStatus: changeSet.status,
+      ...(result ? {
+        resultId: result.id,
+        resultAttempt: result.attempt,
+        observedAt: result.reviewedAt ?? result.createdAt,
+      } : {}),
+    };
+  }
+  return { status: "none" };
+}
+
+function automationStatusForChangeSet(changeSet: CaseHubChangeSet, latest: CaseHubResult | undefined): CaseAutomationStatus {
+  // These phases mean a new attempt is in flight. Any stored result belongs
+  // to an earlier attempt and must not reopen E2E generation yet.
+  if (["authoring", "verifying", "revising", "final_verifying"].includes(changeSet.status)) return "generating";
+  // Once a Change Set is awaiting review, its latest result is authoritative
+  // even if the workflow has not yet copied a terminal phase to the Change Set.
+  if (latest?.reviewStatus === "approved" && !["abandoned", "cancelled"].includes(changeSet.status)) return "verified";
+  if (latest?.executionStatus === "failed"
+    || ["changes_requested", "product_bug", "environment_issue"].includes(latest?.reviewStatus ?? "")) return "failed";
+  if (latest?.reviewStatus === "pending") return "awaiting_review";
+  if (changeSet.status === "awaiting_review") return "awaiting_review";
+  if (["failed", "blocked_product", "blocked_environment"].includes(changeSet.status)) return "failed";
+  return "none";
+}
+
+function latestResultForVersion(results: CaseHubResult[], versionId: string): CaseHubResult | undefined {
+  return results.filter(result => result.caseVersionId === versionId).sort(compareResultRecency)[0];
+}
+
+function compareChangeSetRecency(left: CaseHubChangeSet, right: CaseHubChangeSet): number {
+  // `updatedAt` changes when an older run finishes. Current automation means
+  // the newest attempted Change Set, so creation time is the ordering key.
+  return right.createdAt.localeCompare(left.createdAt)
+    || right.id.localeCompare(left.id);
+}
+
+function compareResultRecency(left: CaseHubResult, right: CaseHubResult): number {
+  return right.createdAt.localeCompare(left.createdAt)
+    || right.attempt - left.attempt
+    || right.id.localeCompare(left.id);
 }
 
 const CHANGE_SET_TRANSITIONS: Record<CaseHubChangeSetStatus, readonly CaseHubChangeSetStatus[]> = {

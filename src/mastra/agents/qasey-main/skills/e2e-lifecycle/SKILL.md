@@ -25,10 +25,11 @@ System prompt 已识别的 intent 决定执行 `e2e_generate`、`e2e_rerun`、`e
 
 返回真实 Review Plan ID，并明确用户可以逐条编辑、移除、恢复和批准。
 
-## e2e_generate：从结构化 action 创建 run
+## e2e_generate：复用已批准文字版本创建 run
 
-- 只有运行时提供可信的 `generate_e2e` conversation action 时才执行；普通聊天文本只能引导用户使用 Review UI。
-- 将 action 中的 `planId` 和有序 `caseVersionIds` 原样传给 `case_hub_start_e2e`，不得修改选择。
+- 当前租户已批准文字用例是可跨会话复用的资产。用户在普通聊天明确要求生成或修改自动化时，使用 `case_hub_search_cases`、`case_hub_get_case` 定位现有 activeVersionId，直接调用 `case_hub_start_e2e`（planId 可省略）。不因来自其他会话或已有成功结果而重建文字用例、版本或 Review Plan。
+- 只有新增或实际改变步骤、预期、范围才进入文字审核；测试实现的 locator、等待、结构、视频或报告优化不改变文字版本。
+- 如果有可信 action，将其中的 `planId` 和有序 `caseVersionIds` 原样传给 `case_hub_start_e2e`，不得修改选择。
 - E2E 落地仓库、允许路径、Playwright config、project 与 automationPath 均由部署配置和仓库 Skill 决定，不从文字 Case 或用户文本指定。
 - 单条和批量 action 都创建一个 Run；批量只产生一个 PR。
 - 确定性 lifecycle 负责 sandbox、调用独立的 `qasey-e2e-author`、有限 repair、fresh verifier、artifacts、Draft PR 和逐 Case Review。
@@ -47,6 +48,7 @@ System prompt 已识别的 intent 决定执行 `e2e_generate`、`e2e_rerun`、`e
 
 ## e2e_repair：修复测试实现
 
+- 用 `case_hub_get_case` 找到关联 run；可通过 `conversation_runs` 明确读取当前租户其他会话的 run，但不可读取其他会话消息。通过 `update_e2e_execution` 的 amend 提交实现修改；跨会话或已结束任务会创建归属当前会话的新 run，复用原批准文字版本。
 - 读取失败 run、日志、trace、截图或视频及相关代码，区分产品缺陷、环境问题、locator/等待问题和断言失败。
 - fresh verifier 的断言失败需要先诊断是否来自 locator、等待、数据准备或测试实现；可以在有限预算内修复这些测试问题。
 - 产品缺陷或不可靠环境不得通过弱化断言伪装修复；证据表明不是测试实现问题时保留真实失败，预算耗尽后进入明确的失败结束状态。

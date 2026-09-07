@@ -16,6 +16,47 @@ const sha = "a".repeat(64);
 const baseSha = "b".repeat(40);
 
 describe("E2E coordinator", () => {
+  it("attributes a cross-conversation rerun to its requester while retaining frozen case versions", async () => {
+    const owner = { applicationId: "qasey", tenantId: "tenant-public" };
+    const repository = new InMemoryRunRepository();
+    const runner = fakeRunner([]);
+    const store = artifacts();
+    const coordinator = new E2ECoordinator(repository, store, broker(), { maxRepairs: 2, reviewBaseUrl: "https://qasey.test", codeTasks: { forScope: async () => runner }, authenticationSecrets: authenticationSecrets() });
+    const previous = await coordinator.create(owner, createInput());
+    await freezeRun(coordinator, repository, owner, previous.id);
+    const frozen = await repository.get(owner, previous.id);
+    const patch = await store.savePatch(owner, previous.id, "existing approved automation");
+    await repository.update(owner, previous.id, frozen!.revision, { artifacts: [...frozen!.artifacts, patch] });
+    const rerun = await coordinator.rerun(owner, previous.id, undefined, { sessionId: "requesting-conversation", requestId: "requesting-turn" });
+    expect(rerun).toMatchObject({ sourceSessionId: "requesting-conversation", requestId: "requesting-turn", executionBrief: frozen!.executionBrief, briefHash: frozen!.briefHash });
+    expect(rerun.status).toBe("repairing");
+    expect(rerun.amendments).toEqual([]);
+    expect(rerun.artifacts).toContainEqual(expect.objectContaining({ id: `${rerun.id}:patch` }));
+    expect(store.loadPatch).toHaveBeenCalledWith(owner, previous.id);
+    expect((await repository.get(owner, previous.id))?.sourceSessionId).toBe(previous.sourceSessionId);
+    expect((await repository.events(owner, rerun.id))[0]?.metadata.sourceRunId).toBe(previous.id);
+  });
+
+  it("persists tool activity without requiring an observability callback", async () => {
+    const owner = { applicationId: "qasey", tenantId: "tenant-public" };
+    const repository = new InMemoryRunRepository();
+    const submitted: CodeTaskSpec[] = [];
+    const runner = fakeRunner(submitted);
+    vi.mocked(runner.events).mockImplementation(async taskId => ({ events: [
+      { cursor: "1", taskId, at: "2026-09-06T00:00:00.000Z", type: "check.started", message: "private log", metadata: { checkId: "playwright" } },
+      { cursor: "2", taskId, at: "2026-09-06T00:00:01.000Z", type: "check.completed", message: "private log", metadata: { checkId: "playwright", exitCode: 0 } },
+      completedEvent(taskId, "3"),
+    ] }));
+    const coordinator = new E2ECoordinator(repository, artifacts(), broker(), { maxRepairs: 2, reviewBaseUrl: "https://qasey.test", codeTasks: { forScope: async () => runner }, authenticationSecrets: authenticationSecrets() });
+    const run = await coordinator.create(owner, createInput());
+    await freezeRun(coordinator, repository, owner, run.id);
+    await coordinator.execute(owner, run.id);
+    const activity = (await repository.events(owner, run.id)).filter(event => event.type === "code_task.activity");
+    expect(activity).toHaveLength(4);
+    expect(activity.map(event => (event.metadata.activity as { status: string }).status)).toEqual(["running", "completed", "running", "completed"]);
+    expect(JSON.stringify(activity)).not.toContain("private log");
+  });
+
   it("applies late conversation instructions and re-verifies before publishing", async () => {
     const owner = { applicationId: "qasey", tenantId: "tenant-1" };
     const repository = new InMemoryRunRepository();
@@ -232,6 +273,10 @@ describe("E2E coordinator", () => {
     await coordinator.execute(owner, run.id);
 
     expect(submitted.map(spec => spec.executionProfileId)).toEqual(["web-e2e-author", "web-e2e-verifier"]);
+    const completedTasks = (await repository.events(owner, run.id)).filter(event => event.type === "code_task.completed");
+    expect(completedTasks[0]?.metadata.analysisSummary).toBe("复用了页面对象，断言验证用户可见行为。");
+    expect(completedTasks[1]?.metadata.checks).toEqual([{ id: "playwright", passed: true }]);
+    expect(completedTasks[1]?.metadata).not.toHaveProperty("summary");
     expect((await repository.get(owner, run.id))?.automationPaths).toEqual({ "case-1": "e2e/a.spec.ts" });
     expect(submitted.map(spec => spec.fixedChecks)).toEqual([
       [{ id: "repo-install" }],
@@ -246,6 +291,10 @@ describe("E2E coordinator", () => {
     ]);
     expect(submitted[1]?.attemptId).not.toBe(submitted[0]?.attemptId);
     expect(draftPr.publishChanges).toHaveBeenCalledTimes(1);
+    expect(draftPr.publishChanges).toHaveBeenCalledWith(
+      expect.objectContaining({ id: run.id }), expect.any(Array), expect.any(String),
+      expect.arrayContaining([expect.objectContaining({ id: "playwright", passed: true, exitCode: 0 })]),
+    );
     const release = vi.mocked(runner.release);
     const artifact = vi.mocked(runner.artifact);
     expect(release).toHaveBeenCalledTimes(2);
@@ -287,7 +336,7 @@ describe("E2E coordinator", () => {
       message: "Agent span ended",
       metadata: { mastraTraceEvent: { type: "span_ended" } },
     };
-    runner.events = vi.fn(async () => ({ events: [workerEvent] }));
+    runner.events = vi.fn(async () => ({ events: [workerEvent, completedEvent(workerEvent.taskId, "2")] }));
     const onEvents = vi.fn();
     const coordinator = new E2ECoordinator(repository, artifacts(), broker(), {
       maxRepairs: 2,
@@ -305,7 +354,7 @@ describe("E2E coordinator", () => {
     await coordinator.authorAndPersistPatch(owner, run.id, undefined, { traceContext, onEvents });
 
     expect(submitted[0]?.traceContext).toEqual(traceContext);
-    expect(onEvents).toHaveBeenCalledWith([workerEvent]);
+    expect(onEvents).toHaveBeenCalledWith([workerEvent, completedEvent(workerEvent.taskId, "2")]);
   });
 
   it("retains the attempt when durable artifact persistence fails", async () => {
@@ -416,6 +465,35 @@ describe("E2E coordinator", () => {
     ]));
   });
 
+  it.each([
+    ["authentication setup", { suites: [{ suites: [{ specs: [{ tests: [
+      { status: "unexpected", projectName: "setup", results: [{ status: "failed", errors: [{ message: "Expected: 200; Received: 401" }] }] },
+      { status: "skipped", projectName: "chromium", results: [] },
+    ] }] }] }] }, "authentication_setup"],
+    ["missing report", null, "unclassified"],
+    ["unknown project", { suites: [{ specs: [{ tests: [{ status: "unexpected", projectName: "other" }] }] }] }, "unclassified"],
+  ])("stops %s as an environment blocker without author repair or publication", async (_name, report, failureKind) => {
+    const owner = { applicationId: "qasey", tenantId: "tenant-public" };
+    const repository = new InMemoryRunRepository();
+    const submitted: CodeTaskSpec[] = [];
+    const draftPr = broker();
+    const runner = fakeRunner(submitted, [], undefined, ["failed"], report);
+    const coordinator = new E2ECoordinator(repository, artifacts(), draftPr, {
+      maxRepairs: 2, reviewBaseUrl: "https://qasey.test", codeTasks: { forScope: async () => runner },
+      authenticationSecrets: authenticationSecrets(),
+    });
+    const run = await coordinator.create(owner, createInput());
+    await freezeRun(coordinator, repository, owner, run.id);
+    await coordinator.execute(owner, run.id);
+    expect(submitted.map(spec => spec.executionProfileId)).toEqual(["web-e2e-author", "web-e2e-verifier"]);
+    expect(await repository.get(owner, run.id)).toMatchObject({ status: "failed", error: expect.stringContaining("environment blocker") });
+    expect((await repository.get(owner, run.id))?.statusHistory).not.toContain("repairing");
+    expect((await repository.get(owner, run.id))?.artifacts).toContainEqual(expect.objectContaining({ name: "e2e-results.json" }));
+    expect(await repository.events(owner, run.id)).toContainEqual(expect.objectContaining({ type: "verification.environment_blocked", metadata: expect.objectContaining({ failureKind }) }));
+    expect(runner.release).toHaveBeenCalledWith(`${run.id}:verifier:0`);
+    expect(draftPr.publishChanges).not.toHaveBeenCalled();
+  });
+
   it("repairs a failing clean Playwright verification before exposing QA evidence", async () => {
     const owner = { applicationId: "qasey", tenantId: "tenant-1" };
     const repository = new InMemoryRunRepository();
@@ -439,6 +517,59 @@ describe("E2E coordinator", () => {
     expect(await repository.get(owner, run.id)).toMatchObject({ status: "awaiting_qa" });
     expect(draftPr.publishChanges).toHaveBeenCalledTimes(1);
   });
+
+  it.each(["failed verification", "pending instructions", "publication instructions"] as const)(
+    "waits for verifier cleanup before repairing %s",
+    async trigger => {
+      const owner = { applicationId: "qasey", tenantId: "tenant-1" };
+      const repository = new InMemoryRunRepository();
+      const submitted: CodeTaskSpec[] = [];
+      const runner = fakeRunner(submitted, [], undefined, trigger === "failed verification" ? ["failed", "succeeded"] : []);
+      const released: string[] = [];
+      let finishRelease!: () => void;
+      const releaseGate = new Promise<void>(resolve => { finishRelease = resolve; });
+      let releaseStarted = false;
+      vi.mocked(runner.release).mockImplementation(async taskId => {
+        if (taskId.endsWith(":verifier:0")) {
+          releaseStarted = true;
+          await releaseGate;
+        }
+        released.push(taskId);
+      });
+      let injected = false;
+      const injectOnce = () => {
+        if (injected || !submitted.some(spec => spec.executionProfileId === "web-e2e-verifier")) return false;
+        injected = true;
+        return true;
+      };
+      const coordinator = new E2ECoordinator(repository, artifacts(), broker(), {
+        maxRepairs: 2, reviewBaseUrl: "https://qasey.test",
+        codeTasks: { forScope: async () => runner },
+        authenticationSecrets: authenticationSecrets(),
+        instructions: {
+          take: async () => [],
+          applied: async () => undefined,
+          pending: async () => trigger === "pending instructions" && injectOnce(),
+          sealForReview: async () => !(trigger === "publication instructions" && injectOnce()),
+        },
+      });
+      const run = await coordinator.create(owner, createInput());
+      await freezeRun(coordinator, repository, owner, run.id);
+      const execution = coordinator.execute(owner, run.id);
+      try {
+        await vi.waitFor(() => expect(releaseStarted).toBe(true));
+        expect(submitted.map(spec => spec.executionProfileId)).toEqual(["web-e2e-author", "web-e2e-verifier"]);
+      } finally {
+        finishRelease();
+        await execution;
+      }
+      expect(submitted.map(spec => spec.executionProfileId)).toEqual([
+        "web-e2e-author", "web-e2e-verifier", "web-e2e-repair", "web-e2e-verifier",
+      ]);
+      expect(released).toEqual(submitted.map(spec => spec.taskId));
+      expect(await repository.get(owner, run.id)).toMatchObject({ status: "awaiting_qa" });
+    },
+  );
 
   it("ends as failed after the bounded clean-verifier repair budget is exhausted", async () => {
     const owner = { applicationId: "qasey", tenantId: "tenant-1" };
@@ -547,15 +678,21 @@ function broker(): DraftPrBroker {
   };
 }
 
+function completedEvent(taskId: string, cursor = "1") {
+  return { cursor, taskId, at: "2026-09-06T00:00:02.000Z", type: "task.completed", message: "Code task completed", metadata: {} };
+}
+
 function fakeRunner(
   submitted: CodeTaskSpec[],
   submittedSecrets: Array<Readonly<Record<string, string>> | undefined> = [],
   patchContents = ["diff --git a/e2e/a.spec.ts b/e2e/a.spec.ts"],
   verifierStatuses: Array<"succeeded" | "failed"> = [],
+  verifierReport: unknown = { suites: [{ specs: [{ tests: [{ status: "unexpected", projectName: "chromium" }] }] }] },
 ): CodeTaskRunner {
   const specs = new Map<string, CodeTaskSpec>();
   const patchRef = ref("sandbox-patch", "patch", "changes.patch", "sandbox://changes.patch");
   const contentRef = ref("sandbox-content", "report", "a.spec.ts", "sandbox://a.spec.ts");
+  const reportRef: ArtifactRef = { ...ref("sandbox-playwright-json", "report", "e2e-results.json", "sandbox://e2e-results.json"), contentType: "application/json" };
   let patchReadIndex = 0;
   let verifierReadIndex = 0;
   return {
@@ -565,13 +702,19 @@ function fakeRunner(
       specs.set(spec.taskId, spec);
       return { taskId: spec.taskId, attemptId: spec.attemptId, status: "succeeded" as const };
     }),
-    events: vi.fn(async () => ({ events: [] })),
+    // submit resolves an already completed fake task, so its event journal must
+    // include the terminal marker emitted by the real worker's finish().
+    events: vi.fn(async (taskId, after) => ({
+      events: after ? [] : [completedEvent(taskId)],
+      nextCursor: after ?? "1",
+    })),
     get: vi.fn(async taskId => {
       const spec = specs.get(taskId)!;
       const verifier = spec.executionProfileId === "web-e2e-verifier";
       const status = verifier ? verifierStatuses[Math.min(verifierReadIndex++, verifierStatuses.length - 1)] ?? "succeeded" : "succeeded";
       const result: CodeTaskResult = {
         status,
+        ...(!verifier ? { analysisSummary: "复用了页面对象，断言验证用户可见行为。" } : {}),
         summary: verifier ? status === "succeeded" ? "verified" : "Playwright assertion failed: expected element to be in viewport" : "authored",
         changedPaths: ["e2e/a.spec.ts"],
         changes: verifier ? [{
@@ -581,8 +724,8 @@ function fakeRunner(
           contentRef,
         }] : [],
         ...(verifier ? {} : { patchRef }),
-        checks: verifier ? [{ id: "playwright", passed: status === "succeeded", exitCode: status === "succeeded" ? 0 : 1, summary: status === "succeeded" ? "passed" : "assertion failed", durationMs: 42, artifacts: [] }] : [],
-        artifacts: [],
+        checks: verifier ? [{ id: "playwright", passed: status === "succeeded", exitCode: status === "succeeded" ? 0 : 1, summary: status === "succeeded" ? "passed" : "assertion failed", durationMs: 42, artifacts: status === "failed" ? [reportRef] : [] }] : [],
+        artifacts: verifier && status === "failed" ? [reportRef] : [],
         provenance: {
           imageDigest: "local-development",
           profileHash: sha,
@@ -605,7 +748,7 @@ function fakeRunner(
     release: vi.fn(async () => undefined),
     artifact: vi.fn(async artifact => Buffer.from(artifact.id === patchRef.id
       ? patchContents[Math.min(patchReadIndex++, patchContents.length - 1)]!
-      : "test('flow', async () => {});")),
+      : artifact.id === reportRef.id ? JSON.stringify(verifierReport) : "test('flow', async () => {});")),
   };
 }
 

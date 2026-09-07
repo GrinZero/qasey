@@ -468,6 +468,19 @@ export const CaseReviewItemStatusSchema = z.enum(["pending", "approved", "remove
 export const CaseAutomationStatusSchema = z.enum(["none", "generating", "awaiting_review", "verified", "failed", "stale"]);
 export type CaseAutomationStatus = z.infer<typeof CaseAutomationStatusSchema>;
 
+// This is a read model. It records which immutable execution evidence produced
+// a status, so a historical failed version cannot be presented as the status of
+// the current Case version.
+export const CaseAutomationProjectionSchema = z.object({
+  status: CaseAutomationStatusSchema,
+  changeSetId: z.string().uuid().optional(),
+  changeSetStatus: CaseHubChangeSetStatusSchema.optional(),
+  resultId: z.string().uuid().optional(),
+  resultAttempt: z.number().int().positive().optional(),
+  observedAt: z.iso.datetime().optional(),
+}).strict();
+export type CaseAutomationProjection = z.infer<typeof CaseAutomationProjectionSchema>;
+
 export const CaseReviewContentSchema = z.object({
   operation: z.enum(["create", "update"]),
   caseId: CaseHubCaseIdSchema.optional(),
@@ -669,6 +682,47 @@ export const CaseHubResultReviewInputSchema = z.object({
   }
 });
 
+export const CaseHubCaseVersionPresentationSchema = CaseHubCaseVersionSchema.extend({
+  isCurrent: z.boolean(),
+  automation: CaseAutomationProjectionSchema,
+}).strict();
+export type CaseHubCaseVersionPresentation = z.infer<typeof CaseHubCaseVersionPresentationSchema>;
+
+export const CaseHubCaseHistoryEntrySchema = z.object({
+  version: CaseHubCaseVersionPresentationSchema,
+  changeSets: z.array(CaseHubChangeSetSchema),
+  results: z.array(CaseHubResultSchema),
+}).strict();
+export type CaseHubCaseHistoryEntry = z.infer<typeof CaseHubCaseHistoryEntrySchema>;
+
+export const CaseHubCaseDetailSchema = z.object({
+  case: CaseHubCaseSchema,
+  current: z.object({
+    version: CaseHubCaseVersionPresentationSchema,
+    automation: CaseAutomationProjectionSchema,
+  }).strict(),
+  history: z.array(CaseHubCaseHistoryEntrySchema),
+  // Kept during the UI migration. These are the same immutable records that
+  // appear under history, rather than a collapsed "latest" status.
+  versions: z.array(CaseHubCaseVersionPresentationSchema),
+  changeSets: z.array(CaseHubChangeSetSchema),
+  results: z.array(CaseHubResultSchema),
+}).strict();
+export type CaseHubCaseDetail = z.infer<typeof CaseHubCaseDetailSchema>;
+
+export const CaseReviewItemPresentationSchema = CaseReviewItemSchema.extend({
+  isCurrentCaseVersion: z.boolean().optional(),
+  currentCaseVersionId: z.string().uuid().optional(),
+  currentCaseVersion: z.number().int().positive().optional(),
+  currentAutomation: CaseAutomationProjectionSchema.optional(),
+}).strict();
+export type CaseReviewItemPresentation = z.infer<typeof CaseReviewItemPresentationSchema>;
+
+export const CaseReviewPlanPresentationSchema = CaseReviewPlanDetailSchema.extend({
+  items: z.array(CaseReviewItemPresentationSchema),
+}).strict();
+export type CaseReviewPlanPresentation = z.infer<typeof CaseReviewPlanPresentationSchema>;
+
 export const CodeTaskKindSchema = z.enum(["author", "repair", "review", "migration-author"]);
 export const CodeTaskStatusSchema = z.enum([
   "queued", "running", "cancel_requested", "succeeded", "failed", "cancelled", "lost",
@@ -801,6 +855,7 @@ export const CodeTaskProvenanceSchema = z.object({
 export const CodeTaskResultSchema = z.object({
   status: z.enum(["succeeded", "failed", "cancelled", "lost"]),
   summary: z.string(),
+  analysisSummary: z.string().max(8000).optional(),
   changedPaths: z.array(z.string()),
   changes: z.array(CodeTaskChangeSchema).default([]),
   patchRef: ArtifactRefSchema.optional(),

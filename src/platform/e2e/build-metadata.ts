@@ -48,9 +48,15 @@ export function resolveGitSourceSha(projectRoot: string): string | undefined {
   if (SourceShaSchema.safeParse(head).success) return head;
   if (!head.startsWith("ref: ")) return undefined;
   const reference = head.slice("ref: ".length);
-  const loose = readTrimmed(resolve(gitDirectory, reference));
+  // Linked worktrees keep HEAD locally but share branch refs with the main
+  // repository. A relative commondir is relative to this worktree's gitdir.
+  const commonDirectory = readTrimmed(resolve(gitDirectory, "commondir"));
+  const worktreeReference = /^(?:refs\/(?:bisect|worktree|rewritten)\/)/u.test(reference);
+  const referenceDirectory = commonDirectory && !worktreeReference
+    ? resolve(gitDirectory, commonDirectory) : gitDirectory;
+  const loose = readTrimmed(resolve(referenceDirectory, reference));
   if (loose && SourceShaSchema.safeParse(loose).success) return loose;
-  return shaFromPackedRefs(gitDirectory, reference);
+  return shaFromPackedRefs(referenceDirectory, reference);
 }
 
 export function buildMetadataPath(projectRoot: string): string {

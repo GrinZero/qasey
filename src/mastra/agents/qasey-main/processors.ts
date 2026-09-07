@@ -6,6 +6,8 @@ import {
   ToolSearchProcessor,
 } from "@mastra/core/processors";
 import type { Processor, ProcessInputStepArgs, ProcessInputStepResult } from "@mastra/core/processors";
+import { UserMemoryProcessor } from "../../applications/qasey/user-memory.ts";
+import { userMemoryService } from "./user-memory-runtime.ts";
 import {
   config,
   getRuntimeContext,
@@ -147,6 +149,7 @@ export async function resolveQaseyMainInputProcessors({
     .map(([toolName]) => toolName);
   return [
     new RequireQaseyRequestContextProcessor(),
+    new UserMemoryProcessor(userMemoryService),
     new ToolSearchProcessor({
       tools: searchableTools,
       storage: "context",

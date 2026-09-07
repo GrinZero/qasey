@@ -1,9 +1,12 @@
+import { cancelReviewChangeSet } from "./review-cancellation.ts";
 import { ConversationAddressSchema } from "../../../../packages/contracts/src/index.ts";
 import { InvalidConversationRecipientError, publicSnapshot, sharedContext } from "../../../../packages/domain/src/collaboration-repository.ts";
 import { collaborationRepository } from "../../runtime.ts";
 import { acceptCollaborationMessage, attachConversationRuns } from "./collaboration.ts";
 import { collaborationUIMessages } from "./collaboration-view.ts";
 import { e2eTaskFromTurn, reviewPlanTasks } from "./e2e-task-links.ts";
+import { conversationRunFromToolResult } from "./conversation-run-links.ts";
+import { artifactContentDisposition } from "./artifact-headers.ts";
 import { registerApiRoute } from "@mastra/core/server";
 import { RequestContext } from "@mastra/core/request-context";
 import "playwright-core";
@@ -12,10 +15,10 @@ import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, resolve, sep } from "node:path";
 import { z } from "zod";
-import { ApproveCaseReviewItemsSchema, CaseHubResultReviewInputSchema, CaseReviewItemRevisionSchema, GenerateE2EConversationActionSchema, UpdateCaseReviewItemSchema, type CaseHubChangeSet, type CaseHubResult, type CaseReviewPlanDetail, type GenerateE2EConversationAction, type OwnerScope, type QaseyConversationEvent } from "../../../../packages/contracts/src/index.ts";
-import { CaseReviewForbiddenError, CaseReviewRevisionConflictError, ConversationBusyError, ConversationTurnClosedError, normalizeJiraWebhook } from "../../../../packages/domain/src/index.ts";
+import { ApproveCaseReviewItemsSchema, CaseHubResultReviewInputSchema, CaseReviewItemRevisionSchema, CaseReviewPlanPresentationSchema, GenerateE2EConversationActionSchema, UpdateCaseReviewItemSchema, type CaseHubChangeSet, type CaseHubResult, type CaseReviewPlanDetail, type CaseReviewPlanPresentation, type GenerateE2EConversationAction, type OwnerScope, type QaseyConversationEvent } from "../../../../packages/contracts/src/index.ts";
+import { CaseReviewForbiddenError, CaseReviewRevisionConflictError, ConversationBusyError, ConversationTurnClosedError, normalizeJiraWebhook, projectCaseHubDetail } from "../../../../packages/domain/src/index.ts";
 import { artifactStore, caseHubRepository, channelDeliveryInbox, config, conversationRepository, e2eFixtureLeaseService, e2ePreflight, githubClient, jiraClient, runRepository, sandboxPoolClient } from "../../runtime.ts";
-import { ArtifactNotFoundError, ArtifactOwnershipError } from "../../../../packages/e2e/src/index.ts";
+import { ArtifactNotFoundError, ArtifactOwnershipError, ArtifactRangeNotSatisfiableError, parseArtifactByteRange, type ArtifactByteRange } from "../../../../packages/e2e/src/index.ts";
 import { cancelE2ERun, dispatchE2ERepair, rerunE2E, resumeE2EWithVerdict } from "../../workflows/e2e-workflow.ts";
 import { ownerScopeFromRequestContext } from "../../../platform/context/owner-scope.ts";
 import type { OwnedApiRoute, PrimitiveAccessPolicy } from "../../../runtime/application.ts";
@@ -28,6 +31,7 @@ import { runtimeReadiness } from "../../../platform/storage/readiness.ts";
 import { productionSignals } from "../../../platform/observability/production-signals.ts";
 import { devRuntimeTunnelServerEnabled } from "../../../../packages/adapters/src/config.ts";
 import { webE2EConfigurationFromSkill } from "../../../platform/code-task/e2e-repository-skill.ts";
+import { resultEvidenceTimeline } from "./evidence-timeline.ts";
 import { traceViewerContentType, traceViewerRelativePath } from "../../../platform/e2e/trace-viewer.ts";
 import { conversationEventStreamResponse, conversationTurnsToUIMessages } from "./ui-message.ts";
 import { publicToolCallPresentation, publicToolResultPresentation } from "./slack-progress.ts";
@@ -81,17 +85,39 @@ function reviewMutationError(error: unknown): { body: Record<string, unknown>; s
   return { body: { error: "case_review_failed", ...errorBody(error, crypto.randomUUID()) }, status: 409 };
 }
 
-async function decorateReviewPlan(ownerScope: OwnerScope, detail: CaseReviewPlanDetail): Promise<CaseReviewPlanDetail> {
+async function decorateReviewPlan(ownerScope: OwnerScope, detail: CaseReviewPlanDetail): Promise<CaseReviewPlanPresentation> {
   const versionIds = detail.items.flatMap(item => item.publishedCaseVersionId ? [item.publishedCaseVersionId] : []);
-  const statuses = await caseHubRepository.automationStatuses(ownerScope, versionIds);
-  return {
+  const caseIds = [...new Set(detail.items.flatMap(item => item.publishedCaseId ? [item.publishedCaseId] : []))];
+  const cases = await Promise.all(caseIds.map(caseId => caseHubRepository.getCase(ownerScope, caseId)));
+  const currentVersions = cases.flatMap(item => item?.activeVersionId ? [item.activeVersionId] : []);
+  const [historicalStatuses, currentStatuses, versionsByCase] = await Promise.all([
+    caseHubRepository.automationStatuses(ownerScope, versionIds),
+    caseHubRepository.automationStatuses(ownerScope, currentVersions),
+    Promise.all(caseIds.map(async caseId => [caseId, await caseHubRepository.versionsForCase(ownerScope, caseId)] as const)),
+  ]);
+  const currentByCase = new Map(cases.flatMap(item => item?.activeVersionId ? [[item.id, item.activeVersionId] as const] : []));
+  const versionById = new Map(versionsByCase.flatMap(([, versions]) => versions.map(version => [version.id, version] as const)));
+  return CaseReviewPlanPresentationSchema.parse({
     ...detail,
     ...(detail.editable ? { e2eTasks: await reviewPlanTasks(conversationRepository, ownerScope, detail.plan.subjectId, detail.plan.conversationId, detail.plan.id) } : {}),
     items: detail.items.map(item => {
-      const automationStatus = item.publishedCaseVersionId ? statuses[item.publishedCaseVersionId] ?? "none" : "none";
-      return { ...item, automationStatus, systemTags: automationStatus === "verified" ? ["e2e"] : [] };
+      const automationStatus = item.publishedCaseVersionId ? historicalStatuses[item.publishedCaseVersionId] ?? "none" : "none";
+      const currentCaseVersionId = item.publishedCaseId ? currentByCase.get(item.publishedCaseId) : undefined;
+      const currentVersion = currentCaseVersionId ? versionById.get(currentCaseVersionId) : undefined;
+      const currentAutomationStatus = currentCaseVersionId ? currentStatuses[currentCaseVersionId] ?? "none" : undefined;
+      return {
+        ...item,
+        automationStatus,
+        systemTags: automationStatus === "verified" ? ["e2e"] : [],
+        ...(currentCaseVersionId ? {
+          isCurrentCaseVersion: currentCaseVersionId === item.publishedCaseVersionId,
+          currentCaseVersionId,
+          currentCaseVersion: currentVersion?.version,
+          currentAutomation: { status: currentAutomationStatus },
+        } : {}),
+      };
     }),
-  };
+  });
 }
 
 function sseHeaders(): Record<string, string> {
@@ -176,7 +202,7 @@ export async function executeConversationTurn(input: {
   });
   if (input.agentId) requestContext.set("qasey-conversation-agent", input.agentId);
   if (input.action) requestContext.set("qasey-conversation-action", input.action);
-  let linkedRunId: string | undefined;
+  const linkedRunIds = new Set<string>();
   const append = (type: Parameters<typeof conversationRepository.appendEvent>[4], payload?: Record<string, unknown>) =>
     conversationRepository.appendEvent(input.owner, input.principal.subjectId, input.conversationId, input.turnId, type, payload);
   try {
@@ -233,13 +259,14 @@ export async function executeConversationTurn(input: {
               const summary = linkedReviewPlanFromToolResult(event.result);
               if (summary) await append("review-plan.linked", summary);
             }
-            if (event.toolName === "case_hub_start_e2e" && !event.isError) {
-              const runId = linkedRunIdFromToolResult(event.result);
-              if (runId && runId !== linkedRunId) {
-                linkedRunId = runId;
-                await append("run.linked", { runId });
-                await input.onLinkedRun?.(runId);
-              }
+            const runId = await conversationRunFromToolResult({
+              toolName: event.toolName, result: event.result, args: event.args, isError: event.isError,
+              owner: input.owner, conversationId: input.conversationId, repository: runRepository,
+            });
+            if (runId && !linkedRunIds.has(runId)) {
+              await append("run.linked", { runId });
+              await input.onLinkedRun?.(runId);
+              linkedRunIds.add(runId);
             }
           }
         },
@@ -274,14 +301,6 @@ function linkedReviewPlanFromToolResult(result: unknown): Record<string, unknown
     return value;
   }, { pendingCount: 0, approvedCount: 0, removedCount: 0 });
   return { planId: plan.id, revision: plan.revision, status: plan.status, ...counts };
-}
-
-function linkedRunIdFromToolResult(result: unknown): string | undefined {
-  if (!result || typeof result !== "object") return undefined;
-  const run = (result as { run?: unknown }).run;
-  if (!run || typeof run !== "object") return undefined;
-  const id = (run as { id?: unknown }).id;
-  return typeof id === "string" && z.uuid().safeParse(id).success ? id : undefined;
 }
 
 function sandboxScope(c: { get(key: "requestContext"): import("@mastra/core/request-context").RequestContext; req: { param(name: string): string } }) {
@@ -722,6 +741,23 @@ export const apiRoutes = [
         if (new Set(parsed.data.caseVersionIds).size !== parsed.data.caseVersionIds.length || parsed.data.caseVersionIds.some(id => !approved.has(id))) {
           return c.json({ error: "invalid_case_versions", message: "只能生成本计划中已批准的精确文字用例版本。" }, 409);
         }
+        const selectedCases = await Promise.all(parsed.data.caseVersionIds.map(async caseVersionId => {
+          const caseId = approved.get(caseVersionId)!;
+          return { caseId, caseVersionId, caseRecord: await caseHubRepository.getCase(ownerScope, caseId) };
+        }));
+        const superseded = selectedCases.filter(item => item.caseRecord?.activeVersionId !== item.caseVersionId);
+        if (superseded.length) {
+          const current = await Promise.all(superseded.map(async item => {
+            const version = item.caseRecord?.activeVersionId
+              ? (await caseHubRepository.versionsForCase(ownerScope, item.caseId)).find(candidate => candidate.id === item.caseRecord?.activeVersionId)
+              : undefined;
+            return `${item.caseId} 已更新为 ${version ? `v${version.version}` : "当前版本"}`;
+          }));
+          return c.json({
+            error: "superseded_case_versions",
+            message: `所选版本属于历史审核记录，不能重复生成 E2E。${current.join("；")}。请从当前版本启动自动化。`,
+          }, 409);
+        }
         const message = `为已批准的文字用例 ${parsed.data.caseVersionIds.map(id => approved.get(id)).join("、")} 生成 E2E 自动化。`;
         const cases = await Promise.all(parsed.data.caseVersionIds.map(async caseVersionId => {
           const caseId = approved.get(caseVersionId)!;
@@ -824,6 +860,23 @@ export const apiRoutes = [
       return detail ? c.json(await decorateReviewPlan(owner(c), detail)) : c.json({ error: "not_found" }, 404);
     },
   }),
+  registerApiRoute("/v1/case-hub/review-plans/:planId/cancel", {
+    method: "POST",
+    handler: async c => {
+      const parsed = CaseReviewItemRevisionSchema.safeParse(await c.req.json());
+      if (!parsed.success) return c.json({ error: "validation_error" }, 400);
+      const subjectId = conversationSubject(c);
+      const scope = owner(c);
+      const detail = await caseHubRepository.getReviewPlan(scope, c.req.param("planId"), subjectId);
+      if (!detail) return c.json({ error: "not_found" }, 404);
+      if (detail.plan.subjectId !== subjectId || detail.plan.createdBy !== subjectId) return c.json({ error: "case_review_forbidden" }, 403);
+      const tasks = await reviewPlanTasks(conversationRepository, scope, subjectId, detail.plan.conversationId, detail.plan.id);
+      if (tasks.some(task => task.status === "running")) return c.json({ error: "review_plan_running", message: "Agent 仍在处理中，请在原会话停止执行后再结束审核。" }, 409);
+      try {
+        return c.json(await caseHubRepository.cancelReviewPlan(scope, detail.plan.id, subjectId, parsed.data.expectedRevision));
+      } catch (error) { const failure = reviewMutationError(error); return c.json(failure.body, failure.status); }
+    },
+  }),
   registerApiRoute("/v1/case-hub/review-plans/:planId/items/:itemId", {
     method: "PATCH",
     handler: async c => {
@@ -873,22 +926,23 @@ export const apiRoutes = [
     handler: async c => c.json({ cases: await caseHubRepository.listCases(owner(c), c.req.query("q") ?? "") }),
   }),
   registerApiRoute("/v1/case-hub/cases/:caseId", {
+    method: "DELETE",
+    handler: async c => {
+      const deleted = await caseHubRepository.deleteCase(owner(c), c.req.param("caseId"));
+      return deleted ? c.json({ deleted: true }) : c.json({ error: "not_found" }, 404);
+    },
+  }),
+  registerApiRoute("/v1/case-hub/cases/:caseId", {
     method: "GET",
     handler: async c => {
       const caseRecord = await caseHubRepository.getCase(owner(c), c.req.param("caseId"));
       if (!caseRecord?.activeVersionId) return c.json({ error: "not_found" }, 404);
-      const versions = (await caseHubRepository.versionsForCase(owner(c), caseRecord.id))
-        .filter(version => version.status === "active");
-      const automationStatuses = await caseHubRepository.automationStatuses(owner(c), versions.map(version => version.id));
-      const decoratedVersions = versions.map(version => ({
-        ...version, automationStatus: automationStatuses[version.id] ?? "none",
-        systemTags: automationStatuses[version.id] === "verified" ? ["e2e" as const] : [],
-      }));
+      const versions = await caseHubRepository.versionsForCase(owner(c), caseRecord.id);
       const versionIds = new Set(versions.map(version => version.id));
       const changeSets = (await caseHubRepository.listChangeSets(owner(c), 500))
         .filter(changeSet => changeSet.caseVersionIds.some(versionId => versionIds.has(versionId)));
       const results = (await Promise.all(changeSets.map(changeSet => caseHubRepository.listResults(owner(c), changeSet.id)))).flat();
-      return c.json({ case: caseRecord, versions: decoratedVersions, changeSets, results });
+      return c.json(projectCaseHubDetail(caseRecord, versions, changeSets, results));
     },
   }),
   registerApiRoute("/v1/case-hub/change-sets", {
@@ -909,6 +963,16 @@ export const apiRoutes = [
       message: "先在当前 AI session 创建并批准文字用例 Review Plan，再通过 conversation action 生成 E2E。",
     }, 409),
   }),
+  registerApiRoute("/v1/case-hub/change-sets/:changeSetId/cancel", {
+    method: "POST",
+    handler: async c => {
+      try {
+        const changeSet = await cancelReviewChangeSet(caseHubRepository, runRepository, owner(c), c.req.param("changeSetId"),
+          runId => cancelE2ERun(c.get("mastra"), owner(c), runId));
+        return changeSet ? c.json(changeSet) : c.json({ error: "not_found" }, 404);
+      } catch (error) { return c.json({ error: "cancel_verification_failed", ...errorBody(error, crypto.randomUUID()) }, 409); }
+    },
+  }),
   registerApiRoute("/v1/case-hub/change-sets/:changeSetId", {
     method: "GET",
     handler: async c => {
@@ -919,6 +983,14 @@ export const apiRoutes = [
         caseHubRepository.listResults(owner(c), changeSet.id),
       ]);
       return c.json({ changeSet, versions, results });
+    },
+  }),
+  registerApiRoute("/v1/case-hub/results/:resultId/evidence-timeline", {
+    method: "GET",
+    handler: async c => {
+      const timeline = await resultEvidenceTimeline(caseHubRepository, artifactStore, owner(c), c.req.param("resultId"));
+      c.header("cache-control", "private, no-store");
+      return timeline ? c.json(timeline) : c.json({ error: "not_found" }, 404);
     },
   }),
   registerApiRoute("/v1/case-hub/results/:resultId/review", {
@@ -1033,14 +1105,38 @@ export const apiRoutes = [
       const artifact = run?.artifacts.find(item => item.id === c.req.param("artifactId"));
       if (!artifact) return c.json({ error: "not_found" }, 404);
       try {
-        const content = await artifactStore.open(owner(c), artifact);
+        const artifactOwner = owner(c);
+        const size = await artifactStore.size(artifactOwner, artifact);
+        const rangeHeader = c.req.header("range");
+        let range: ArtifactByteRange | undefined;
+        try {
+          range = rangeHeader ? parseArtifactByteRange(rangeHeader, size) : undefined;
+        } catch (error) {
+          if (!(error instanceof ArtifactRangeNotSatisfiableError)) throw error;
+          c.header("accept-ranges", "bytes");
+          c.header("content-range", `bytes */${error.size}`);
+          return c.body("", 416);
+        }
+        const content = range
+          ? await artifactStore.open(artifactOwner, artifact, range)
+          : await artifactStore.open(artifactOwner, artifact);
         c.header("content-type", artifact.contentType ?? (artifact.kind === "trace" && /trace\.zip$/iu.test(artifact.name) ? "application/zip" : "application/octet-stream"));
-        c.header("content-disposition", `inline; filename="${artifact.name.replace(/["\\]/g, "_")}"`);
+        c.header("content-disposition", artifactContentDisposition(artifact.name));
+        c.header("accept-ranges", "bytes");
         if (content.contentLength !== undefined) c.header("content-length", String(content.contentLength));
+        if (range) {
+          c.header("content-range", `bytes ${range.start}-${range.end}/${size}`);
+          return c.body(content.body, 206);
+        }
         return c.body(content.body);
       } catch (error) {
         if (error instanceof ArtifactOwnershipError) return c.json({ error: "forbidden" }, 403);
         if (error instanceof ArtifactNotFoundError) return c.json({ error: "not_found" }, 404);
+        if (error instanceof ArtifactRangeNotSatisfiableError) {
+          c.header("accept-ranges", "bytes");
+          c.header("content-range", `bytes */${error.size}`);
+          return c.body("", 416);
+        }
         throw error;
       }
     },
@@ -1250,8 +1346,10 @@ const routePolicies: Record<string, { id: string; access: PrimitiveAccessPolicy;
   "GET /v1/case-hub/runs": { id: "run-list", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
   "POST /v1/case-hub/runs": { id: "run-create", access: { permission: "qasey.runs.write", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/case-hub/cases": { id: "case-list", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
+  "DELETE /v1/case-hub/cases/:caseId": { id: "case-delete", access: { permission: "qasey.cases.write", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/case-hub/cases/:caseId": { id: "case-read", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/case-hub/review-plans": { id: "case-review-plan-list", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api"] } },
+  "POST /v1/case-hub/review-plans/:planId/cancel": { id: "case-review-plan-cancel", access: { permission: "qasey.cases.write", audiences: ["admin-ui", "api"] } },
   "GET /v1/case-hub/review-plans/:planId": { id: "case-review-plan-read", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api"] } },
   "PATCH /v1/case-hub/review-plans/:planId/items/:itemId": { id: "case-review-item-update", access: { permission: "qasey.cases.write", audiences: ["admin-ui", "api"] } },
   "POST /v1/case-hub/review-plans/:planId/items/:itemId/remove": { id: "case-review-item-remove", access: { permission: "qasey.cases.write", audiences: ["admin-ui", "api"] } },
@@ -1261,10 +1359,12 @@ const routePolicies: Record<string, { id: string; access: PrimitiveAccessPolicy;
   "GET /v1/case-hub/change-sets": { id: "change-set-list", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/case-hub/preflight": { id: "e2e-preflight", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
   "POST /v1/case-hub/change-sets": { id: "change-set-create", access: { permission: "qasey.cases.write", audiences: ["admin-ui", "api", "service"] } },
+  "POST /v1/case-hub/change-sets/:changeSetId/cancel": { id: "change-set-cancel", access: { permission: "qasey.cases.write", audiences: ["admin-ui", "api"] } },
   "GET /v1/case-hub/change-sets/:changeSetId": { id: "change-set-read", access: { permission: "qasey.cases.read", audiences: ["admin-ui", "api", "service"] } },
   "POST /v1/case-hub/results/:resultId/review": { id: "case-result-review", access: { permission: "qasey.results.approve", audiences: ["admin-ui", "api"] } },
   "GET /v1/case-hub/runs/:runId": { id: "run-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/case-hub/runs/:runId/events": { id: "run-events-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
+  "GET /v1/case-hub/results/:resultId/evidence-timeline": { id: "case-result-evidence-timeline", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api"] } },
   "GET /v1/case-hub/trace-viewer/*": { id: "trace-viewer-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api"] } },
   "GET /v1/case-hub/runs/:runId/artifacts": { id: "run-artifacts-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },
   "GET /v1/case-hub/runs/:runId/artifacts/:artifactId": { id: "run-artifact-read", access: { permission: "qasey.runs.read", audiences: ["admin-ui", "api", "service"] } },

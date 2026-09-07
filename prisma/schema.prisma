@@ -58,6 +58,7 @@ model QaseyCaseRecord {
   suitePath     String   @map("suite_path")
   title         String
   activeVersionId String? @map("active_version_id") @db.Uuid
+  deletedAt     DateTime? @map("deleted_at")
   payload       Json
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")

@@ -22,7 +22,7 @@ services:
     environment:
       NODE_ENV: development
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       QASEY_CODE_AGENT_MODEL: ${QASEY_CODE_AGENT_MODEL:-gpt-5.6-sol}
       QASEY_DATA_ROOT: /app/.qasey/data
       QASEY_SANDBOX_CONTROL_KEY: ${QASEY_SANDBOX_CONTROL_KEY:-local-compose-sandbox-control-key-000000000001}
@@ -73,7 +73,7 @@ services:
       REDIS_PORT: 6379
       QASEY_USE_REDIS_DURABILITY: ${QASEY_USE_REDIS_DURABILITY:-false}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       QASEY_MEMORY_MODEL: ${QASEY_MEMORY_MODEL:-gpt-5.6-luna}
       QASEY_MAIN_MODEL: ${QASEY_MAIN_MODEL:-gpt-5.6-sol}
       QASEY_CODE_AGENT_MODEL: ${QASEY_CODE_AGENT_MODEL:-gpt-5.6-sol}

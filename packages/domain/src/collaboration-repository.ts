@@ -81,7 +81,7 @@ export class CollaborationRepository {
   async send(scope: CollaborationScope, input: {
     id: string; text: string; recipients?: string[]; principal: Record<string, unknown>; context: string;
     runId?: string; action?: Record<string, unknown>; turnId?: string;
-  }): Promise<string[]> {
+  }, options: { authorizedRunId?: string } = {}): Promise<string[]> {
     return this.change(scope, state => {
       const prior = state.messages.find(message => message.id === input.id);
       if (prior) return state.deliveries.filter(delivery => delivery.messageId === input.id).map(delivery => delivery.id);
@@ -89,7 +89,7 @@ export class CollaborationRepository {
       if (!recipients.length || recipients.some(id => !state.participants.some(p => p.agentId === id))) {
         throw new InvalidConversationRecipientError("只能 @ 已加入当前会话的 Agent。");
       }
-      if (input.runId && !state.runs.some(run => run.runId === input.runId)) throw new InvalidConversationRecipientError("指定运行不属于当前会话。");
+      if (input.runId && options.authorizedRunId !== input.runId && !state.runs.some(run => run.runId === input.runId)) throw new InvalidConversationRecipientError("指定运行不属于当前会话。");
       const createdAt = new Date().toISOString();
       state.messages.push({ id: input.id, text: input.text, recipientAgentIds: recipients, role: "user", kind: "message", status: "completed", createdAt, rootMessageId: input.id, ...(input.runId ? { runId: input.runId } : {}) });
       return recipients.map(agentId => enqueue(state, {

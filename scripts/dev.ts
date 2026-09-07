@@ -4,8 +4,8 @@ import { readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import process from "node:process";
-import "../src/load-env.ts";
 import { acquireDevelopmentLock } from "./dev-lock.ts";
+import { isDevelopmentContainer, startContainerDevelopment, validateContainerSandboxEnvironment } from "./dev-container.ts";
 
 const arguments_ = process.argv.slice(2);
 const unknownArguments = arguments_.filter(argument => argument !== "--external-sandbox");
@@ -13,6 +13,14 @@ if (unknownArguments.length > 0) {
   throw new Error(`Unknown development argument: ${unknownArguments.join(", ")}`);
 }
 const externalSandbox = arguments_.includes("--external-sandbox");
+
+if (externalSandbox && !isDevelopmentContainer()) {
+  console.info("Starting the Compose development stack and running Mastra inside the development container...");
+  process.exit(startContainerDevelopment());
+}
+
+await import("../src/load-env.ts");
+if (externalSandbox) validateContainerSandboxEnvironment(process.env);
 
 // Mastra recreates `.mastra` during startup, so the outer process lock must
 // live in Qasey's own ignored runtime directory.
@@ -45,7 +53,7 @@ const developmentEnv: NodeJS.ProcessEnv = {
   NODE_ENV: "development",
   ...(externalSandbox
     ? {
-        QASEY_SANDBOX_ENDPOINT_TEMPLATE: process.env.QASEY_SANDBOX_ENDPOINT_TEMPLATE ?? "http://sandbox-{ordinal}:4120",
+        QASEY_SANDBOX_ENDPOINT_TEMPLATE: process.env.QASEY_SANDBOX_ENDPOINT_TEMPLATE?.trim() || "http://sandbox-{ordinal}:4120",
         QASEY_SANDBOX_REPLICAS: process.env.QASEY_SANDBOX_REPLICAS ?? "1",
         QASEY_SANDBOX_MAX_SESSIONS: process.env.QASEY_SANDBOX_MAX_SESSIONS ?? "1",
       }

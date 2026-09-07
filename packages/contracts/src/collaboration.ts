@@ -11,12 +11,18 @@ export const ConversationAddressSchema = z.object({
   recipientAgentIds: z.array(z.string().min(1)).min(1).max(8).optional(),
   targetRunId: z.string().min(1).optional(),
 });
+export const ExecutionToolCallSchema = z.object({
+  id: z.string().min(1).max(256), name: z.string().min(1).max(160), title: z.string().min(1).max(100),
+  status: z.enum(["running", "completed", "failed"]),
+});
+export type ExecutionToolCall = z.infer<typeof ExecutionToolCallSchema>;
 export const CollaborationMessageSchema = z.object({
   id: z.string(), authorAgentId: z.string().optional(), recipientAgentIds: z.array(z.string()),
   role: z.enum(["user", "assistant"]), kind: z.enum(["message", "handoff", "execution"]),
   text: z.string(), status: z.enum(["queued", "running", "completed", "failed"]),
   createdAt: z.iso.datetime(), replyTo: z.string().optional(), runId: z.string().optional(),
   turnId: z.string().optional(), rootMessageId: z.string(),
+  toolCalls: z.array(ExecutionToolCallSchema).optional(),
 });
 export type CollaborationMessage = z.infer<typeof CollaborationMessageSchema>;
 export const CollaborationSnapshotSchema = z.object({

@@ -1,3 +1,5 @@
+import { requireQaseyToolPermission } from "./applications/qasey/tool-permissions.ts";
+import { approvedReusableVersions, reusableCaseRequirement, assertReusableRunEnvironment } from "./applications/qasey/reusable-cases.ts";
 import { CollaborationExecutionBridge } from "../../packages/domain/src/collaboration-execution.ts";
 import { CollaborationRepository } from "../../packages/domain/src/collaboration-repository.ts";
 import "../load-env.ts";
@@ -14,7 +16,7 @@ import { QuickJsCodeModeTransport } from "@mastra/quickjs";
 import { ObservabilityStoragePostgresVNext, PostgresStore } from "@mastra/pg";
 import { z } from "zod";
 import { AgentProgressInputSchema, CreateCaseHubChangeSetSchema, CreateCaseReviewPlanSchema, GenerateE2EConversationActionSchema, QaseyRequestContextSchema } from "../../packages/contracts/src/index.ts";
-import type { E2ERun, QaseyRequestContext, RequirementDraft, RequirementSnapshot } from "../../packages/contracts/src/index.ts";
+import type { CheckResult, CaseHubChangeSet, OwnerScope, E2ERun, QaseyRequestContext, RequirementDraft, RequirementSnapshot } from "../../packages/contracts/src/index.ts";
 import { AgentProgressSession, freezeE2EContext } from "../../packages/domain/src/index.ts";
 import type { ToolsInput } from "@mastra/core/agent";
 import {
@@ -23,7 +25,7 @@ import {
 } from "../../packages/domain/src/index.ts";
 import { assertOpenAICompatibleToolSchemas, createGitHubClient, GitHubPublisher, loadConfig, QaseyMcpCatalog, JiraClient, ReadConnectorCatalog, resolveCredentialKeyring } from "../../packages/adapters/src/index.ts";
 import {
-  E2ECoordinator, LocalArtifactStore, NoopDraftPrBroker, S3ArtifactStore,
+  buildPullRequestDescription, E2ECoordinator, LocalArtifactStore, NoopDraftPrBroker, S3ArtifactStore,
 } from "../../packages/e2e/src/index.ts";
 import { ownerScopeFromRequestContext } from "../platform/context/owner-scope.ts";
 import { createCompositeStore } from "../platform/storage/create-composite-store.ts";
@@ -177,7 +179,7 @@ runtimeReadiness.register("artifact-store", () => artifactStore.healthCheck());
 export const githubPublisher = new GitHubPublisher(githubClient);
 const draftPrBroker = githubPublisher.configured || config.QASEY_TENANCY_MODE === "multi"
   ? {
-      publishChanges: async (run: E2ERun, changes: Array<{ path: string; deleted: boolean; mode?: "100644" | "100755" | "120000"; content?: Buffer }>, reviewUrl: string) => {
+      publishChanges: async (run: E2ERun, changes: Array<{ path: string; deleted: boolean; mode?: "100644" | "100755" | "120000"; content?: Buffer }>, reviewUrl: string, checks: CheckResult[]) => {
         const publisher = config.QASEY_TENANCY_MODE === "multi"
           ? await tenantGitHubConnections.publisher(run.tenantId, run.repository.owner)
           : githubPublisher;
@@ -185,8 +187,7 @@ const draftPrBroker = githubPublisher.configured || config.QASEY_TENANCY_MODE ==
           repository: run.repository,
           baseSha: run.baseSha!,
           branch: run.branch ?? `qasey/${run.id}`,
-          title: `test(e2e): Qasey run ${run.id}`,
-          body: [`## Qasey generated E2E`, ``, `Change Set: ${run.changeSetId}`, `Review and evidence: ${reviewUrl}`, ``, `Clean verifier completed. Per-case review is still required.`].join("\n"),
+          ...buildPullRequestDescription(run, changes, reviewUrl, checks),
           changes,
           ...(run.pullRequestUrl ? { existingPullRequestUrl: run.pullRequestUrl } : {}),
         });
@@ -414,15 +415,44 @@ export function createAgentProgressTool(progressSession: AgentProgressSession) {
   });
 }
 
-function e2eTools() {
+export async function preflightReusableRun(owner: OwnerScope, run: E2ERun, changeSet: CaseHubChangeSet): Promise<void> {
+  if (!["succeeded", "failed", "cancelled", "awaiting_qa"].includes(run.status)) {
+    throw new Error("The source automation run is still active. Amend it or wait for completion before creating a rerun.");
+  }
+  const configuration = webE2EConfigurationFromSkill();
+  const preflight = await e2ePreflight.assertReady(owner, configuration);
+  assertReusableRunEnvironment(run, changeSet, preflight, configuration);
+}
+
+export function e2eTools() {
   return {
     caseHubSearchCases: createTool({
       id: "case_hub_search_cases",
-      description: "在 Qasey Case Hub 中搜索现有测试用例。只读；用于在提交 Change Set 前判断新增或更新。",
+      description: "在 Qasey Case Hub 中搜索现有测试用例。只读；文字用例是当前租户可跨会话复用的资产。使用 activeVersionId 直接生成或维护自动化，无需重建文字审核。",
       inputSchema: z.object({ query: z.string().max(500).default("") }),
       execute: async ({ query }, { requestContext }) => {
         if (!requestContext) throw new Error("Trusted request context is required");
+        await requireQaseyToolPermission(requestContext, "qasey.cases.read");
         return { cases: await caseHubRepository.listCases(ownerScopeFromRequestContext(requestContext), query) };
+      },
+    }),
+    caseHubGetCase: createTool({
+      id: "case_hub_get_case",
+      description: "读取当前租户指定用例的文字版本及关联自动化任务。跨会话复用；不读取原会话消息。使用 activeVersionId 生成自动化，或用返回的 runId 修改实现。",
+      inputSchema: z.object({ caseId: z.string().min(1).max(100) }).strict(),
+      execute: async ({ caseId }, { requestContext }) => {
+        if (!requestContext) throw new Error("Trusted request context is required");
+        await requireQaseyToolPermission(requestContext, "qasey.cases.read");
+        const owner = ownerScopeFromRequestContext(requestContext);
+        const testCase = await caseHubRepository.getCase(owner, caseId);
+        if (!testCase?.activeVersionId) throw new Error("Case not found");
+        const versions = await caseHubRepository.versionsForCase(owner, caseId);
+        const ids = new Set(versions.map(version => version.id));
+        const changes = (await caseHubRepository.listChangeSets(owner, 500)).filter(change => change.caseVersionIds.some(id => ids.has(id)));
+        return { case: testCase, versions, automations: changes.map(change => ({
+          changeSetId: change.id, caseVersionIds: change.caseVersionIds.filter(id => ids.has(id)),
+          runId: change.runId, status: change.status, automationPaths: change.automationPaths, updatedAt: change.updatedAt,
+        })) };
       },
     }),
     caseHubCreateReviewPlan: createTool({
@@ -431,6 +461,7 @@ function e2eTools() {
       inputSchema: CreateCaseReviewPlanSchema,
       execute: async (input, { requestContext }) => {
         if (!requestContext) throw new Error("Trusted request context is required");
+        await requireQaseyToolPermission(requestContext, "qasey.cases.write");
         if (input.requirement.blockingQuestions.length > 0) throw new Error("Resolve blocking questions before creating a Case Review Plan");
         const owner = ownerScopeFromRequestContext(requestContext);
         const requestId = String(requestContext.get("requestId"));
@@ -456,10 +487,11 @@ function e2eTools() {
     }),
     caseHubStartE2E: createTool({
       id: "case_hub_start_e2e",
-      description: "为当前 AI session 的 Review Plan 中精确指定的已批准文字 Case Versions 启动一个 Web Playwright E2E Run。单条或批量都只创建一个 Run/PR。",
-      inputSchema: z.object({ planId: z.string().uuid(), caseVersionIds: z.array(z.string().uuid()).min(1).max(100) }).strict(),
+      description: "为当前租户精确指定的已批准文字版本生成或重新生成 E2E，支持跨会话和已验证用例。先搜索/读取确认版本；无需创建新文字版本或 Review Plan。新 Run 归属当前会话。",
+      inputSchema: z.object({ planId: z.string().uuid().optional(), caseVersionIds: z.array(z.string().uuid()).min(1).max(100) }).strict(),
       execute: async (input, { mastra, requestContext }) => {
         if (!requestContext) throw new Error("Trusted request context is required");
+        await requireQaseyToolPermission(requestContext, "qasey.e2e.execute");
         const owner = ownerScopeFromRequestContext(requestContext);
         const requestId = String(requestContext.get("requestId"));
         const sessionId = String(requestContext.get("sessionId"));
@@ -467,27 +499,29 @@ function e2eTools() {
         const threadId = String(requestContext.get(MASTRA_THREAD_ID_KEY) ?? sessionId);
         const taskRunId = String(requestContext.get("taskId") ?? requestContext.get("executionId") ?? requestId);
         const actorId = getRuntimeContext(requestContext)["qasey-context"].actor.id;
-        const action = GenerateE2EConversationActionSchema.safeParse(requestContext.get("qasey-conversation-action"));
-        if (!action.success || action.data.planId !== input.planId
+        const trustedAction = requestContext.get("qasey-conversation-action");
+        const action = GenerateE2EConversationActionSchema.safeParse(trustedAction);
+        if (trustedAction !== undefined && (!action.success || action.data.planId !== input.planId
           || action.data.caseVersionIds.length !== input.caseVersionIds.length
-          || action.data.caseVersionIds.some((id, index) => id !== input.caseVersionIds[index])) {
+          || action.data.caseVersionIds.some((id, index) => id !== input.caseVersionIds[index]))) {
           throw new Error("case_hub_start_e2e requires the exact trusted conversation action selection");
         }
-        const detail = await caseHubRepository.getReviewPlan(owner, input.planId, actorId);
-        if (!detail) throw new Error(`Case Review Plan ${input.planId} not found`);
-        if (!detail.editable || detail.plan.conversationId !== sessionId || detail.plan.threadId !== threadId) throw new Error("Review Plan does not belong to the current user and AI session");
-        if (input.caseVersionIds.length > 1 && detail.plan.status !== "ready") throw new Error("Batch E2E generation requires every Review item to be resolved");
-        const approvedIds = new Set(detail.items.filter(item => item.status === "approved").flatMap(item => item.publishedCaseVersionId ? [item.publishedCaseVersionId] : []));
-        if (new Set(input.caseVersionIds).size !== input.caseVersionIds.length || input.caseVersionIds.some(id => !approvedIds.has(id))) {
-          throw new Error("E2E can only target exact approved Case Versions from this Review Plan");
+        const versions = await approvedReusableVersions(caseHubRepository, owner, input.caseVersionIds);
+        // A plan remains an optional selection constraint for the existing Review UI.
+        // It is never an ownership boundary for already published tenant case assets.
+        if (input.planId) {
+          const detail = await caseHubRepository.getReviewPlan(owner, input.planId, actorId);
+          if (!detail) throw new Error(`Case Review Plan ${input.planId} not found`);
+          const approvedIds = new Set(detail.items.filter(item => item.status === "approved").map(item => item.publishedCaseVersionId));
+          if (input.caseVersionIds.some(id => !approvedIds.has(id))) throw new Error("Selection must contain approved versions from the specified Review Plan");
         }
         const statuses = await caseHubRepository.automationStatuses(owner, input.caseVersionIds);
-        const unavailable = input.caseVersionIds.filter(id => statuses[id] === "verified" || statuses[id] === "generating" || statuses[id] === "awaiting_review");
-        if (unavailable.length) throw new Error(`Case Versions already covered or in progress: ${unavailable.join(", ")}`);
+        if (input.caseVersionIds.some(id => statuses[id] === "generating")) throw new Error("Selected Case Versions already have an active automation run; amend that run or wait for completion");
+        const requirement = freezeE2EContext(reusableCaseRequirement(versions), { sessionId, threadId, taskRunId, requestId, resourceId });
         const webE2EConfiguration = webE2EConfigurationFromSkill();
         const preflight = await e2ePreflight.assertReady(owner, webE2EConfiguration);
         const changeSet = await caseHubRepository.createAutomationChangeSet(owner, {
-          requirement: detail.plan.requirement,
+          requirement,
           caseVersionIds: input.caseVersionIds,
           repository: webE2EConfiguration.target,
           createdBy: actorId,
@@ -496,7 +530,7 @@ function e2eTools() {
         });
         const created = await e2eCoordinator.create(owner, {
           changeSetId: changeSet.id,
-          handoff: requirementDraft(detail.plan.requirement),
+          handoff: requirementDraft(requirement),
           platform: "web",
           framework: "playwright",
           requestId,
@@ -523,6 +557,7 @@ function e2eTools() {
       inputSchema: z.object({ changeSetId: z.string().uuid() }),
       execute: async ({ changeSetId }, { requestContext }) => {
         if (!requestContext) throw new Error("Trusted request context is required");
+        await requireQaseyToolPermission(requestContext, "qasey.cases.read");
         const owner = ownerScopeFromRequestContext(requestContext);
         return {
           changeSet: await caseHubRepository.getChangeSet(owner, changeSetId),
@@ -536,6 +571,7 @@ function e2eTools() {
       inputSchema: z.object({ runId: z.string().min(1) }),
       execute: async ({ runId }, { requestContext }) => {
         if (!requestContext) throw new Error("Trusted request context is required");
+        await requireQaseyToolPermission(requestContext, "qasey.runs.read");
         const owner = ownerScopeFromRequestContext(requestContext);
         return { run: await runRepository.get(owner, runId), events: await runRepository.events(owner, runId) };
       },
@@ -545,17 +581,23 @@ function e2eTools() {
       inputSchema: z.object({ runId: z.string().min(1) }),
       execute: async ({ runId }, { mastra, requestContext }) => {
         if (!requestContext) throw new Error("Trusted request context is required");
+        await requireQaseyToolPermission(requestContext, "qasey.e2e.execute");
         const owner = ownerScopeFromRequestContext(requestContext);
         const previous = await runRepository.get(owner, runId);
         if (!previous) throw new Error(`Run ${runId} not found`);
         const changeSet = await caseHubRepository.getChangeSet(owner, previous.changeSetId);
         if (!changeSet) throw new Error(`Case Hub change set ${previous.changeSetId} not found`);
+        await approvedReusableVersions(caseHubRepository, owner, changeSet.caseVersionIds);
+        await preflightReusableRun(owner, previous, changeSet);
         if (changeSet.status === "blocked_product" || changeSet.status === "blocked_environment" || changeSet.status === "failed") {
           await caseHubRepository.updateChangeSet(owner, changeSet.id, changeSet.revision, { status: "verifying" });
         } else if (changeSet.status !== "verifying") {
           throw new Error(`Case Hub result rerun requires a blocked Change Set, received ${changeSet.status}`);
         }
-        const created = await e2eCoordinator.rerun(owner, runId);
+        const sessionId = String(requestContext.get("sessionId"));
+        const actorId = getRuntimeContext(requestContext)["qasey-context"].actor.id;
+        const created = await e2eCoordinator.rerun(owner, runId, undefined, { sessionId, requestId: String(requestContext.get("requestId")) });
+        await collaborationRepository.joinRun({ ...owner, subjectId: actorId, conversationId: sessionId }, created.id);
         const latestChangeSet = await caseHubRepository.getChangeSet(owner, changeSet.id);
         if (!latestChangeSet) throw new Error(`Case Hub change set ${changeSet.id} not found after rerun creation`);
         await caseHubRepository.updateChangeSet(owner, latestChangeSet.id, latestChangeSet.revision, { runId: created.id });
@@ -688,6 +730,7 @@ function isQaseyCodeModeReadTool(toolName: string): boolean {
     || normalized === "e2egetrun"
     || normalized === "casehubsearchcases"
     || normalized === "casehubgetchangeset"
+    || normalized === "casehubgetcase"
     || /^(?:slack_(?:search|get)|github_(?:get|list|search)|jira_(?:get|search))/.test(normalized)
     || /^figma_(?:get|list|export)/.test(normalized)
     || /^qaexperience_(?:qa_context_get|qa_experience_(?:list|read))/.test(normalized)

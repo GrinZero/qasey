@@ -8,7 +8,13 @@ export function collaborationUIMessages(state: CollaborationState, turns: QaseyC
   const messages = legacy.filter(m => !claimed.has(m.metadata?.turnId ?? ""));
   for (const message of state.messages) {
     const base = message.turnId ? legacy.find(m => m.id === message.turnId && m.role === "assistant") : undefined;
-    const parts = base?.parts.filter(p => p.type !== "text") ?? [];
+    const parts: QaseyUIMessage["parts"] = [...(base?.parts.filter(p => p.type !== "text") ?? [])];
+    for (const tool of message.toolCalls ?? []) {
+      const common = { type: "dynamic-tool" as const, toolCallId: tool.id, toolName: tool.name, title: tool.title, input: { summary: tool.title } };
+      parts.push(tool.status === "running" ? { ...common, state: "input-available" }
+        : tool.status === "failed" ? { ...common, state: "output-error", errorText: "执行失败，查看运行详情了解原因。" }
+        : { ...common, state: "output-available", output: { summary: "执行完成。" } });
+    }
     const text = message.text || (base?.parts.filter(p => p.type === "text").map(p => p.text).join("") ?? "");
     messages.push({
       id: message.id, role: message.role,

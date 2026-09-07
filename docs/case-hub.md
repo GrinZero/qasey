@@ -155,8 +155,17 @@ Web 工作台支持具名的会话参与者。默认消息交给 Qasey；输入 
 
 `POST /v1/qasey/conversations/:conversationId/messages` 接受 `recipientAgentIds` 和可选 `targetRunId`；JSON 调用返回 202 及 delivery IDs。`GET /v1/qasey/conversations/:conversationId/events?after=…` 提供会话级 SSE 快照和持久化 revision。快照包含所有已保存消息以覆盖断线期间的变化，客户端替换而非追加；旧的逐 turn SSE 接口继续兼容。历史消息默认归属 Qasey，历史 run 只展示当前状态，不生成过去的 Agent 对话。
 
-E2E lifecycle 的关键状态按事件 ID 去重投递为 E2E Agent 的“执行状态”消息，和模型生成的回复区分。失败会保留原因和证据入口；步骤完成情况依据真实状态历史，未知的历史阶段不会显示为已完成。
+E2E lifecycle 的关键状态仍按事件 ID 去重保存，Web 会话按 run 聚合为一个位置稳定、持续更新的进度区，不再逐条渲染为 Agent 聊天。执行记录默认折叠，结束时收起；历史状态也采用相同展示。失败保留可读结论，原始错误和证据通过“查看详情”按需查看；未知的历史阶段不会显示为已完成。
+
+编写 Agent 的面向用户分析摘要通过 CodeTaskResult.analysisSummary 独立于诊断日志保存，在编写结束后送回会话，说明实际发现、实现选择和自检范围。独立验证按真实的结构化检查结果汇报通过与失败情况，不把自检或自动验证等同于人工批准。摘要沿用事件去重机制，不触发额外委派；旧任务没有摘要时不补造分析。聊天默认不列出证据文件、原始日志和内部任务编号，原始材料继续保留在运行详情。
 
 执行补充记录 pending / applying / applied 及 author attempt。要求在下一次编写节点读取，应用后必须重新独立验证；交付前原子检查待应用要求。交付之后的修改创建独立 Change Set 和后续 Run，不覆盖旧记录。修改文字步骤、预期或范围仍需回到文字审核。取消动作直接控制已有 lifecycle，不等待 Author 完成。
 
 部署前运行数据库迁移以创建邮箱表；协作 worker 在 standalone / orchestration 角色启动，并通过 readiness 暴露健康状态。排队工作可恢复；已丢失执行租约的问答标记失败，避免重放结果不确定的外部写入。底层 E2E 继续通过自己的生命周期恢复与状态投递。首版仅接入 Web 工作台，Slack 的原生 mention 保持原有行为。
+
+
+### 删除正式用例
+
+在用例库每行的“更多操作”菜单中选择“删除用例”，组件确认弹窗会展示 Case ID 与完整标题。弹窗默认聚焦“取消”；删除时禁用重复操作，失败提示留在弹窗内以便重试。删除后用例退出列表、搜索和详情，也不能用于新建 E2E Change Set。接口为 `DELETE /v1/case-hub/cases/:caseId`，要求 `qasey.cases.write` 权限，并按 application 与 tenant 隔离；重复删除返回成功，不存在的用例返回 404。
+
+删除采用软删除，保留 Case ID、历史版本、Change Set 和执行证据；已有自动化文件不会被删除，已有任务也不会因此取消。部署前需执行数据库迁移，增加 `qasey_cases.deleted_at` 字段。

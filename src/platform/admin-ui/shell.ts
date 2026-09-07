@@ -24,6 +24,9 @@ export function resolveAdminUiHtmlPath(startingDirectory = process.cwd()): strin
 
 /** Loads the single-file Vite build. Production images copy this artifact. */
 export async function loadAdminUiHtml(): Promise<string> {
+  // Local builds can change while the development runtime keeps running.
+  // Production images are immutable and can reuse the cached document.
+  if (process.env.NODE_ENV === "development") cachedHtml = undefined;
   const adminUiHtmlPath = resolveAdminUiHtmlPath();
   cachedHtml ??= await readFile(adminUiHtmlPath, "utf8").catch(error => {
     const reason = error instanceof Error ? error.message : String(error);

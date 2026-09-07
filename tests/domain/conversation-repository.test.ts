@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ConversationBusyError,
   ConversationTurnClosedError,
@@ -9,6 +9,81 @@ import {
 const owner = { applicationId: "qasey" as const, tenantId: "tenant-1" };
 
 describe("Qasey conversation repository", () => {
+  it("projects rich collaboration scopes into Prisma owner columns throughout a turn lifecycle", async () => {
+    const now = new Date("2026-09-04T04:00:00.000Z");
+    const conversationId = "55555555-5555-4555-8555-555555555555";
+    const scope = { ...owner, subjectId: "qa-1", conversationId };
+    const conversation = {
+      ...owner, id: conversationId, subjectId: scope.subjectId, title: "新 QA 任务",
+      activeTurnId: null, createdAt: now, updatedAt: now,
+    };
+    const prisma = {
+      $connect: async () => undefined,
+      $transaction: async (operation: (transaction: unknown) => Promise<unknown>) => operation(prisma),
+      qaseyConversationRecord: {
+        create: vi.fn(async () => conversation),
+        findUnique: vi.fn(async () => conversation),
+        findMany: vi.fn(async () => [conversation]),
+        update: vi.fn(async () => conversation),
+      },
+      qaseyConversationTurnRecord: {
+        create: vi.fn(), findUnique: vi.fn(), findMany: vi.fn(async () => []), update: vi.fn(),
+      },
+      qaseyConversationEventRecord: {
+        create: vi.fn(), findUnique: vi.fn(), findMany: vi.fn(async () => []),
+      },
+    };
+    const repository = new PrismaQaseyConversationRepository(prisma as never, () => now);
+    await repository.init();
+    await repository.listTurns(scope, scope.subjectId, conversationId);
+    expect(prisma.qaseyConversationRecord.findUnique.mock.calls).toEqual([[{
+      where: { applicationId_tenantId_id: { ...owner, id: conversationId } },
+    }]]);
+    expect(prisma.qaseyConversationTurnRecord.findMany.mock.calls).toEqual([[{
+      where: { ...owner, conversationId }, orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    }]]);
+    await repository.createConversation(scope, scope.subjectId);
+    expect(prisma.qaseyConversationRecord.create.mock.calls).toEqual([[{ data: {
+      ...owner, id: expect.any(String), subjectId: scope.subjectId, title: "新 QA 任务", createdAt: now, updatedAt: now,
+    } }]]);
+    await repository.listConversations(scope, scope.subjectId);
+    expect(prisma.qaseyConversationRecord.findMany.mock.calls).toEqual([[{
+      where: { ...owner, subjectId: scope.subjectId }, orderBy: [{ updatedAt: "desc" }, { id: "asc" }], take: 50,
+    }]]);
+    const clientMessageId = "77777777-7777-4777-8777-777777777777";
+    const started = await repository.startTurn(scope, scope.subjectId, conversationId, clientMessageId, "Hello");
+    const turnRow = {
+      ...started.turn, agentRunId: null, linkedRunId: null, error: null,
+      eventSequence: 1, createdAt: now, updatedAt: now,
+    };
+    prisma.qaseyConversationTurnRecord.findUnique.mockResolvedValue(turnRow);
+    prisma.qaseyConversationEventRecord.findUnique.mockResolvedValue({ ...started.accepted, occurredAt: now });
+    expect((await repository.startTurn(scope, scope.subjectId, conversationId, clientMessageId, "Hello")).created).toBe(false);
+    await repository.appendEvent(scope, scope.subjectId, conversationId, started.turn.id, "completed", { text: "Done" });
+    await repository.events(scope, scope.subjectId, conversationId, started.turn.id, 1);
+    expect(prisma.qaseyConversationEventRecord.findMany.mock.calls).toEqual([[{
+      where: { ...owner, conversationId, turnId: started.turn.id, sequence: { gt: 1 } }, orderBy: { sequence: "asc" },
+    }]]);
+
+    // Exact key checks catch fields that permissive Prisma mocks otherwise accept.
+    for (const model of [prisma.qaseyConversationRecord, prisma.qaseyConversationTurnRecord, prisma.qaseyConversationEventRecord]) {
+      for (const method of Object.values(model)) {
+        for (const [args] of (method.mock.calls as unknown as [{ where?: Record<string, unknown>; data?: Record<string, unknown> }][])) {
+          for (const [key, value] of Object.entries(args.where ?? {})) {
+            if (key.startsWith("applicationId_tenantId_")) {
+              expect(Object.keys(value as object).sort()).toEqual(key.split("_").sort());
+            }
+          }
+          if (model !== prisma.qaseyConversationRecord && args.data) expect(args.data).not.toHaveProperty("subjectId");
+        }
+      }
+    }
+    expect(await repository.getConversation(scope, "qa-2", conversationId)).toBeUndefined();
+    prisma.qaseyConversationTurnRecord.findMany.mockClear();
+    expect(await repository.listTurns(scope, "qa-2", conversationId)).toEqual([]);
+    expect(prisma.qaseyConversationTurnRecord.findMany).not.toHaveBeenCalled();
+  });
+
   it("isolates conversations by tenant and subject and orders them by recent activity", async () => {
     let now = new Date("2026-09-04T01:00:00.000Z");
     const repository = new InMemoryQaseyConversationRepository(() => now);

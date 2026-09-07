@@ -20,6 +20,7 @@ describe("qasey-main processors", () => {
 
     expect(processors.map(processor => processor.id)).toEqual([
       "qasey-require-request-context",
+      "qasey-user-memory",
       "tool-search",
       "qasey-direct-tools",
       "tool-call-filter",
@@ -188,7 +189,7 @@ describe("qasey-main processors", () => {
     const discovery = vi.spyOn(mcpCatalog, "toolsForDiscovery").mockResolvedValue({});
 
     const processors = await resolveQaseyMainInputProcessors({ requestContext });
-    const directResult = await (processors[2] as Processor).processInputStep!({ tools: {} } as never) as {
+    const directResult = await processors.find(processor => processor.id === "qasey-direct-tools")!.processInputStep!({ tools: {} } as never) as {
       tools: Record<string, unknown>;
     };
 

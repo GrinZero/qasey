@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
+import dogfoodConfig from "../browser/playwright.config.ts";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -24,6 +25,17 @@ beforeAll(async () => {
 });
 
 describe("Admin UI browser gate", () => {
+  it("disables authentication evidence without disabling browser review evidence", () => {
+    const setup = dogfoodConfig.projects?.find(project => project.name === "setup");
+    const browser = dogfoodConfig.projects?.find(project => project.name === "chromium");
+    expect(setup).toBeDefined();
+    expect(browser).toBeDefined();
+    // Resolve inherited project settings, as Playwright does, so a top-level
+    // trace change cannot accidentally re-enable secret-bearing setup evidence.
+    expect({ ...dogfoodConfig.use, ...setup?.use }).toMatchObject({ trace: "off", video: "off", screenshot: "off" });
+    expect({ ...dogfoodConfig.use, ...browser?.use }).toMatchObject({ trace: "on", screenshot: "only-on-failure", video: { mode: "on" } });
+    expect(browser?.dependencies).toContain("setup");
+  });
   it("builds and serves the real Admin UI artifact before Playwright runs", () => {
     const command = manifest.scripts?.["test:browser"];
     expect(command).toContain("pnpm admin-ui:build");

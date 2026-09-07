@@ -1,0 +1,22 @@
+{
+  "passed": true,
+  "caseId": "QASEY-7",
+  "version": 2,
+  "resultId": "1fc213a5-84ca-4936-bcc4-4e6419dfa637",
+  "expectedTime": 0.66381298828125,
+  "actualTime": 0.664254,
+  "traceSteps": [
+    2,
+    4
+  ],
+  "checks": [
+    "row click",
+    "current version",
+    "video seek",
+    "Trace actual selected action",
+    "fullscreen steps",
+    "Escape",
+    "backdrop",
+    "review inbox"
+  ]
+}

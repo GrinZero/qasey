@@ -71,7 +71,7 @@ export function CaseReviewPanel({ planId, compact = false, onGenerate, onChanged
   }, [detail, planId]);
 
   const pending = detail?.items.filter(item => item.status === "pending") ?? [];
-  const eligible = detail?.items.filter(item => item.status === "approved" && item.publishedCaseVersionId && !activeVersions.has(item.publishedCaseVersionId) && !["verified", "generating", "awaiting_review"].includes(item.automationStatus ?? "none")) ?? [];
+  const eligible = detail?.items.filter(item => item.status === "approved" && item.publishedCaseVersionId && item.isCurrentCaseVersion !== false && !activeVersions.has(item.publishedCaseVersionId) && !["verified", "generating", "awaiting_review"].includes(item.automationStatus ?? "none")) ?? [];
   const allReviewed = detail?.plan.status === "ready";
 
   const mutate = async (key: string, operation: () => Promise<unknown>) => {
@@ -131,6 +131,7 @@ export function CaseReviewPanel({ planId, compact = false, onGenerate, onChanged
     <header className="case-review-panel__head">
       <div><span className="review-kicker">TEXT CASE REVIEW</span><h3>{detail.plan.requirement.goal}</h3><p>{pending.length ? `${pending.length} 条等待确认` : "文字用例已审完"} · {detail.items.filter(item => item.status === "approved").length} 条已批准</p></div>
       <div className="case-review-panel__actions">
+        {detail.editable && <button className="secondary-button" disabled={Boolean(busy) || dirty} title="结束本次审核，保留已批准用例和历史记录" onClick={() => void mutate("cancel", () => api.cancelReviewPlan(planId, detail.plan.revision))}>{busy === "cancel" ? "正在结束…" : "结束本次审核"}</button>}
         {detail.editable && pending.length > 0 && <button className="secondary-button" disabled={Boolean(busy) || dirty} onClick={() => void mutate("approve-all", () => api.approveReviewItems(planId, pending.map(item => ({ itemId: item.id, expectedRevision: item.revision }))))}><Check size={14} />全部批准</button>}
         {detail.editable && <button className="primary-button" disabled={!allReviewed || !eligible.length || Boolean(busy) || dirty} title={!allReviewed ? "先完成所有文字用例审核" : eligible.length ? "以一个 Run 和一个 PR 生成尚未覆盖的用例" : "没有需要生成的用例"} onClick={() => void generate(eligible.flatMap(item => item.publishedCaseVersionId ? [item.publishedCaseVersionId] : []))}>{busy.startsWith("generate:") ? <LoaderCircle className="spin" size={14} /> : <Play size={14} />}{busy.startsWith("generate:") ? "正在启动…" : `生成 E2E（${eligible.length} 条）`}</button>}
       </div>
@@ -141,7 +142,7 @@ export function CaseReviewPanel({ planId, compact = false, onGenerate, onChanged
     {busy.startsWith("generate:") && <p className="review-feedback" role="status">正在提交 E2E 任务，请稍候。</p>}
     {latestTask && !compact && <E2ETaskLink task={latestTask} />}
     <a className="review-conversation-link" target="_blank" rel="noreferrer" href={`/admin/apps/qasey?conversation=${encodeURIComponent(detail.plan.conversationId)}`}>查看原会话与运行进度 →</a>
-    {!detail.editable && <p className="review-readonly">此计划属于另一位用户的 AI session，你可以查看，但不能修改、批准或启动 E2E。</p>}
+    {detail.plan.status === "cancelled" ? <p className="review-readonly">本次审核已结束，已批准用例和历史记录已保留。</p> : !detail.editable && <p className="review-readonly">此计划属于另一位用户的 AI session，你可以查看，但不能修改、批准或启动 E2E。</p>}
     <div className="review-ledger" aria-label="文字测试用例">
       <div className="review-ledger__columns"><span>状态</span><span>标题 / Suite</span><span>优先级</span><span>标签</span><span>E2E</span><span>操作</span></div>
       {detail.items.map(item => <ReviewRow key={item.id} item={item} editable={detail.editable} expanded={expandedId === item.id} draft={drafts[item.id] ?? null} task={tasks.find(task => task.context.cases.some(candidate => candidate.caseVersionId === item.publishedCaseVersionId)) ?? (submittedTask?.context.cases.some(candidate => candidate.caseVersionId === item.publishedCaseVersionId) ? submittedTask : undefined)} editing={editingRevisions[item.id] !== undefined} busy={busy} dirty={dirty || Boolean(item.publishedCaseVersionId && activeVersions.has(item.publishedCaseVersionId))}
@@ -163,19 +164,21 @@ function ReviewRow({ item, editable, expanded, draft, task, editing, dirty, busy
 }) {
   const [invalid, setInvalid] = useState(false);
   const automation = task?.status === "running" ? "generating" : item.automationStatus ?? "none";
-  const canGenerate = item.status === "approved" && item.publishedCaseVersionId && !["verified", "generating", "awaiting_review"].includes(automation);
+  const isHistorical = item.isCurrentCaseVersion === false;
+  const canGenerate = !isHistorical && item.status === "approved" && item.publishedCaseVersionId && !["verified", "generating", "awaiting_review"].includes(automation);
   return <div className={`review-ledger__row review-ledger__row--${item.status}`}>
     <button className="review-ledger__summary" onClick={onExpand} aria-expanded={expanded} aria-controls={`review-detail-${item.id}`}>
       <span><i className={`review-state review-state--${item.status}`} />{item.status === "pending" ? "待审" : item.status === "approved" ? "已批准" : "已移除"}</span>
       <span><strong>{item.content.title}{draft && <em className="review-unsaved">未保存</em>}</strong><small>{item.content.suitePath}</small></span>
       <span>{item.content.priority}</span><span>{item.content.tags.join(" · ") || "—"}</span>
-      <span className={`automation-state automation-state--${automation}`}>{automationLabels[automation]}</span>
+      <span className={`automation-state automation-state--${automation}`}>{isHistorical ? `历史 · ${automationLabels[automation]}` : automationLabels[automation]}</span>
       <span>{expanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}</span>
     </button>
     <div id={`review-detail-${item.id}`} hidden={!expanded}>
     {task && <E2ETaskLink task={task} />}
     {editing ? <ReviewEditor item={item} value={draft ?? item.content} editable={editable && !busy && item.status !== "removed"} onChange={onDraft} onValidity={setInvalid} /> : <ReviewReadView content={draft ?? item.content} />}
-    {automation === "failed" && <p className="review-inline-error">E2E 生成失败，已批准的文字用例仍然有效。请在原会话中查看失败原因，处理后重新生成。</p>}
+    {isHistorical && <p className="review-version-note">此处保留的是历史版本的审核与 E2E 记录；当前用例已更新为 v{item.currentCaseVersion ?? "?"}，状态为 {automationLabels[item.currentAutomation?.status ?? "none"]}。请从当前版本启动自动化。</p>}
+    {automation === "failed" && !isHistorical && <p className="review-inline-error">E2E 生成失败，已批准的文字用例仍然有效。请在原会话中查看失败原因，处理后重新生成。</p>}
     {expanded && <footer className="review-ledger__footer">
       <span>{item.publishedCaseId ? `${item.publishedCaseId} · revision ${item.revision}` : `Draft ${item.ordinal + 1} · revision ${item.revision}`}</span>
       <div>

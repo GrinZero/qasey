@@ -1,3 +1,4 @@
+import { approvedReusableVersions } from "../applications/qasey/reusable-cases.ts";
 import { randomUUID } from "node:crypto";
 import type { Mastra } from "@mastra/core/mastra";
 import type { RequestContext } from "@mastra/core/request-context";
@@ -13,8 +14,8 @@ import {
   type QaVerdict,
 } from "../../../packages/contracts/src/index.ts";
 import { caseHubVersionToTestCase, type CaseExecutionObservation } from "../../../packages/domain/src/index.ts";
-import { artifactStore, caseHubRepository, config, e2eCoordinator, e2ePreflight, getRuntimeContext, githubClient, runRepository } from "../runtime.ts";
-import { webE2EConfigurationFromSkill } from "../../platform/code-task/e2e-repository-skill.ts";
+import { latestVerifierArtifacts } from "../../../packages/e2e/src/artifacts.ts";
+import { artifactStore, caseHubRepository, config, e2eCoordinator, preflightReusableRun, getRuntimeContext, githubClient, runRepository } from "../runtime.ts";
 import type { CodeTaskExecutionTelemetry } from "../../../packages/e2e/src/coordinator.ts";
 import { ownerScopeFromRequestContext } from "../../platform/context/owner-scope.ts";
 import { MASTRA_RESOURCE_ID_KEY, MASTRA_THREAD_ID_KEY, PlatformRequestContextSchema } from "../../platform/context/schema.ts";
@@ -144,7 +145,8 @@ const cleanVerifyAndPublish = createStep({
     const changeSet = await caseHubRepository.getChangeSet(owner, run.changeSetId);
     if (!changeSet) throw new Error(`Case Hub change set ${run.changeSetId} not found`);
     const versions = await caseHubRepository.versionsForChangeSet(owner, changeSet.id);
-    await caseHubRepository.createPendingResults(owner, changeSet.id, run.id, run.artifacts, undefined, await playwrightObservations(owner, run.artifacts, versions.map(version => version.caseId)));
+    const evidence = latestVerifierArtifacts(run);
+    await caseHubRepository.createPendingResults(owner, changeSet.id, run.id, evidence, undefined, await playwrightObservations(owner, evidence, versions.map(version => version.caseId)));
     const refreshed = await caseHubRepository.getChangeSet(owner, changeSet.id);
     if (refreshed && refreshed.status === "verifying") {
       await caseHubRepository.updateChangeSet(owner, refreshed.id, refreshed.revision, {
@@ -211,13 +213,14 @@ export const awaitQaVerdictStep = createStep({
     const repairedCaseIds = repairedVersions
       .filter(version => !resumeData.caseVersionId || version.id === resumeData.caseVersionId)
       .map(version => version.caseId);
+    const repairedEvidence = latestVerifierArtifacts(repaired);
     await caseHubRepository.createPendingResults(
       owner,
       repairedChangeSet.id,
       repaired.id,
-      repaired.artifacts,
+      repairedEvidence,
       resumeData.caseVersionId ? [resumeData.caseVersionId] : undefined,
-      await playwrightObservations(owner, repaired.artifacts, repairedCaseIds),
+      await playwrightObservations(owner, repairedEvidence, repairedCaseIds),
     );
     const refreshedChangeSet = await caseHubRepository.getChangeSet(owner, repairedChangeSet.id);
     if (refreshedChangeSet?.status === "verifying") {
@@ -297,11 +300,12 @@ export async function createAndStartE2ERun(
 }
 
 export async function rerunE2E(mastra: Mastra, owner: OwnerScope, runId: string, requestContext: RequestContext, resourceId?: string): Promise<E2ERun> {
-  await e2ePreflight.assertReady(owner, webE2EConfigurationFromSkill());
   const previous = await runRepository.get(owner, runId);
   if (!previous) throw new Error(`Run ${runId} not found`);
   const changeSet = await caseHubRepository.getChangeSet(owner, previous.changeSetId);
   if (!changeSet) throw new Error(`Case Hub change set ${previous.changeSetId} not found`);
+  await approvedReusableVersions(caseHubRepository, owner, changeSet.caseVersionIds);
+  await preflightReusableRun(owner, previous, changeSet);
   if (!["failed", "blocked_product", "blocked_environment", "verifying"].includes(changeSet.status)) {
     throw new Error(`E2E rerun requires a failed or blocked Change Set, received ${changeSet.status}`);
   }

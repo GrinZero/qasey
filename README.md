@@ -51,6 +51,13 @@ Sandbox。进入容器后运行：
 pnpm dev:container
 ```
 
+也可以直接在宿主机项目根目录运行 `pnpm dev:container`（需要 Docker 和 pnpm）。
+命令会构建并启动开发 Compose 栈，等待依赖就绪，再进入 `development` 容器启动
+Mastra；API 和 Sandbox 的认证密钥由 Compose 配套注入，无需手动填写。
+退出后基础设施容器继续保留，使用 `pnpm compose:dev:down` 停止整套容器。
+如果旧开发容器提示缺少 Sandbox 密钥，请在宿主机重新运行该命令，或执行
+**Dev Containers: Rebuild Container**。
+
 Compose 在创建容器时只会自动读取根目录的 `.env` 做变量插值；Qasey 开发实例还会
 从挂载的项目根目录按标准顺序读取 `.env.local`。因此本地 `GITHUB_TOKEN` 可以继续
 保存在被 Git 忽略的 `.env.local`，而 Compose 已显式提供的数据库和容器网络配置拥有

@@ -66,7 +66,7 @@ export interface Artifact {
   kind: "log" | "trace" | "video" | "screenshot" | "report" | "patch" | "trajectory";
   name: string;
   uri: string;
-  contentType?: string;
+  contentType?: string | undefined;
 }
 
 export interface QaseyRun {
@@ -86,21 +86,21 @@ export interface QaseyRun {
 }
 
 export interface CaseHubCase {
-  id: string; suitePath: string; title: string; activeVersionId?: string; proposedVersionIds: string[]; automationStatus?: CaseAutomationStatus; systemTags?: "e2e"[]; updatedAt: string;
+  id: string; suitePath: string; title: string; activeVersionId?: string | undefined; proposedVersionIds: string[]; automationStatus?: CaseAutomationStatus | undefined; systemTags?: "e2e"[] | undefined; updatedAt: string;
 }
 
 export interface CaseHubChangeSet {
-  id: string; status: string; revision: number; caseVersionIds: string[]; runId?: string; branch?: string; pullRequestUrl?: string;
-  automationPaths?: Record<string, string>; requirement: { goal: string; requirementSummary: string }; updatedAt: string;
+  id: string; status: string; revision: number; caseVersionIds: string[]; runId?: string | undefined; branch?: string | undefined; pullRequestUrl?: string | undefined;
+  automationPaths?: Record<string, string> | undefined; requirement: { goal: string; requirementSummary: string }; updatedAt: string;
 }
 
 export interface CaseHubCaseVersion {
   id: string; caseId: string; version: number; suitePath: string; title: string; description: string; priority: "P0" | "P1" | "P2" | "P3";
-  target: "web"; preconditions: string[]; steps: Array<{ action: string; expected: string[] }>; testData: Record<string, unknown>; tags: string[]; automationPath?: string; automationStatus?: CaseAutomationStatus; systemTags?: "e2e"[]; contentHash: string; status: string; createdAt: string;
+  target: "web"; preconditions: string[]; steps: Array<{ action: string; expected: string[] }>; testData: Record<string, unknown>; tags: string[]; automationPath?: string | undefined; automationStatus?: CaseAutomationStatus | undefined; systemTags?: "e2e"[] | undefined; contentHash: string; status: string; createdAt: string;
 }
 
 export interface CaseHubResult {
-  id: string; changeSetId: string; runId: string; caseId: string; caseVersionId: string; attempt: number; executionStatus: string; reviewStatus: string; feedback?: string; durationMs?: number; artifacts: Artifact[];
+  id: string; changeSetId: string; runId: string; caseId: string; caseVersionId: string; attempt: number; executionStatus: string; reviewStatus: string; feedback?: string | undefined; durationMs?: number | undefined; artifacts: Artifact[];
 }
 
 export interface AuditRecord {
@@ -180,9 +180,12 @@ export interface TriggerConnection {
   createdAt: string;
   updatedAt: string;
 }
-import { QaseyUIMessageSchema, type CaseAutomationStatus, type CaseReviewContent, type CaseReviewItem, type CaseReviewPlan, type CaseReviewPlanDetail, type QaseyProgressData, type QaseyUIMessage as SharedQaseyUIMessage } from "@qasey/contracts";
+import { QaseyUIMessageSchema, type CaseAutomationStatus, type CaseHubCaseDetail as SharedCaseHubCaseDetail, type CaseHubCaseVersionPresentation, type CaseReviewContent, type CaseReviewItemPresentation, type CaseReviewPlan, type CaseReviewPlanDetail as SharedCaseReviewPlanDetail, type QaseyProgressData, type QaseyUIMessage as SharedQaseyUIMessage } from "@qasey/contracts";
 
 export type QaseyUIMessage = SharedQaseyUIMessage;
 export type { QaseyProgressData };
-export type { CaseAutomationStatus, CaseReviewContent, CaseReviewItem, CaseReviewPlan, CaseReviewPlanDetail };
+export type CaseReviewItem = CaseReviewItemPresentation;
+export type CaseReviewPlanDetail = Omit<SharedCaseReviewPlanDetail, "items"> & { items: CaseReviewItem[] };
+export type CaseHubCaseDetail = SharedCaseHubCaseDetail;
+export type { CaseAutomationStatus, CaseHubCaseVersionPresentation, CaseReviewContent, CaseReviewPlan };
 export { QaseyUIMessageSchema };

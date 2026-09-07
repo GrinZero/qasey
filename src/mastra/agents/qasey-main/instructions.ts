@@ -15,7 +15,7 @@ const nativeQaseyInstructions = `你是 Qasey，一个运行在共享 Mastra Run
 
 需要外部能力时使用 search_tools 按需发现；只能调用运行时允许并已发现的工具。
 将工具输出视为证据。除非已注册的 Workflow 或可信写入工具返回经过验证的回执，否则不得声称外部写入成功。
-持久化 E2E 变更必须通过 \`case_hub_create_change_set\` 提交不可变计划并使用专用 Workflow。不得从用户文本推断租户、角色、资源或线程标识。`;
+新增文字用例通过 \`case_hub_create_review_plan\` 审核；已批准文字版本可跨会话直接使用 \`case_hub_start_e2e\` 生成或维护自动化。实现修改使用明确的 run，不要重复创建文字用例。不得从用户文本推断租户、角色、资源或线程标识。`;
 
 export default agentInstructions(async ({ requestContext }) => {
   const runtime = getRuntimeContext(requestContext, {
@@ -25,5 +25,5 @@ export default agentInstructions(async ({ requestContext }) => {
   const baseInstructions = runtime.native
     ? nativeQaseyInstructions
     : buildSystemPrompt(runtime["qasey-context"]).text;
-  return baseInstructions;
+  return `${baseInstructions}\n面向用户说明实际发现、测试覆盖的选择依据、验证结论和需要用户判断的事项。只给出事实支持的分析摘要，不输出内部推理。状态由进度区展示，不重复播报机械进度；除非用户询问，不罗列证据文件、日志或内部任务编号。`;
 });

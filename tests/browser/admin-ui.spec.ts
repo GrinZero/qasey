@@ -114,6 +114,10 @@ async function installAuthenticatedApiMocks(page: Page, diagnostics: BrowserDiag
       await json(route, { plans: [] });
       return;
     }
+    if (request.method() === "GET" && /^\/v1\/case-hub\/change-sets\/[^/]+$/u.test(url.pathname)) {
+      await json(route, { error: "not_found" }, 404);
+      return;
+    }
     if (request.method() === "GET" && url.pathname === "/v1/qasey/conversations") {
       await json(route, { conversations: [] });
       return;
@@ -287,7 +291,7 @@ test("authenticated user can open the platform and navigate the Qasey applicatio
 
   await page.getByRole("button", { name: /打开工作空间/u }).click();
   await expect(page).toHaveURL(/\/admin\/apps\/qasey$/u);
-  await expect(page.getByRole("heading", { name: "与 Qasey 一起完成测试任务" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "新 QA 任务", exact: true })).toBeVisible();
   await expect(page.getByText("Ubuntu", { exact: true })).toHaveCount(0);
 
   await page.getByRole("button", { name: /^测试运行/u }).click();
@@ -296,7 +300,7 @@ test("authenticated user can open the platform and navigate the Qasey applicatio
   await expect(page.getByText("example/sample-app", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "待我审阅", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "E2E 证据审核", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "待我审阅", exact: true })).toBeVisible();
   await page.getByRole("button", { name: /^待处理/u }).click();
   await expect(page.getByRole("heading", { name: "需要你的判断" })).toBeVisible();
   await page.getByRole("button", { name: /^活动/u }).click();
@@ -338,10 +342,10 @@ test("primary routes survive direct navigation and unknown paths render the 404 
     ["/admin", "工作交给 Agent，判断留给人"],
     ["/admin/inbox", "需要你的判断"],
     ["/admin/activity", "所有 Agent 的工作轨迹"],
-    ["/admin/apps/qasey", "与 Qasey 一起完成测试任务"],
+    ["/admin/apps/qasey", "新 QA 任务"],
     ["/admin/apps/qasey/runs", "追踪每一次验证"],
     ["/admin/apps/qasey/cases", "Case Hub"],
-    ["/admin/apps/qasey/reviews", "E2E 证据审核"],
+    ["/admin/apps/qasey/reviews", "待我审阅"],
   ] as const;
 
   for (const [path, heading] of primaryRoutes) {
@@ -438,11 +442,9 @@ test("Qasey streams a multi-turn conversation and restores it from the deep link
 
   await expect(page).toHaveURL(new RegExp(`/admin/apps/qasey\\?conversation=${conversationId}$`, "u"));
   await expect(page.locator("summary").getByText("正在分析需求", { exact: true })).toBeVisible();
-  const toolSummary = page.locator(".conversation-tools > summary");
-  await expect(toolSummary).toContainText("执行记录");
+  await expect(page.locator(".conversation-tools > summary")).toContainText("工具调用");
   const groupedToolSummary = page.locator(".conversation-tool-group > summary");
-  await expect(groupedToolSummary).toBeHidden();
-  await toolSummary.click();
+  await expect(groupedToolSummary).toBeVisible();
   await expect(groupedToolSummary).toContainText("读取 GitHub");
   await expect(groupedToolSummary.locator("code")).toHaveText("github_get_pull_request_diff");
   await groupedToolSummary.click();
@@ -455,12 +457,11 @@ test("Qasey streams a multi-turn conversation and restores it from the deep link
   await expect(page.getByText("Qasey 返回了无法识别的消息格式。")).toHaveCount(0);
 
   await page.reload();
-  await expect(page.getByText("验证预约改期流程", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "验证预约改期流程", exact: true })).toBeVisible();
   await expect(page.getByText("已找到关键风险。测试运行已启动。", { exact: true })).toBeVisible();
   const restoredToolSummary = page.locator(".conversation-tools > summary");
   await expect(restoredToolSummary).toContainText("2 次");
   await expect(page.locator(".conversation-tool-group")).toHaveCount(1);
-  await restoredToolSummary.click();
   await expect(page.locator(".conversation-tool-content strong em")).toHaveText("×2");
 });
 
@@ -516,6 +517,26 @@ test("Qasey keeps long conversation history inside the workspace scroll region",
   expect(bounds[1]).not.toBeNull();
   expect(bounds[0]!.y + bounds[0]!.height).toBeLessThanOrEqual(bounds[1]!.y + bounds[1]!.height + 1);
   expect(bounds[1]!.y + bounds[1]!.height).toBeLessThanOrEqual(900);
+  await expect(page.locator(".conversation-page > .page-heading")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "展开任务会话" })).toBeVisible();
+  for (const viewport of [{ width: 1920, height: 1080 }, { width: 1280, height: 600 }]) {
+    await page.setViewportSize(viewport);
+    const workspace = await page.locator(".conversation-workspace").boundingBox();
+    const topbar = await page.locator(".topbar").boundingBox();
+    expect(workspace!.y - (topbar!.y + topbar!.height)).toBeLessThanOrEqual(12);
+    expect(viewport.width - (workspace!.x + workspace!.width)).toBeLessThanOrEqual(20);
+    expect(workspace!.y + workspace!.height).toBeLessThanOrEqual(viewport.height);
+    await expect(page.getByLabel("发送给 Qasey")).toBeInViewport();
+    expect(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight)).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: `output/playwright/workspace-${viewport.width}.png` });
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByLabel("发送给 Qasey")).toBeInViewport();
+  await page.getByRole("button", { name: "展开任务会话" }).click();
+  await expect(page.getByRole("button", { name: "收起任务会话" })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+
 });
 
 test("Qasey can collapse the task list and keeps current-session Cases in the context rail", async ({ page }) => {
@@ -552,6 +573,9 @@ test("Qasey can collapse the task list and keeps current-session Cases in the co
   await page.goto(`/admin/apps/qasey?conversation=${conversationId}`);
   const sessionCases = page.locator(".session-cases");
   await expect(sessionCases.getByRole("heading", { name: "本次文字用例" })).toBeVisible();
+  const headingSize = await sessionCases.getByRole("heading", { name: "本次文字用例" }).boundingBox();
+  expect(headingSize!.width).toBeGreaterThan(100);
+  expect(headingSize!.height).toBeLessThan(30);
   await expect(sessionCases.getByText("任务侧栏可以折叠", { exact: false })).toBeVisible();
   await expect(sessionCases.getByText("QASEY-2 · 会话用例常驻右栏", { exact: true })).toBeVisible();
   await expect(sessionCases.getByText("e2e", { exact: true })).toBeVisible();
@@ -584,11 +608,68 @@ test("Qasey can collapse the task list and keeps current-session Cases in the co
   await page.setViewportSize({ width: 1440, height: 900 });
 
 
+  await expect(page.getByRole("button", { name: "展开任务会话" })).toBeVisible();
+  await page.getByRole("button", { name: "展开任务会话" }).click();
+  expect(await page.evaluate(() => localStorage.getItem("qasey:conversation-list-collapsed"))).toBe("false");
+  await page.reload();
+  await expect(page.getByRole("button", { name: "收起任务会话" })).toBeVisible();
   await page.getByRole("button", { name: "收起任务会话" }).click();
   await expect(page.locator(".conversation-workspace")).toHaveClass(/conversation-workspace--list-collapsed/u);
   expect(await page.evaluate(() => localStorage.getItem("qasey:conversation-list-collapsed"))).toBe("true");
   await page.reload();
   await expect(page.getByRole("button", { name: "展开任务会话" })).toBeVisible();
+});
+
+test("a conversation linked to a reusable run shows its approved Case versions without creating a review plan", async ({ page }) => {
+  const conversationId = "13572468-1357-4246-8135-724681357246";
+  const occurredAt = "2026-09-07T02:00:00.000Z";
+  const run = { ...runs[0]!, id: "97531975-3197-4531-8975-319753197531", changeSetId: "86420864-2086-4420-8864-208642086420" };
+  const conversation = { id: conversationId, title: "复用结账回归用例", createdAt: occurredAt, updatedAt: occurredAt };
+  const messages = [{
+    id: "24681357-2468-4135-8246-813572468135",
+    role: "assistant",
+    metadata: { conversationId, turnId: "24681357-2468-4135-8246-813572468135", createdAt: occurredAt, latestSequence: 2, linkedRunId: run.id },
+    parts: [{ type: "data-run", id: "24681357-2468-4135-8246-813572468135:run", data: { runId: run.id } }, { type: "text", text: "已复用 3 条批准用例并启动 E2E。", state: "done" }],
+  }];
+  const versions = [7, 8, 9].map((number, index) => ({
+    id: `0000000${number}-0000-4000-8000-00000000000${number}`,
+    caseId: `QASEY-${number}`,
+    version: index + 1,
+    suitePath: "Public / Checkout",
+    title: ["Card retry keeps the order", "Coupon remains applied", "Receipt matches the charge"][index],
+    description: "Approved reusable checkout coverage.",
+    priority: index === 0 ? "P0" : "P1",
+    target: "web",
+    preconditions: [],
+    steps: [{ action: "Complete checkout", expected: ["The order is confirmed"] }],
+    testData: {}, tags: ["checkout"], contentHash: String(number).repeat(64), status: "active", createdAt: occurredAt,
+  }));
+  const changeSet = { id: run.changeSetId, status: "ready_to_merge", revision: 1, caseVersionIds: versions.map(version => version.id), requirement: { goal: "Reuse approved checkout cases", requirementSummary: "Run the approved versions without creating a text review plan." }, updatedAt: occurredAt };
+  const results = versions.map((version, index) => ({ id: `1000000${index}-0000-4000-8000-00000000000${index}`, changeSetId: changeSet.id, runId: run.id, caseId: version.caseId, caseVersionId: version.id, attempt: 1, executionStatus: "passed", reviewStatus: "approved", artifacts: [] }));
+  let reviewPlanWrites = 0;
+
+  await page.route("**/*", async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (request.method() === "GET" && path === "/v1/qasey/conversations") { await json(route, { conversations: [conversation] }); return; }
+    if (request.method() === "GET" && path === `/v1/qasey/conversations/${conversationId}`) { await json(route, { conversation, messages }); return; }
+    if (request.method() === "GET" && path === `/v1/case-hub/change-sets/${changeSet.id}`) { await json(route, { changeSet, versions, results }); return; }
+    if (request.method() === "GET" && path === `/v1/case-hub/runs/${run.id}/events`) { await route.fulfill({ status: 200, contentType: "text/event-stream", body: `event: snapshot\ndata: ${JSON.stringify({ run })}\n\n` }); return; }
+    if (request.method() === "POST" && path.includes("review-plans")) { reviewPlanWrites++; await json(route, { error: "unexpected_write" }, 500); return; }
+    await route.fallback();
+  });
+
+  await page.goto(`/admin/apps/qasey?conversation=${conversationId}`);
+  const summary = page.locator(".session-cases");
+  await expect(summary.getByRole("heading", { name: "本次复用用例" })).toBeVisible();
+  await expect(summary.getByText("3 条已批准版本 · 3 条已有结果", { exact: true })).toBeVisible();
+  for (const version of versions) {
+    const link = summary.getByRole("link", { name: `打开用例详情：${version.caseId} v${version.version}` });
+    await expect(link).toBeVisible();
+    await expect(link).toHaveAttribute("href", `/admin/apps/qasey/cases?case=${version.caseId}`);
+  }
+  await expect(summary.getByText(/Agent 生成文字用例后/u)).toHaveCount(0);
+  expect(reviewPlanWrites).toBe(0);
 });
 
 test("failed E2E evidence links acceptance steps to video and Trace, and repair submission is single-flight", async ({ page }) => {
@@ -608,6 +689,13 @@ test("failed E2E evidence links acceptance steps to video and Trace, and repair 
     const path = new URL(request.url()).pathname;
     if (request.method() === "GET" && path === "/v1/case-hub/change-sets") { await json(route, { changeSets: [changeSet] }); return; }
     if (request.method() === "GET" && path === `/v1/case-hub/change-sets/${changeSetId}`) { await json(route, { changeSet, versions: [version], results: [result] }); return; }
+    if (request.method() === "GET" && path === `/v1/case-hub/results/${resultId}/evidence-timeline`) { await json(route, {
+      videoArtifactId: "video-artifact", traceArtifactId: "trace-artifact", steps: [
+        { index: 0, title: "Step 01 · Open the workspace", traceCallId: "call-1", videoStartMs: 0, videoEndMs: 2_100 },
+        { index: 1, title: "Step 02 · Scroll the task list", traceCallId: "call-2", videoStartMs: 2_100, videoEndMs: 9_400 },
+        { index: 2, title: "Step 03 · Open the final task", traceCallId: "call-3", videoStartMs: 9_400, videoEndMs: 12_000 },
+      ],
+    }); return; }
     if (request.method() === "POST" && path === `/v1/case-hub/results/${resultId}/review`) {
       reviewCalls++;
       expect(request.postDataJSON()).toMatchObject({ verdict: "request_changes", feedback: "滚动后侧栏消失" });
@@ -616,7 +704,7 @@ test("failed E2E evidence links acceptance steps to video and Trace, and repair 
       changeSet = { ...changeSet, status: "revising", revision: 3 };
       await json(route, { result, changeSet }, 202); return;
     }
-    if (request.method() === "GET" && path === "/v1/case-hub/trace-viewer/index.html") { await route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>Trace viewer</title>" }); return; }
+    if (request.method() === "GET" && path === "/v1/case-hub/trace-viewer/index.html") { await route.fulfill({ status: 200, contentType: "text/html", body: `<!doctype html><title>Trace viewer</title><div role="treeitem" aria-selected="false"><button class="tree-view-entry" onclick="this.parentElement.setAttribute('aria-selected','true')"><span class="action-title-method" title="Step 02 · Scroll the task list">Step 02</span></button></div>` }); return; }
     if (request.method() === "GET" && path.includes(`/v1/case-hub/runs/${result.runId}/artifacts/`)) { await route.fulfill({ status: 200, contentType: path.endsWith("video-artifact") ? "video/webm" : "application/zip", body: "" }); return; }
     await route.fallback();
   });
@@ -626,18 +714,51 @@ test("failed E2E evidence links acceptance steps to video and Trace, and repair 
   await expect(page.getByText("失败诊断 · 不可批准", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "批准这个 Case" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "要求 Agent 修复" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "验收步骤 2：Scroll the task list" })).toContainText("0:04");
+  await expect(page.getByRole("button", { name: "验收步骤 2：Scroll the task list" })).toContainText("0:02");
   await page.getByRole("button", { name: "验收步骤 2：Scroll the task list" }).click();
   await expect(page.getByRole("button", { name: "验收步骤 2：Scroll the task list" })).toHaveAttribute("aria-current", "step");
   await page.getByRole("button", { name: "调试 Trace" }).click();
-  await expect(page.getByText("当前核对 Step 02；在 Trace 的 Actions 中打开同名分组。", { exact: true })).toBeVisible();
+  await expect(page.getByText("Trace 已定位 Step 02", { exact: true })).toBeVisible();
+  await expect(page.frameLocator("iframe[title='QASEY-9 Playwright Trace Viewer']").getByRole("treeitem")).toHaveAttribute("aria-selected", "true");
   await page.getByRole("button", { name: "播放视频" }).click();
 
   await page.getByRole("button", { name: "放大视频" }).click();
   const lightbox = page.locator("dialog.evidence-lightbox");
   await expect(lightbox).toBeVisible();
+  // Reproduce the close/reopen lifecycle used by React StrictMode even in the production build.
+  await lightbox.evaluate(dialog => new Promise<void>(resolve => {
+    dialog.addEventListener("close", () => resolve(), { once: true });
+    (dialog as HTMLDialogElement).close();
+    (dialog as HTMLDialogElement).showModal();
+  }));
+  await expect(lightbox).toBeVisible();
+  const inlineBounds = await page.locator(".qa-evidence").boundingBox();
+  const expandedBounds = await lightbox.boundingBox();
+  expect(expandedBounds!.width).toBeGreaterThan(inlineBounds!.width);
   await lightbox.getByRole("button", { name: "调试 Trace" }).click();
   await expect(lightbox.getByTitle("QASEY-9 Playwright Trace Viewer")).toBeVisible();
+  await lightbox.getByRole("button", { name: "关闭放大查看" }).click();
+  await expect(lightbox).toBeHidden();
+  await expect(page.getByRole("button", { name: "放大 Trace" })).toBeFocused();
+  await page.getByRole("button", { name: "放大 Trace" }).click();
+  await expect(lightbox.getByTitle("QASEY-9 Playwright Trace Viewer")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(lightbox).toBeHidden();
+  await page.getByRole("button", { name: "播放视频" }).click();
+  await page.getByRole("button", { name: "放大视频" }).click();
+  const expandedVideo = lightbox.locator("video");
+  const expandedStage = lightbox.locator(".evidence-stage");
+  await expect(expandedVideo).toBeVisible();
+  await expect(lightbox.getByRole("button", { name: "调试 Trace" })).toBeVisible();
+  await expect(lightbox.getByRole("heading", { name: "按验收步骤核对" })).toBeVisible();
+  const [videoBounds, stageBounds, objectFit] = await Promise.all([
+    expandedVideo.boundingBox(),
+    expandedStage.boundingBox(),
+    expandedVideo.evaluate(element => getComputedStyle(element).objectFit),
+  ]);
+  expect(videoBounds!.height).toBeLessThanOrEqual(stageBounds!.height);
+  expect(videoBounds!.width).toBeLessThanOrEqual(stageBounds!.width);
+  expect(objectFit).toBe("contain");
   await lightbox.getByRole("button", { name: "关闭放大查看" }).click();
   await expect(lightbox).toBeHidden();
 
@@ -697,20 +818,19 @@ test("Qasey resumes an active turn after the persisted cursor without duplicatin
   const restoredExecutionSummary = page.locator(".conversation-tools > summary");
   await expect(restoredExecutionSummary).toContainText("本轮执行已完成");
   await expect(page.getByText("case_hub_search_cases", { exact: true })).toHaveCount(1);
-  await restoredExecutionSummary.click();
   await expect(page.getByText("已读取 Case Hub 用例与审核状态…", { exact: true })).toBeVisible();
   expect(["0", "7"]).toContain(reconnectAfter);
   await expect(page.getByText("已经确认签名，", { exact: true })).toHaveCount(0);
 });
 
-test("case hub exposes approved text versions independently from E2E delivery", async ({ page }) => {
+test("case hub opens a URL-backed detail from the library row", async ({ page }) => {
   const latestVersionId = "22222222-2222-4222-8222-222222222222";
   const candidateVersionId = "11111111-1111-4111-8111-111111111111";
   const failedChangeSetId = "33333333-3333-4333-8333-333333333333";
   const readyChangeSetId = "44444444-4444-4444-8444-444444444444";
   const caseRecord = {
     id: "QASEY-1", suitePath: "Appointments / Reschedule", title: "Reschedule across time zones",
-    activeVersionId: latestVersionId, proposedVersionIds: [candidateVersionId], updatedAt: "2026-09-03T01:00:00.000Z",
+    activeVersionId: latestVersionId, proposedVersionIds: [candidateVersionId], automationStatus: "verified", systemTags: ["e2e"], updatedAt: "2026-09-03T01:00:00.000Z",
   };
   const changeSets = [
     { id: failedChangeSetId, status: "failed", revision: 2, caseVersionIds: [candidateVersionId], requirement: { goal: "Candidate update", requirementSummary: "A failed newer attempt." }, updatedAt: "2026-09-04T01:00:00.000Z" },
@@ -719,22 +839,25 @@ test("case hub exposes approved text versions independently from E2E delivery", 
   const versions = [
     { id: latestVersionId, caseId: "QASEY-1", version: 2, suitePath: caseRecord.suitePath, title: caseRecord.title, description: "Covers staff and customer time zones.", priority: "P1", target: "web", preconditions: ["An appointment exists in another time zone"], steps: [{ action: "Move the appointment by one hour", expected: ["The customer sees the local converted time", "The staff calendar has no conflict"] }], tags: ["regression", "timezone"], automationPath: "e2e/reschedule.spec.ts", contentHash: "b".repeat(64), status: "active", createdAt: "2026-09-03T01:00:00.000Z" },
   ];
+  const currentVersion = { ...versions[0], isCurrent: true, automationStatus: "verified", systemTags: ["e2e"], automation: { status: "verified", changeSetId: readyChangeSetId, changeSetStatus: "merged" } };
 
   await page.route("**/*", async route => {
     const url = new URL(route.request().url());
     if (route.request().method() === "GET" && url.pathname === "/v1/case-hub/cases") { await json(route, { cases: [caseRecord] }); return; }
     if (route.request().method() === "GET" && url.pathname === "/v1/case-hub/change-sets") { await json(route, { changeSets }); return; }
     if (route.request().method() === "GET" && url.pathname === "/v1/case-hub/review-plans") { await json(route, { plans: [] }); return; }
-    if (route.request().method() === "GET" && url.pathname === "/v1/case-hub/cases/QASEY-1") { await json(route, { case: caseRecord, versions, changeSets: [changeSets[1]], results: [] }); return; }
+    if (route.request().method() === "GET" && url.pathname === "/v1/case-hub/cases/QASEY-1") { await json(route, { case: caseRecord, current: { version: currentVersion, automation: currentVersion.automation }, history: [{ version: currentVersion, changeSets: [changeSets[1]], results: [] }], versions: [currentVersion], changeSets: [changeSets[1]], results: [] }); return; }
     await route.fallback();
   });
 
   await page.goto("/admin/apps/qasey/cases");
   await expect(page.getByRole("columnheader", { name: "正式交付" })).toBeVisible();
   await expect(page.getByRole("columnheader", { name: "待生效提案" })).toHaveCount(0);
-  await expect(page.getByText("已合并", { exact: true })).toBeVisible();
+  await expect(page.getByText("e2e", { exact: true })).toBeVisible();
   await expect(page.getByText("执行失败", { exact: true })).toHaveCount(0);
-  await page.getByRole("button", { name: /^QASEY-1 Reschedule/u }).click();
+  const caseRow = page.getByRole("row", { name: /打开 QASEY-1/u });
+  await caseRow.click({ position: { x: 500, y: 35 } });
+  await expect(page).toHaveURL(/\/admin\/apps\/qasey\/cases\?case=QASEY-1$/u);
 
   const dialog = page.getByRole("dialog", { name: /QASEY-1/u });
   await expect(dialog).toBeVisible();
@@ -745,6 +868,52 @@ test("case hub exposes approved text versions independently from E2E delivery", 
   await expect(dialog.getByRole("link", { name: "打开 Pull Request" })).toHaveAttribute("href", "https://example.test/pull/7");
 
   await expect(dialog.getByRole("button", { name: /v1/u })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(page).toHaveURL(/\/admin\/apps\/qasey\/cases$/u);
+  const caseButton = caseRow.getByRole("button", { name: "QASEY-1 Reschedule across time zones", exact: true });
+  await caseButton.focus();
+  await caseButton.press("Enter");
+  await expect(page).toHaveURL(/\/admin\/apps\/qasey\/cases\?case=QASEY-1$/u);
+  await expect(dialog).toBeVisible();
+  await page.mouse.click(8, 120);
+  await expect(dialog).toHaveCount(0);
+});
+
+test("case detail submits the decision for its projected current evidence", async ({ page }) => {
+  const versionId = "22222222-2222-4222-8222-222222222222";
+  const changeSetId = "33333333-3333-4333-8333-333333333333";
+  const resultId = "44444444-4444-4444-8444-444444444444";
+  const caseRecord = { id: "QASEY-7", suitePath: "Public / Checkout", title: "Card retry keeps the order", activeVersionId: versionId, proposedVersionIds: [], automationStatus: "awaiting_review", updatedAt: "2026-09-07T01:00:00.000Z" };
+  const changeSet = { id: changeSetId, status: "awaiting_review", revision: 2, caseVersionIds: [versionId], requirement: { goal: "Verify checkout retry", requirementSummary: "The current payment flow needs evidence." }, updatedAt: "2026-09-07T01:00:00.000Z" };
+  const result = { id: resultId, changeSetId, runId: "55555555-5555-4555-8555-555555555555", caseId: caseRecord.id, caseVersionId: versionId, attempt: 1, executionStatus: "passed", reviewStatus: "pending", artifacts: [{ id: "trace-current", kind: "trace", name: "qasey-7/trace.zip", uri: "artifact://trace", contentType: "application/zip" }] };
+  const version = { id: versionId, caseId: caseRecord.id, version: 3, suitePath: caseRecord.suitePath, title: caseRecord.title, description: "Retries once without duplicating the order.", priority: "P0", target: "web", preconditions: ["A declined card is available"], steps: [{ action: "Retry the card payment", expected: ["One order is confirmed"] }], testData: {}, tags: ["checkout"], contentHash: "d".repeat(64), status: "active", createdAt: "2026-09-07T01:00:00.000Z", isCurrent: true, automationStatus: "awaiting_review", automation: { status: "awaiting_review", changeSetId, changeSetStatus: "awaiting_review", resultId, resultAttempt: 1 } };
+  let approved = false;
+  await page.route("**/*", async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (request.method() === "GET" && path === "/v1/case-hub/cases") return json(route, { cases: [caseRecord] });
+    if (request.method() === "GET" && path === `/v1/case-hub/cases/${caseRecord.id}`) return json(route, { case: caseRecord, current: { version, automation: version.automation }, history: [{ version, changeSets: [{ ...changeSet, status: approved ? "ready_to_merge" : changeSet.status }], results: [{ ...result, reviewStatus: approved ? "approved" : result.reviewStatus }] }], versions: [version], changeSets: [changeSet], results: [result] });
+    if (request.method() === "GET" && path === `/v1/case-hub/results/${resultId}/evidence-timeline`) return json(route, { traceArtifactId: "trace-current", steps: [{ index: 0, title: "Step 01 · Retry the card payment", traceCallId: "call-current" }] });
+    if (request.method() === "POST" && path === `/v1/case-hub/results/${resultId}/review`) { expect(request.postDataJSON()).toEqual({ verdict: "approve" }); approved = true; return json(route, { result: { ...result, reviewStatus: "approved" }, changeSet: { ...changeSet, status: "ready_to_merge" } }, 202); }
+    if (request.method() === "GET" && path === "/v1/case-hub/trace-viewer/index.html") return route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><title>Trace viewer</title>" });
+    if (request.method() === "GET" && path.includes("/artifacts/trace-current")) return route.fulfill({ status: 200, contentType: "application/zip", body: "" });
+    await route.fallback();
+  });
+  await page.goto("/admin/apps/qasey/cases");
+  await page.getByRole("row", { name: /打开 QASEY-7/u }).click({ position: { x: 520, y: 35 } });
+  const dialog = page.getByRole("dialog", { name: /QASEY-7/u });
+  await expect(dialog.getByRole("button", { name: "批准这个 Case" })).toBeEnabled();
+  await dialog.getByRole("button", { name: "放大 Trace" }).click();
+  const lightbox = dialog.locator("dialog.evidence-lightbox");
+  await expect(lightbox).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(lightbox).toBeHidden();
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "批准这个 Case" }).click();
+  await expect(dialog.getByText("已批准这个 Case 的 E2E 证据。", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "批准这个 Case" })).toHaveCount(0);
+  expect(approved).toBe(true);
 });
 
 for (const approvalMode of ["separate", "combined"] as const) {
@@ -788,8 +957,8 @@ test(`text case review protects drafts and approves the saved revision (${approv
     await route.fallback();
   });
 
-  await page.goto("/admin/apps/qasey/cases");
-  await expect(page.getByRole("heading", { name: "用例待办" })).toBeVisible();
+  await page.goto("/admin/apps/qasey/reviews");
+  await expect(page.getByRole("heading", { name: "文字用例待确认" })).toBeVisible();
   await page.getByRole("button", { name: /待审 Create an appointment/u }).click();
   await page.getByRole("button", { name: "编辑", exact: true }).click();
   await page.getByLabel("标题", { exact: true }).fill("Create an appointment safely");
@@ -810,7 +979,7 @@ test(`text case review protects drafts and approves the saved revision (${approv
   await expect(page.getByRole("button", { name: "保存修改", exact: true })).toBeDisabled();
   page.once("dialog", dialog => dialog.dismiss());
   await page.getByRole("button", { name: /^测试运行/u }).click();
-  await expect(page).toHaveURL(/\/cases$/u);
+  await expect(page).toHaveURL(/\/reviews$/u);
   await page.getByLabel("测试数据（JSON）", { exact: true }).fill('{"valid":true}');
   if (approvalMode === "combined") {
     await page.setViewportSize({ width: 390, height: 844 });
@@ -915,14 +1084,14 @@ for (const selection of ["single", "batch"] as const) {
       if (path === `/v1/qasey/conversations/${conversationId}`) { await json(route, { conversation: { id: conversationId, title: "Public retry session", createdAt, updatedAt: createdAt }, messages }); return; }
       await route.fallback();
     });
-    await page.goto("/admin/apps/qasey/cases");
+    await page.goto("/admin/apps/qasey/reviews");
     if (selection === "single") {
       await page.getByRole("button", { name: /已批准 Appointment retry/u }).click();
       await page.getByRole("button", { name: "重新生成 E2E", exact: true }).click();
     } else {
       await page.getByRole("button", { name: "生成 E2E（2 条）", exact: true }).click();
     }
-    await expect(page).toHaveURL(/\/cases$/u);
+    await expect(page).toHaveURL(/\/reviews$/u);
     const workLink = page.getByRole("link", { name: "查看 Agent 工作", exact: true }).first();
     await expect(workLink).toHaveAttribute("href", `/admin/apps/qasey?conversation=${conversationId}&turn=${turnId}`);
     await expect(page.getByText("E2E 任务已启动", { exact: true }).first()).toBeVisible();
@@ -943,7 +1112,7 @@ for (const selection of ["single", "batch"] as const) {
     expect(bounds!.y).toBeGreaterThanOrEqual(scrollBounds!.y);
     expect(bounds!.y).toBeLessThan(scrollBounds!.y + scrollBounds!.height);
     await banner.getByRole("link", { name: "返回用例", exact: true }).click();
-    await expect(page).toHaveURL(new RegExp(`/cases\\?plan=${planId}`, "u"));
+    await expect(page).toHaveURL(new RegExp(`/reviews\\?plan=${planId}`, "u"));
     await expect(page.getByRole("heading", { name: "Public E2E retry", exact: true })).toBeVisible();
     if (selection === "single") await expect(page.getByRole("button", { name: /已批准 Appointment retry/u })).toHaveAttribute("aria-expanded", "true");
     expect(submissions).toBe(1);
@@ -960,7 +1129,16 @@ test("multiple named agents receive explicit mentions while E2E keeps running an
     { agentId: "qasey-e2e-author", name: "E2E Agent", description: "编写、验证和修复", introducedBy: "qasey-main", joinedAt: occurredAt },
   ];
   const metadata = { conversationId, turnId, createdAt: occurredAt, latestSequence: 1, linkedRunId: "c3333333-3333-4333-8333-333333333333", authorAgentId: "qasey-e2e-author", recipientAgentIds: [], collaborationStatus: "completed", messageKind: "execution" };
-  let messages: unknown[] = [{ id: "event-start", role: "assistant", metadata, parts: [{ type: "text", text: "正在独立验证，执行期间可以继续交流。" }] }];
+  let messages: unknown[] = [
+    { id: "event-start", role: "assistant", metadata, parts: [{ type: "text", text: "已接收任务" }] },
+    { id: "analysis:author", role: "assistant", metadata: { ...metadata, messageKind: "message" }, parts: [{ type: "text", text: "发现短视口存在导航溢出，因此覆盖短屏和正常高度两种场景。" }] },
+    { id: "event-author", role: "assistant", metadata, parts: [
+      { type: "text", text: "正在编写测试" },
+      { type: "dynamic-tool", toolCallId: "read-spec", toolName: "mastra_workspace_read_file", title: "读取文件", state: "output-available", input: { summary: "读取测试文件" }, output: { summary: "文件读取完成" } },
+      { type: "dynamic-tool", toolCallId: "validate-spec", toolName: "validate_e2e_candidate", title: "验证测试实现", state: "input-available", input: { summary: "正在检查测试实现" } },
+    ] },
+    { id: "event-verify", role: "assistant", metadata, parts: [{ type: "text", text: "正在独立验证\n[trace.zip](/public-trace)" }] },
+  ];
   let revision = 1;
   const sent: Array<{ message: string; clientMessageId: string; recipientAgentIds: string[] }> = [];
   await page.route("**/*", async route => {
@@ -984,7 +1162,17 @@ test("multiple named agents receive explicit mentions while E2E keeps running an
     await route.fallback();
   });
   await page.goto(`/admin/apps/qasey?conversation=${conversationId}`);
-  await expect(page.getByText("正在独立验证，执行期间可以继续交流。", { exact: true })).toBeVisible();
+  const e2eMessages = page.locator("article.conversation-turn--assistant").filter({ has: page.locator(".agent-message-heading").getByRole("button", { name: "E2E Agent", exact: true }) });
+  await expect(e2eMessages).toHaveCount(1);
+  await expect(e2eMessages).toContainText("验证结果");
+  await expect(e2eMessages).toContainText("发现短视口存在导航溢出");
+  await expect(e2eMessages.getByText("mastra_workspace_read_file", { exact: true })).toBeVisible();
+  await expect(e2eMessages.getByText("validate_e2e_candidate", { exact: true })).toBeVisible();
+  await expect(e2eMessages.getByText("正在检查测试实现", { exact: true })).toBeVisible();
+  await expect(e2eMessages.locator(".conversation-progress")).toHaveCount(1);
+  await expect(e2eMessages.locator(".conversation-tools")).toHaveCount(1);
+  await expect(page.getByText("执行记录", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("正在编写测试", { exact: true })).toHaveCount(0);
   const composer = page.getByLabel("发送给 Qasey 或 @ Agent", { exact: true });
   await expect(composer).toBeEnabled();
   await composer.fill("@E2E");
@@ -1004,5 +1192,241 @@ test("multiple named agents receive explicit mentions while E2E keeps running an
   await expect(page.getByText("正在验证第二条断言；补充要求会在下一编写节点应用。", { exact: true })).toHaveCount(1);
   await page.locator(".agent-message-heading").getByRole("button", { name: "E2E Agent", exact: true }).last().click();
   await expect(page.getByRole("button", { name: "移除接收者 E2E Agent" })).toBeVisible();
-  await expect(page.getByLabel("关联 E2E 任务", { exact: true })).toHaveValue("c3333333-3333-4333-8333-333333333333");
+  await expect(page.getByLabel("关联 E2E 任务", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "取消运行关联" })).toHaveCount(0);
+  await page.getByRole("button", { name: "继续处理", exact: true }).click();
+  await expect(composer).toBeFocused();
+  await expect(page.getByRole("button", { name: "取消运行关联" })).toBeVisible();
+  await composer.fill("请诊断这次运行。");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect.poll(() => sent.length).toBe(2);
+  expect(sent[1]).toMatchObject({ targetRunId: "c3333333-3333-4333-8333-333333333333" });
+  await page.getByRole("button", { name: "取消运行关联" }).click();
+  await expect(page.getByRole("button", { name: "取消运行关联" })).toHaveCount(0);
+  await composer.fill("我们讨论整个需求。");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect.poll(() => sent.length).toBe(3);
+  expect(sent[2]).not.toHaveProperty("targetRunId");
+});
+
+for (const hasImage of [false, true]) {
+test(`long execution failures stay compact and preserve readable evidence details (${hasImage ? "with" : "without"} screenshot)`, async ({ page }) => {
+  const conversationId = "a1111111-1111-4111-8111-111111111111";
+  const runId = "c3333333-3333-4333-8333-333333333333";
+  const error = `E2E did not pass after 3 clean verification attempts and 2 bounded repair rounds:\n${"─".repeat(200)}\n tests/browser/sidebar-scroll.e2e.spec.ts:23:1\n${"public-test-output/".repeat(30)}test-failed-1.png`;
+  const run = { ...runs[0]!, id: runId, status: "failed", error, artifacts: hasImage ? [{ id: "public-screenshot", kind: "screenshot", name: "test-failed-1.png", uri: "artifact://public-screenshot", contentType: "image/png" }] : [] };
+  const conversation = { id: conversationId, title: "失败运行展示", createdAt: "2026-09-05T02:00:00.000Z", updatedAt: "2026-09-05T02:00:00.000Z" };
+  const text = `历史任务当前状态：执行失败。${error}`;
+  const messages = [{ id: "restored-failure", role: "assistant", metadata: { conversationId, turnId: "b2222222-2222-4222-8222-222222222222", createdAt: "2026-09-05T02:00:00.000Z", latestSequence: 1, authorAgentId: "qasey-e2e-author", linkedRunId: runId, messageKind: "execution", collaborationStatus: "completed" }, parts: [{ type: "text", text }] }];
+  await page.route("**/*", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/v1/qasey/conversations") return json(route, { conversations: [conversation] });
+    if (path === `/v1/qasey/conversations/${conversationId}`) return json(route, { conversation, messages });
+    if (path === `/v1/case-hub/runs/${runId}/artifacts/public-screenshot`) {
+      await route.fulfill({ contentType: "image/png", body: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWQAAAABJRU5ErkJggg==", "base64") }); return;
+    }
+    if (path === `/v1/case-hub/change-sets/${run.changeSetId}`) return json(route, { error: "not_found" }, 404);
+    if (path === `/v1/case-hub/runs/${runId}/events`) {
+      await route.fulfill({ status: 200, contentType: "text/event-stream", body: `event: snapshot\ndata: ${JSON.stringify({ run })}\n\n` }); return;
+    }
+    await route.fallback();
+  });
+  await page.goto(`/admin/apps/qasey?conversation=${conversationId}`);
+  const card = page.locator("article.conversation-turn--assistant");
+  await expect(card).toContainText("自动验证未通过");
+  expect(await card.innerText()).not.toContain("bounded repair rounds");
+  await expect(card.locator(".conversation-progress > summary")).toContainText("未通过");
+  await expect(card.locator(".conversation-progress")).toHaveCount(1);
+  await expect(card.locator("hr, table")).toHaveCount(0);
+  await card.getByRole("button", { name: "查看详情" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("heading", { name: "自动验证未通过", exact: true })).toBeVisible();
+  if (hasImage) {
+    const screenshot = dialog.getByRole("img", { name: "执行截图 1", exact: true });
+    await expect(screenshot).toBeVisible();
+    await expect.poll(() => screenshot.evaluate(image => (image as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+  } else {
+    await expect(dialog.getByText("没有可查看的截图或录像", { exact: true })).toBeVisible();
+  }
+  await expect(dialog.locator(".run-error-log")).not.toBeVisible();
+  await dialog.locator("summary").filter({ hasText: "技术详情与原始文件" }).click();
+  await expect(dialog.locator(".run-error-log")).toHaveText(error);
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  }
+});
+
+}
+
+test("failed chat replies show one error and long Markdown links wrap without native button chrome", async ({ page }) => {
+  const conversationId = "d1111111-1111-4111-8111-111111111111";
+  const occurredAt = "2026-09-06T02:00:00.000Z";
+  const conversation = { id: conversationId, title: "错误展示检查", createdAt: occurredAt, updatedAt: occurredAt };
+  const url = `https://example.com/${"public-documentation-".repeat(35)}`;
+  const detail = `Request failed. See ${url}`;
+  const metadata = { conversationId, turnId: "e2222222-2222-4222-8222-222222222222", createdAt: occurredAt, latestSequence: 1, authorAgentId: "qasey-main", recipientAgentIds: [], messageKind: "message", collaborationStatus: "failed" };
+  const messages = [
+    { id: "style-user", role: "user", metadata, parts: [{ type: "text", text: "检查公开示例" }] },
+    { id: "style-error", role: "assistant", metadata, parts: [
+      { type: "text", text: detail },
+      { type: "data-progress", data: { sequence: 1, status: "failed", title: "处理失败", detail } },
+    ] },
+    { id: "style-link", role: "assistant", metadata: { ...metadata, collaborationStatus: "completed" }, parts: [{ type: "text", text: `参考 [${url}](${url})` }] },
+  ];
+  await page.route("**/*", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/v1/qasey/conversations") return json(route, { conversations: [conversation] });
+    if (path === `/v1/qasey/conversations/${conversationId}`) return json(route, { conversation, messages, participants: [], revision: 1 });
+    if (path === `/v1/qasey/conversations/${conversationId}/events`) {
+      return route.fulfill({ status: 200, contentType: "text/event-stream", body: `event: snapshot\ndata: ${JSON.stringify({ revision: 1, messages, participants: [] })}\n\n` });
+    }
+    await route.fallback();
+  });
+  await page.goto(`/admin/apps/qasey?conversation=${conversationId}`);
+  await expect(page.getByRole("alert")).toHaveText(new RegExp("Request failed"));
+  await expect(page.getByText(detail, { exact: true }).filter({ visible: true })).toHaveCount(1);
+  const link = page.getByRole("button", { name: url, exact: true });
+  await expect(link).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(link).toHaveCSS("border-top-width", "0px");
+  for (const width of [1280, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    await expect(link).toBeVisible();
+    expect(await page.locator(".qasey-conversation-scroll").evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  }
+  await page.getByRole("button", { name: "重试这条消息" }).click();
+  await expect(page.locator("#qa-prompt")).toHaveValue("检查公开示例");
+});
+
+
+for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
+  test(`case hub deletion uses accessible components (${viewport.width}px)`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    const caseRecord = {
+      id: "QASEY-1", suitePath: "Public / Navigation", title: "短桌面视口下侧栏主导航可独立滚动且底部控制区保持可见，并且不会遮挡页面操作",
+      activeVersionId: "22222222-2222-4222-8222-222222222222", proposedVersionIds: [], updatedAt: "2026-09-03T01:00:00.000Z",
+    };
+    let deleted = false;
+    let attempts = 0;
+    const detailRequests: string[] = [];
+    let completeDelete!: () => void;
+    const pendingDelete = new Promise<void>(resolve => { completeDelete = resolve; });
+    page.on("dialog", () => { throw new Error("Case deletion must not use a browser-native dialog"); });
+    await page.route("**/v1/case-hub/cases**", async route => {
+      if (route.request().method() === "DELETE") {
+        attempts += 1;
+        if (attempts === 1) { await json(route, { message: "暂时无法删除，请重试" }, 409); return; }
+        await pendingDelete;
+        deleted = true;
+        await json(route, { deleted: true });
+        return;
+      }
+      if (new URL(route.request().url()).pathname.endsWith(`/cases/${caseRecord.id}`)) {
+        detailRequests.push(route.request().url());
+        await json(route, { error: "Unexpected case detail request during deletion" }, 500);
+        return;
+      }
+      await json(route, { cases: deleted ? [] : [caseRecord] });
+    });
+    await page.goto("/admin/apps/qasey/cases");
+    const actions = page.getByRole("button", { name: "QASEY-1 更多操作", exact: true });
+    await expect(actions).toBeVisible();
+    await actions.scrollIntoViewIfNeeded();
+    const row = page.getByRole("row").filter({ has: actions });
+    expect((await row.boundingBox())!.height).toBeLessThanOrEqual(80);
+    await actions.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("menuitem", { name: "查看详情", exact: true })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(actions).toBeFocused();
+    await actions.click();
+    await page.screenshot({ path: testInfo.outputPath("case-actions.png") });
+    await page.getByRole("menuitem", { name: "删除用例", exact: true }).click();
+    const dialog = page.getByRole("alertdialog", { name: "删除用例？", exact: true });
+    const cancel = dialog.getByRole("button", { name: "取消", exact: true });
+    const remove = dialog.getByRole("button", { name: "删除用例", exact: true });
+    await expect(dialog).toBeVisible();
+    await expect(cancel).toBeFocused();
+    await expect(dialog.getByText(caseRecord.title, { exact: true })).toBeVisible();
+    await dialog.getByText(caseRecord.title, { exact: true }).click();
+    await expect(page).toHaveURL(/\/admin\/apps\/qasey\/cases$/);
+    expect(detailRequests).toEqual([]);
+    await cancel.focus();
+    const box = (await dialog.boundingBox())!;
+    expect(box.x).toBeGreaterThanOrEqual(16);
+    expect(box.x + box.width).toBeLessThanOrEqual(viewport.width - 16);
+    await page.keyboard.press("Tab");
+    await expect(remove).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(cancel).toBeFocused();
+    await page.screenshot({ path: testInfo.outputPath("case-delete-dialog.png") });
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(actions).toBeFocused();
+    expect(attempts).toBe(0);
+    await actions.click();
+    await page.getByRole("menuitem", { name: "删除用例", exact: true }).click();
+    await cancel.click();
+    await expect(actions).toBeFocused();
+    expect(attempts).toBe(0);
+    await actions.click();
+    await page.getByRole("menuitem", { name: "删除用例", exact: true }).click();
+    await remove.click();
+    await expect(dialog.getByRole("alert")).toHaveText("暂时无法删除，请重试");
+    await expect(remove).toBeEnabled();
+    await remove.click();
+    await expect(dialog.getByRole("button", { name: "正在删除…", exact: true })).toBeDisabled();
+    await expect(cancel).toBeDisabled();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeVisible();
+    completeDelete();
+    await expect(dialog).toHaveCount(0);
+    await expect(actions).toHaveCount(0);
+    await expect(page.getByRole("status").filter({ hasText: "已删除 QASEY-1" })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "搜索用例", exact: true })).toBeFocused();
+    await page.reload();
+    await expect(page.getByText("Case Hub 还是空的", { exact: true })).toBeVisible();
+    expect(attempts).toBe(2);
+    expect(detailRequests).toEqual([]);
+  });
+}
+
+
+test("ends failed text review and cancels stranded verification from the inbox", async ({ page }) => {
+  const plan = { id: "55555555-5555-4555-8555-555555555555", conversationId: "77777777-7777-4777-8777-777777777777", subjectId: session.subjectId, status: "ready", revision: 3,
+    requirement: { goal: "Failed automation review" } };
+  const item = { id: "item-1", revision: 1, status: "approved", automationStatus: "failed", publishedCaseVersionId: "version-1",
+    content: { title: "Keep this approved case", suitePath: "Public / Smoke", priority: "P1", tags: [], steps: [], preconditions: [] } };
+  const changeSet = { id: "change-1", status: "verifying", caseVersionIds: ["version-1"], requirement: { goal: "Stranded verification" } };
+  const detail = () => ({ plan, items: [item], editable: plan.status !== "cancelled" });
+  await page.route("**/*", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/v1/case-hub/review-plans") return json(route, { plans: [detail()] });
+    if (path === `/v1/case-hub/review-plans/${plan.id}`) return json(route, detail());
+    if (path === `/v1/case-hub/review-plans/${plan.id}/cancel`) {
+      expect(route.request().method()).toBe("POST");
+      expect(route.request().postDataJSON()).toEqual({ expectedRevision: 3 });
+      plan.status = "cancelled"; plan.revision++;
+      return json(route, detail());
+    }
+    if (path === "/v1/case-hub/change-sets") return json(route, { changeSets: [changeSet] });
+    if (path === `/v1/case-hub/change-sets/${changeSet.id}`) return json(route, { changeSet, versions: [], results: [] });
+    if (path === `/v1/case-hub/change-sets/${changeSet.id}/cancel`) {
+      expect(route.request().method()).toBe("POST");
+      changeSet.status = "cancelled";
+      return json(route, changeSet);
+    }
+    await route.fallback();
+  });
+  await page.goto("/admin/apps/qasey/reviews");
+  await expect(page.getByText("生成失败", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "结束本次审核", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Failed automation review" })).toHaveCount(0);
+  expect(item.status).toBe("approved");
+  await page.getByRole("button", { name: "取消本次验证", exact: true }).click();
+  await expect(page.getByRole("button", { name: /Stranded verification/ })).toHaveCount(0);
+  await expect(page.getByText("本次验证已取消，已批准用例和历史记录已保留。", { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("button", { name: "结束本次审核", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "取消本次验证", exact: true })).toHaveCount(0);
 });

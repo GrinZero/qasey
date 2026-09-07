@@ -179,7 +179,9 @@ export class NativeMastraCodingBackend implements CodingAgentBackend {
         });
       }
       const propagatedTracing = tracingOptions(request.traceContext);
-      const output = await runtime.getAgent("codeAgent").generate([
+      // Keep long coding turns on the provider's streaming transport, as in chat.
+      // A buffered generation can leave a proxy connection idle during reasoning.
+      const stream = await runtime.getAgent("codeAgent").stream([
         `Execution profile: ${request.profile.id}`,
         `Frozen writable paths: ${writablePaths.join(", ") || "none"}`,
         "Complete only the immutable task context below.",
@@ -198,6 +200,7 @@ export class NativeMastraCodingBackend implements CodingAgentBackend {
         },
         ...(propagatedTracing ? { tracingOptions: propagatedTracing } : {}),
       });
+      const output = await completedCodingOutput(stream);
       await observability.flush();
       return {
         summary: output.text || "Native Mastra coding task completed without a textual summary",
@@ -209,6 +212,17 @@ export class NativeMastraCodingBackend implements CodingAgentBackend {
       await workspace.destroy().catch(() => undefined);
     }
   }
+}
+
+export async function completedCodingOutput(stream: {
+  getFullOutput(): Promise<{ text: string; runId?: string | undefined; error?: Error | undefined; finishReason?: string | undefined }>;
+}): Promise<{ text: string; runId?: string | undefined }> {
+  const output = await stream.getFullOutput();
+  // Streaming can finish with partial text and an error instead of rejecting.
+  // Never publish that partial candidate as a successful author result.
+  if (output.error) throw output.error;
+  if (output.finishReason === "error") throw new Error("Coding agent stream failed before completion");
+  return output;
 }
 
 class CodeTaskTracingExporter implements ObservabilityExporter {

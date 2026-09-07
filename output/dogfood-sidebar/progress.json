@@ -1,0 +1,73 @@
+{
+  "featurePr": "https://github.com/GrinZero/qasey/pull/13",
+  "featureSha": "4aa8092a2a4e5133f64facb326b17ea9afe0b827",
+  "conversationId": "901129d7-ace9-47b7-83ae-fbab815769dd",
+  "reviewPlanId": "550f993b-ce9f-4c0f-a1d4-8f7b9b738cfb",
+  "approvedCases": [
+    "QASEY-7",
+    "QASEY-8",
+    "QASEY-9"
+  ],
+  "textReview": "Corrected navigation label to 测试运行 and dynamic badge title expectation through review UI before approval.",
+  "previewCheckout": "/tmp/qasey-dogfood-preview",
+  "composeOverride": "/tmp/qasey-goal-preview.override.yml",
+  "status": "succeeded",
+  "runId": "0adf128d-1a45-4081-80d8-c53ee5d901d9",
+  "checks": {
+    "pnpm check": "passed, 741 tests; 8 skipped; API and worker builds passed",
+    "pnpm check:open-source": "passed, 455 files",
+    "git diff --check": "passed"
+  },
+  "liveResult": {
+    "author": "succeeded",
+    "verifier": "all three browser cases passed",
+    "qaFeedbackRounds": 2,
+    "finalRunStatus": "succeeded",
+    "artifactCount": 163,
+    "artifactHeaders": "Unicode trace/video now load in browser",
+    "evidenceBinding": "new ResultAttempt only contains latest verifier evidence"
+  },
+  "messageVisibility": {
+    "verifiedInLiveUI": true,
+    "liveToolCalls": 74,
+    "directE2EAgentReply": true,
+    "finalStatus": "已通过",
+    "automatedCases": 3
+  },
+  "initialRunBaseSha": "102311628c1657bb2b146a898853a57471b2509f",
+  "credentialResolution": "User authorized synchronizing existing dedicated account database password to ignored .env; server-side verification passed and preview config synchronized.",
+  "previousConversationId": "350cee8d-0c97-4858-b751-0ee389555720",
+  "loginVerifiedInUI": true,
+  "previousRunId": "980fe6ff-a159-4290-8cca-7a7131209b08",
+  "approvedVersion": 2,
+  "e2ePr": "https://github.com/GrinZero/qasey/pull/14",
+  "changeSetId": "d2dd4d5c-1aab-445f-ae61-407abe84e558",
+  "e2ePrHead": "e78bbcd783e4d64425b7c7d5237424bb07b03654",
+  "e2ePrDraft": false,
+  "caseResults": [
+    {
+      "caseId": "QASEY-7",
+      "attempt": 3,
+      "execution": "passed",
+      "review": "approved",
+      "videos": 1,
+      "traces": 1
+    },
+    {
+      "caseId": "QASEY-8",
+      "attempt": 1,
+      "execution": "passed",
+      "review": "approved",
+      "videos": 1,
+      "traces": 1
+    },
+    {
+      "caseId": "QASEY-9",
+      "attempt": 1,
+      "execution": "passed",
+      "review": "approved",
+      "videos": 1,
+      "traces": 1
+    }
+  ]
+}

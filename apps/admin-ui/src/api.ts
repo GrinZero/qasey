@@ -1,6 +1,6 @@
 import { type ConversationParticipant } from "@qasey/contracts";
 import { QaseyE2ETaskSchema } from "@qasey/contracts";
-import { QaseyUIMessageSchema, type AgentApplication, type ApiTokenRecord, type AuditRecord, type AuthConfig, type AuthRedirect, type CaseHubCase, type CaseHubCaseVersion, type CaseHubChangeSet, type CaseHubResult, type CaseReviewContent, type CaseReviewPlanDetail, type CatalogEntry, type OrganizationSelection, type QaseyConversation, type QaseyRun, type QaseyUIMessage, type Session, type TriggerConnection, type TriggerProvider, type TriggerTarget } from "./types";
+import { QaseyUIMessageSchema, type AgentApplication, type ApiTokenRecord, type AuditRecord, type AuthConfig, type AuthRedirect, type CaseHubCase, type CaseHubCaseDetail, type CaseHubCaseVersion, type CaseHubChangeSet, type CaseHubResult, type CaseReviewContent, type CaseReviewPlanDetail, type CatalogEntry, type OrganizationSelection, type QaseyConversation, type QaseyRun, type QaseyUIMessage, type Session, type TriggerConnection, type TriggerProvider, type TriggerTarget } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -94,6 +94,7 @@ export const api = {
     };
   },
   listReviewPlans: () => requestJson<{ plans: CaseReviewPlanDetail[] }>("/v1/case-hub/review-plans?limit=100"),
+  cancelReviewPlan: (id: string, expectedRevision: number) => requestJson<CaseReviewPlanDetail>(`/v1/case-hub/review-plans/${encodeURIComponent(id)}/cancel`, { method: "POST", body: JSON.stringify({ expectedRevision }) }),
   getReviewPlan: (id: string) => requestJson<CaseReviewPlanDetail>(`/v1/case-hub/review-plans/${encodeURIComponent(id)}`),
   updateReviewItem: (planId: string, itemId: string, expectedRevision: number, content: CaseReviewContent) => requestJson<CaseReviewPlanDetail>(`/v1/case-hub/review-plans/${encodeURIComponent(planId)}/items/${encodeURIComponent(itemId)}`, {
     method: "PATCH", body: JSON.stringify({ expectedRevision, content }),
@@ -140,8 +141,10 @@ export const api = {
     streamEvents(`/v1/case-hub/runs/${encodeURIComponent(runId)}/events`, signal ? { signal } : {}, event => { if (event.type === "snapshot") onRun(event.payload.run); }),
   listRuns: () => requestJson<{ runs: QaseyRun[] }>("/v1/case-hub/runs?limit=100"),
   listCases: (query = "") => requestJson<{ cases: CaseHubCase[] }>(`/v1/case-hub/cases?q=${encodeURIComponent(query)}`),
-  getCase: (id: string) => requestJson<{ case: CaseHubCase; versions: CaseHubCaseVersion[]; changeSets: CaseHubChangeSet[]; results: CaseHubResult[] }>(`/v1/case-hub/cases/${encodeURIComponent(id)}`),
+  deleteCase: (id: string) => requestJson<{ deleted: boolean }>(`/v1/case-hub/cases/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  getCase: (id: string) => requestJson<CaseHubCaseDetail>(`/v1/case-hub/cases/${encodeURIComponent(id)}`),
   listChangeSets: () => requestJson<{ changeSets: CaseHubChangeSet[] }>("/v1/case-hub/change-sets?limit=100"),
+  cancelChangeSet: (id: string) => requestJson<CaseHubChangeSet>(`/v1/case-hub/change-sets/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
   getChangeSet: (id: string) => requestJson<{ changeSet: CaseHubChangeSet; versions: CaseHubCaseVersion[]; results: CaseHubResult[] }>(`/v1/case-hub/change-sets/${encodeURIComponent(id)}`),
   reviewCaseResult: (id: string, verdict: "approve" | "request_changes" | "product_bug" | "environment_issue", feedback?: string) => requestJson<{ result: CaseHubResult; changeSet: CaseHubChangeSet }>(`/v1/case-hub/results/${encodeURIComponent(id)}/review`, { method: "POST", body: JSON.stringify({ verdict, ...(feedback ? { feedback } : {}) }) }),
   cancelRun: (runId: string) => requestJson<QaseyRun>(`/v1/case-hub/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),

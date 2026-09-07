@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { completedCodingOutput } from "../../packages/code-task/src/backend.ts";
 import {
   codeTaskTraceIds,
   nativeCodingBackendPolicy,
@@ -6,6 +7,12 @@ import {
 } from "../../packages/code-task/src/index.ts";
 
 describe("native Mastra coding backend policy", () => {
+  it("does not accept partial coding text after a provider stream disconnect", async () => {
+    const failure = new Error("connection closed");
+    await expect(completedCodingOutput({ getFullOutput: async () => ({ text: "Wrote tests", error: failure }) })).rejects.toBe(failure);
+    await expect(completedCodingOutput({ getFullOutput: async () => ({ text: "Wrote tests", finishReason: "error" }) })).rejects.toThrow("before completion");
+    await expect(completedCodingOutput({ getFullOutput: async () => ({ text: "Validated tests", runId: "author-run", finishReason: "stop" }) })).resolves.toMatchObject({ text: "Validated tests", runId: "author-run" });
+  });
   it("accepts writes only inside frozen allowed paths", () => {
     const allowed = nativeCodingBackendPolicy.normalizeAllowedPaths(["./web/tests/e2e/", "web/pages"]);
 
