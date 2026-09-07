@@ -1302,7 +1302,7 @@ textarea::placeholder, input::placeholder { color: #a4aaba; }
 
 
 /* Desktop icon rail keeps the mobile navigation drawer fully expanded. */
-.sidebar-toggle { margin-right: 12px; flex-shrink: 0; }
+.sidebar > .sidebar-toggle { position: absolute; top: 29px; right: -16px; z-index: 1; border: 1px solid var(--line); border-radius: 50%; color: var(--ink); background: white; box-shadow: var(--shadow); }
 .new-task strong { font: inherit; }
 .sidebar > :not(.nav-list):not(.sidebar-spacer) { flex-shrink: 0; }
 @media (min-width: 781px) {
