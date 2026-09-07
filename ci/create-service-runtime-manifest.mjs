@@ -25,7 +25,7 @@ const dependencyNames = options.profile === "sandbox"
   ? ["@ai-sdk/openai", "@mastra/core", "@mastra/observability", "@playwright/test", "@trycua/cua-driver", "jose", "zod"]
   : [
       ...Object.keys(source.dependencies ?? {})
-        .filter(name => name !== "@playwright/test" && name !== "@trycua/cua-driver"),
+        .filter(name => !new Set(["@playwright/test", "playwright", "playwright-core", "@trycua/cua-driver"]).has(name)),
       "prisma",
     ];
 

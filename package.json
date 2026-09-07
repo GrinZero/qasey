@@ -27,7 +27,7 @@
     "admin-ui:test": "pnpm --dir apps/admin-ui test",
     "test:browser": "pnpm admin-ui:build && playwright test --config=playwright.config.ts",
     "test:e2e": "playwright test --config=tests/browser/playwright.config.ts --project=chromium",
-    "build": "tsx scripts/write-build-metadata.ts && pnpm db:generate && pnpm admin-ui:build && tsup && mastra build --dir src/mastra --studio && mastra worker build --dir src/mastra --output-dir .mastra/worker && node scripts/copy-mastra-skills.mjs",
+    "build": "tsx scripts/write-build-metadata.ts && pnpm db:generate && pnpm admin-ui:build && tsup && node scripts/copy-trace-viewer.mjs && mastra build --dir src/mastra --studio && mastra worker build --dir src/mastra --output-dir .mastra/worker && node scripts/copy-mastra-skills.mjs",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:migrate:deploy": "prisma migrate deploy",

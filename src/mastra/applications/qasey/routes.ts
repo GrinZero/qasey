@@ -9,11 +9,9 @@ import { conversationRunFromToolResult } from "./conversation-run-links.ts";
 import { artifactContentDisposition } from "./artifact-headers.ts";
 import { registerApiRoute } from "@mastra/core/server";
 import { RequestContext } from "@mastra/core/request-context";
-import "playwright-core";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { dirname, resolve, sep } from "node:path";
+import { resolve, sep } from "node:path";
 import { z } from "zod";
 import { ApproveCaseReviewItemsSchema, CaseHubResultReviewInputSchema, CaseReviewItemRevisionSchema, CaseReviewPlanPresentationSchema, GenerateE2EConversationActionSchema, UpdateCaseReviewItemSchema, type CaseHubChangeSet, type CaseHubResult, type CaseReviewPlanDetail, type CaseReviewPlanPresentation, type GenerateE2EConversationAction, type OwnerScope, type QaseyConversationEvent } from "../../../../packages/contracts/src/index.ts";
 import { CaseReviewForbiddenError, CaseReviewRevisionConflictError, ConversationBusyError, ConversationTurnClosedError, normalizeJiraWebhook, projectCaseHubDetail } from "../../../../packages/domain/src/index.ts";
@@ -32,7 +30,7 @@ import { productionSignals } from "../../../platform/observability/production-si
 import { devRuntimeTunnelServerEnabled } from "../../../../packages/adapters/src/config.ts";
 import { webE2EConfigurationFromSkill } from "../../../platform/code-task/e2e-repository-skill.ts";
 import { resultEvidenceTimeline } from "./evidence-timeline.ts";
-import { traceViewerContentType, traceViewerRelativePath } from "../../../platform/e2e/trace-viewer.ts";
+import { traceViewerContentType, traceViewerRelativePath, playwrightTraceViewerRoot } from "../../../platform/e2e/trace-viewer.ts";
 import { conversationEventStreamResponse, conversationTurnsToUIMessages } from "./ui-message.ts";
 import { publicToolCallPresentation, publicToolResultPresentation } from "./slack-progress.ts";
 import {
@@ -321,16 +319,6 @@ function allLatestResultsApproved(results: CaseHubResult[]): boolean {
     if (!current || result.attempt > current.attempt) latest.set(result.caseVersionId, result);
   }
   return [...latest.values()].every(result => result.executionStatus === "passed" && result.reviewStatus === "approved");
-}
-
-const nodeRequire = createRequire(import.meta.url);
-let traceViewerRoot: string | undefined;
-
-function playwrightTraceViewerRoot(): string {
-  if (traceViewerRoot) return traceViewerRoot;
-  const playwrightCorePackage = nodeRequire.resolve("playwright-core/package.json");
-  traceViewerRoot = resolve(dirname(playwrightCorePackage), "lib/vite/traceViewer");
-  return traceViewerRoot;
 }
 
 function validGitHubSignature(rawBody: string, signature: string | undefined): boolean {

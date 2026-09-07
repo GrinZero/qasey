@@ -32,6 +32,9 @@ minimumReleaseAgeExclude:
   - '@trycua/cua-driver@0.21.0'
   - '@ai-sdk/gateway@4.0.74'
 overrides:
+  'fast-uri@3.1.5': '3.1.6'
+  'mysql2@3.15.3': '3.23.1'
+  'qs@6.15.3': '6.16.0'
   # Prisma 7.2 remains pinned for API and license-closure stability; these exact
   # vulnerable transitive releases are replaced with their first safe lines.
   '@hono/node-server@1.19.6': '1.19.17'

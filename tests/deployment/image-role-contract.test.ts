@@ -97,12 +97,15 @@ describe("container image role isolation", () => {
       expect(manifest.dependencies).toHaveProperty("prisma");
       expect(manifest.dependencies).not.toHaveProperty("@mastra/editor");
       expect(manifest.dependencies).not.toHaveProperty("@playwright/test");
+      expect(manifest.dependencies).not.toHaveProperty("playwright-core");
+      expect(manifest.dependencies).not.toHaveProperty("playwright");
       expect(manifest.dependencies).not.toHaveProperty("@trycua/cua-driver");
       expect(Object.values(manifest.dependencies).every(version =>
         /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u.test(version),
       )).toBe(true);
       expect(Object.values(manifest.dependencies).join("\n")).not.toMatch(/[~^*]|workspace:|link:|file:/u);
       expect(importer).not.toContain("@playwright/test");
+      expect(importer).not.toContain("playwright-core");
       expect(importer).not.toContain("@trycua/cua-driver");
       expect(importer).toContain("overrides:\n");
       expect(importer).toContain("hono@4.10.6");

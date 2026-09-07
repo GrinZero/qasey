@@ -1,0 +1,11 @@
+title = "Qasey secret scanning policy"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Public password hash format identifier, not a credential"
+condition = "AND"
+paths = ['''(^|/)src/platform/auth/password-auth\.ts$''']
+regexTarget = "match"
+regexes = ['''^PASSWORD_HASH_VERSION = "qasey-scrypt-v1"$''']

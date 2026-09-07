@@ -5,6 +5,15 @@ import { describe, expect, it } from "vitest";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
+describe("CI database client setup", () => {
+  it("generates Prisma in the migration job before importing tenant isolation tests", async () => {
+    const workflow = await readFile(resolve(projectRoot, ".github/workflows/ci.yml"), "utf8");
+    const migration = workflow.slice(workflow.indexOf("  migration:"), workflow.indexOf("  service-image-smoke:"));
+    expect(migration).toContain("pnpm db:generate");
+    expect(migration.indexOf("pnpm db:generate")).toBeLessThan(migration.indexOf("pnpm exec vitest"));
+  });
+});
+
 describe("community deployment", () => {
   it("publishes the project under Apache License 2.0", async () => {
     const [license, manifest, readme, migration] = await Promise.all([
