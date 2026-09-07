@@ -117,6 +117,17 @@ export function App() {
     ?? legacyAdminPath(window.location.pathname, window.location.hash)
     ?? `${window.location.pathname}${window.location.hash}`);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return window.localStorage.getItem("qasey:sidebar-collapsed") === "true"; }
+    catch { return false; }
+  });
+
+  const toggleSidebar = () => {
+    const collapsed = !sidebarCollapsed;
+    setSidebarCollapsed(collapsed);
+    try { window.localStorage.setItem("qasey:sidebar-collapsed", String(collapsed)); }
+    catch { /* Keep the control usable when browser storage is unavailable. */ }
+  };
   const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
   const [applications, setApplications] = useState<AgentApplication[]>([]);
   const [runs, setRuns] = useState<QaseyRun[]>([]);
@@ -233,30 +244,30 @@ export function App() {
   };
 
   return (
-    <div className="app-shell">
-      <aside className={menuOpen ? "sidebar sidebar--open" : "sidebar"}>
+    <div className={sidebarCollapsed ? "app-shell app-shell--collapsed" : "app-shell"}>
+      <aside id="app-sidebar" className={menuOpen ? "sidebar sidebar--open" : "sidebar"}>
         <div className="brand">
           <BrandMark />
           <div><strong>Qasey</strong><span>Application platform</span></div>
           <button className="icon-button sidebar-close" onClick={() => setMenuOpen(false)} aria-label="关闭导航"><X size={20} /></button>
         </div>
-        <button className="new-task" onClick={() => openView("qasey-overview")}>
-          <Plus size={17} /> 发起工作 <span>⌘ K</span>
+        <button className="new-task" aria-label="发起工作" title="发起工作" onClick={() => openView("qasey-overview")}>
+          <Plus size={17} /><strong>发起工作</strong><span>⌘ K</span>
         </button>
         <nav className="nav-list" aria-label="主导航">
           <p className="nav-label">平台</p>
           {platformNav.map(item => <NavButton key={item.id} item={item} active={view === item.id} onClick={() => openView(item.id)} />)}
           <p className="nav-label application-label">Applications</p>
-          {applications.map(application => <button key={application.id} className={application.id === "qasey" && qaseyActive ? "application-nav active" : "application-nav"} onClick={() => openApplication(application)}><span className={`app-glyph ${application.id === "qasey" ? "qasey" : "generic"}`}>{application.id === "qasey" ? <TestTube2 size={16} /> : <Bot size={16} />}</span><span><strong>{application.name}</strong><small>{application.category}</small></span><ChevronRight size={15} /></button>)}
+          {applications.map(application => <button key={application.id} aria-label={application.name} title={application.name} className={application.id === "qasey" && qaseyActive ? "application-nav active" : "application-nav"} onClick={() => openApplication(application)}><span className={`app-glyph ${application.id === "qasey" ? "qasey" : "generic"}`}>{application.id === "qasey" ? <TestTube2 size={16} /> : <Bot size={16} />}</span><span><strong>{application.name}</strong><small>{application.category}</small></span><ChevronRight size={15} /></button>)}
           {qaseyActive && <div className="application-subnav">{qaseyNav.map(item => <NavButton key={item.id} item={item} active={view === item.id} onClick={() => openView(item.id)} />)}</div>}
           {auth.session.isAdmin && <><p className="nav-label application-label">管理</p><NavButton item={{ label: "触发器", icon: Cable }} active={view === "triggers"} onClick={() => openView("triggers")} /><NavButton item={{ label: "访问与审计", icon: ShieldCheck }} active={view === "access"} onClick={() => openView("access")} /></>}
         </nav>
         <div className="sidebar-spacer" />
-        <div className="environment-card">
+        <div className="environment-card" title={`${applications.length} 个 Application 在线`}>
           <span className="health-dot" />
           <div><strong>Agent Runtime</strong><span>{applications.length} 个 Application 在线</span></div>
         </div>
-        <div className="sidebar-user">
+        <div className="sidebar-user" title={displayName(auth.session)}>
           <Avatar label={auth.session.email ?? auth.session.subjectId} />
           <div><strong>{displayName(auth.session)}</strong><span>{auth.session.tenantId}</span></div>
           <button className="icon-button" onClick={logout} aria-label="退出登录" title="退出登录"><LogOut size={17} /></button>
@@ -265,6 +276,9 @@ export function App() {
       {menuOpen && <button className="sidebar-scrim" onClick={() => setMenuOpen(false)} aria-label="关闭导航" />}
       <main className="main-area">
         <header className="topbar">
+          <button className="icon-button sidebar-toggle" onClick={toggleSidebar} aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} aria-expanded={!sidebarCollapsed} aria-controls="app-sidebar">
+            {sidebarCollapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
+          </button>
           <button className="icon-button mobile-menu" onClick={() => setMenuOpen(true)} aria-label="打开导航"><Menu size={21} /></button>
           <div className="breadcrumbs"><span>Qasey</span><ChevronRight size={14} />{qaseyActive && <><span>QA Agent</span><ChevronRight size={14} /></>}<strong>{currentLabel}</strong></div>
           <div className="topbar-actions">
@@ -1743,7 +1757,7 @@ function EmptyState({ icon: Icon, title, text }: { icon: typeof ClipboardCheck; 
 
 function InlineError({ message, action, onAction }: { message: string; action?: string; onAction?: () => void | Promise<void> }) { return <div className="inline-error" role="alert"><CircleAlert size={18} /><span>{message}</span>{action && onAction && <button onClick={() => void onAction()}>{action}</button>}</div>; }
 
-function NavButton({ item, active, onClick }: { item: { label: string; icon: typeof Gauge; badge?: number }; active: boolean; onClick: () => void }) { const Icon = item.icon; return <button className={active ? "nav-button active" : "nav-button"} onClick={onClick}><Icon size={18} /><span>{item.label}</span>{Boolean(item.badge) && <i>{item.badge}</i>}</button>; }
+function NavButton({ item, active, onClick }: { item: { label: string; icon: typeof Gauge; badge?: number }; active: boolean; onClick: () => void }) { const Icon = item.icon; return <button className={active ? "nav-button active" : "nav-button"} aria-label={item.label} title={item.badge ? `${item.label}（${item.badge}）` : item.label} aria-current={active ? "page" : undefined} onClick={onClick}><Icon size={18} /><span>{item.label}</span>{Boolean(item.badge) && <i>{item.badge}</i>}</button>; }
 
 function BrandMark() { return <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>; }
 function Avatar({ label }: { label: string }) { return <span className="avatar">{label.slice(0,1).toUpperCase()}</span>; }
