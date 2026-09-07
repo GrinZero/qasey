@@ -177,7 +177,9 @@ describe("community deployment", () => {
     expect(workflow).toContain("--security-opt no-new-privileges");
     expect(workflow).toContain("--security-opt seccomp=unconfined");
     expect(workflow).toContain("--security-opt systempaths=unconfined");
-    expect(workflow).toContain("--security-opt apparmor=unconfined");
+    expect(workflow).toContain("--security-opt apparmor=qasey-ci-sandbox");
+    expect(workflow).toContain("sudo apparmor_parser --replace ci/sandbox-smoke.apparmor");
+    expect(workflow).not.toContain("apparmor_restrict_unprivileged_userns=0");
     expect(workflow).not.toContain("--privileged");
     expect(workflow).not.toContain("--cap-add SYS_ADMIN");
     for (const option of [
@@ -185,7 +187,7 @@ describe("community deployment", () => {
       "--security-opt no-new-privileges",
       "--security-opt seccomp=unconfined",
       "--security-opt systempaths=unconfined",
-      "--security-opt apparmor=unconfined",
+      "--security-opt apparmor=qasey-ci-sandbox",
     ]) {
       expect(workflow.split(option)).toHaveLength(2);
     }
@@ -193,10 +195,10 @@ describe("community deployment", () => {
     const sandboxJob = workflow.slice(workflow.indexOf("\n  sandbox-image-smoke:"));
     expect(serviceJob).not.toContain("--security-opt seccomp=unconfined");
     expect(serviceJob).not.toContain("--security-opt systempaths=unconfined");
-    expect(serviceJob).not.toContain("--security-opt apparmor=unconfined");
+    expect(serviceJob).not.toContain("--security-opt apparmor=qasey-ci-sandbox");
     expect(sandboxJob).toContain("--security-opt seccomp=unconfined");
     expect(sandboxJob).toContain("--security-opt systempaths=unconfined");
-    expect(sandboxJob).toContain("--security-opt apparmor=unconfined");
+    expect(sandboxJob).toContain("--security-opt apparmor=qasey-ci-sandbox");
     expect(sandboxJob).toContain("printf host-device > /dev/qasey-host-device-sentinel");
     expect(sandboxJob).toContain('test "$(cat /dev/qasey-host-device-sentinel)" = host-device');
     expect(sandboxJob).toContain("packageManager");

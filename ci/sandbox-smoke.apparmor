@@ -1,0 +1,8 @@
+abi <abi/4.0>,
+
+# Ubuntu 24.04 restricts user namespaces even for an unconfined container.
+# Name the smoke container explicitly and permit bubblewrap to create its own
+# user/network namespaces without changing the runner-wide AppArmor sysctl.
+profile qasey-ci-sandbox flags=(unconfined) {
+  userns,
+}

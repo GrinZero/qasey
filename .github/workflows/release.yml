@@ -336,12 +336,13 @@ jobs:
             test ! -e /app/node_modules/dd-trace
           '
           if docker run --rm "$candidate" api; then exit 1; fi
+          sudo apparmor_parser --replace ci/sandbox-smoke.apparmor
           container_id="$(docker run --detach --network host \
             --cap-drop ALL \
             --security-opt no-new-privileges \
             --security-opt seccomp=unconfined \
             --security-opt systempaths=unconfined \
-            --security-opt apparmor=unconfined \
+            --security-opt apparmor=qasey-ci-sandbox \
             --env NODE_ENV=production \
             --env OPENAI_API_KEY=synthetic-model-key-for-release-smoke-only \
             --env QASEY_SANDBOX_CONTROL_KEY=synthetic-sandbox-control-key-for-release-smoke-only-000000 \

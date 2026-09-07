@@ -4,6 +4,7 @@ title = "Qasey secret scanning policy"
 useDefault = true
 
 [[allowlists]]
+targetRules = ["generic-api-key"]
 description = "Public password hash format identifier, not a credential"
 condition = "AND"
 paths = ['''(^|/)src/platform/auth/password-auth\.ts$''']
