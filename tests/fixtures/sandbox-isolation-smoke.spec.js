@@ -1,4 +1,4 @@
-const { test } = require("/app/node_modules/@playwright/test");
+const { test, expect } = require("/app/node_modules/@playwright/test");
 const fs = require("node:fs");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
@@ -45,7 +45,7 @@ test("fixed-check descendants remain inside the task mount and PID namespace", a
   }
   const page = await browser.newPage();
   await page.goto("data:text/html,<title>nested-code-task-browser</title>");
-  if (await page.title() !== "nested-code-task-browser") throw new Error("nested fixed-check browser did not execute");
+  expect(await page.title()).toBe("nested-code-task-browser");
   await page.close();
   fs.writeFileSync("smoke/proof.txt", "task-isolation-ok\n", { mode: 0o600 });
 });

@@ -391,9 +391,9 @@ jobs:
             set -eu
             source="$(mktemp -d)"
             cp /tmp/sandbox-isolation-smoke.spec.js "$source/isolation.spec.js"
-            printf '%s\n' '{"private":true,"packageManager":"pnpm@11.21.0"}' > "$source/package.json"
+            printf "%s\n" "{\"private\":true,\"packageManager\":\"pnpm@11.21.0\"}" > "$source/package.json"
             cd "$source"
-            pnpm install --lockfile-only --ignore-scripts
+            pnpm install --lockfile-only --ignore-scripts >&2
             git init --quiet --initial-branch=main
             git config user.name "Qasey Release"
             git config user.email "release@example.invalid"
