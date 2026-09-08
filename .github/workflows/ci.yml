@@ -95,6 +95,7 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm db:generate
       - run: pnpm db:migrate:deploy
       - run: pnpm exec prisma migrate status
       - name: Verify PostgreSQL tenant isolation
@@ -139,11 +140,14 @@ jobs:
           copied_layout="$(mktemp -d)"
           archive="$(mktemp)"
           metadata_file="$(mktemp)"
-          printf 'FROM scratch\nLABEL org.opencontainers.image.title="qasey-release-layout-smoke"\n' \
-            | docker buildx build \
-                --metadata-file "$metadata_file" \
-                --output "type=oci,dest=${archive}" \
-                -
+          context="$(mktemp -d)"
+          printf 'public OCI smoke fixture\n' > "$context/smoke.txt"
+          printf 'FROM scratch\nCOPY smoke.txt /smoke.txt\n' > "$context/Dockerfile"
+          docker buildx build \
+            --provenance=false --sbom=false \
+            --metadata-file "$metadata_file" \
+            --output "type=oci,dest=${archive}" \
+            "$context"
           digest="$(jq -er '."containerimage.digest"' "$metadata_file")"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           sh ci/extract-oci-layout.sh "$archive" "$layout"
@@ -269,6 +273,8 @@ jobs:
             echo "sandbox image accepted the API role" >&2
             exit 1
           fi
+      - name: Load the sandbox smoke AppArmor profile
+        run: sudo apparmor_parser --replace ci/sandbox-smoke.apparmor
       - name: Start sandbox image and verify probes
         run: |
           image_digest="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
@@ -277,7 +283,7 @@ jobs:
             --security-opt no-new-privileges \
             --security-opt seccomp=unconfined \
             --security-opt systempaths=unconfined \
-            --security-opt apparmor=unconfined \
+            --security-opt apparmor=qasey-ci-sandbox \
             --env NODE_ENV=production \
             --env OPENAI_API_KEY=synthetic-model-key-for-ci-only \
             --env QASEY_SANDBOX_CONTROL_KEY=synthetic-sandbox-control-key-for-ci-only-000000000000 \
@@ -292,7 +298,10 @@ jobs:
           trap cleanup EXIT
           for attempt in $(seq 1 60); do
             if curl --fail --silent http://127.0.0.1:4120/readyz >/dev/null; then break; fi
-            if [ "$attempt" -eq 60 ]; then exit 1; fi
+            if [ "$attempt" -eq 60 ]; then
+              curl --silent --show-error --max-time 15 http://127.0.0.1:4120/readyz || true
+              exit 1
+            fi
             sleep 2
           done
           curl --fail --silent --show-error http://127.0.0.1:4120/healthz
@@ -326,9 +335,9 @@ jobs:
             set -eu
             source="$(mktemp -d)"
             cp /tmp/sandbox-isolation-smoke.spec.js "$source/isolation.spec.js"
-            printf '%s\n' '{"private":true,"packageManager":"pnpm@11.21.0"}' > "$source/package.json"
+            printf "%s\n" "{\"private\":true,\"packageManager\":\"pnpm@11.21.0\"}" > "$source/package.json"
             cd "$source"
-            pnpm install --lockfile-only --ignore-scripts
+            pnpm install --lockfile-only --ignore-scripts >&2
             git init --quiet --initial-branch=main
             git config user.name "Qasey CI"
             git config user.email "ci@example.invalid"

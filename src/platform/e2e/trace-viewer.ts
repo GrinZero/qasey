@@ -1,4 +1,15 @@
-import { extname } from "node:path";
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, extname, resolve } from "node:path";
+
+// Release images contain only the viewer's static assets. Development can use
+// the installed package without importing the browser runtime into the service.
+export function playwrightTraceViewerRoot(projectRoot = process.cwd()): string {
+  const bundled = resolve(projectRoot, "dist/trace-viewer");
+  if (existsSync(resolve(bundled, "index.html"))) return bundled;
+  const require = createRequire(resolve(projectRoot, "package.json"));
+  return resolve(dirname(require.resolve("playwright-core/package.json")), "lib/vite/traceViewer");
+}
 
 export const PLAYWRIGHT_TRACE_VIEWER_ROUTE_PREFIX = "/v1/case-hub/trace-viewer/";
 

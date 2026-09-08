@@ -336,12 +336,13 @@ jobs:
             test ! -e /app/node_modules/dd-trace
           '
           if docker run --rm "$candidate" api; then exit 1; fi
+          sudo apparmor_parser --replace ci/sandbox-smoke.apparmor
           container_id="$(docker run --detach --network host \
             --cap-drop ALL \
             --security-opt no-new-privileges \
             --security-opt seccomp=unconfined \
             --security-opt systempaths=unconfined \
-            --security-opt apparmor=unconfined \
+            --security-opt apparmor=qasey-ci-sandbox \
             --env NODE_ENV=production \
             --env OPENAI_API_KEY=synthetic-model-key-for-release-smoke-only \
             --env QASEY_SANDBOX_CONTROL_KEY=synthetic-sandbox-control-key-for-release-smoke-only-000000 \
@@ -390,9 +391,9 @@ jobs:
             set -eu
             source="$(mktemp -d)"
             cp /tmp/sandbox-isolation-smoke.spec.js "$source/isolation.spec.js"
-            printf '%s\n' '{"private":true,"packageManager":"pnpm@11.21.0"}' > "$source/package.json"
+            printf "%s\n" "{\"private\":true,\"packageManager\":\"pnpm@11.21.0\"}" > "$source/package.json"
             cd "$source"
-            pnpm install --lockfile-only --ignore-scripts
+            pnpm install --lockfile-only --ignore-scripts >&2
             git init --quiet --initial-branch=main
             git config user.name "Qasey Release"
             git config user.email "release@example.invalid"

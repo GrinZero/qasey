@@ -60,6 +60,7 @@ RUN pnpm exec tsx scripts/write-build-metadata.ts \
       pnpm db:generate \
       && pnpm admin-ui:build \
       && pnpm exec tsup \
+      && node scripts/copy-trace-viewer.mjs \
       && pnpm exec mastra build --dir src/mastra --studio \
       && install -d .mastra/worker \
       && node scripts/copy-mastra-skills.mjs; \
@@ -199,6 +200,7 @@ RUN sed -i \
 WORKDIR /app
 COPY --from=service-dependencies /service/node_modules ./node_modules
 COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=build /app/dist/trace-viewer ./dist/trace-viewer
 COPY --from=build /app/.mastra/output ./.mastra/output
 COPY --from=build /app/.mastra/worker ./.mastra/worker
 COPY --chown=node:node --from=build /app/.qasey/build-metadata.json ./.qasey/build-metadata.json

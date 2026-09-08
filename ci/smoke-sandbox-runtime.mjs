@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 
 const endpoint = process.argv[2];
 const controlKey = process.argv[3];
@@ -86,14 +87,16 @@ if (deviceExecution.exitCode !== 0) {
   throw new Error(`generic sandbox did not receive fresh devices: ${deviceExecution.stderr || deviceExecution.stdout}`);
 }
 
-const taskContext = "CI task isolation smoke";
+const taskContext = JSON.stringify({ brief: { title: "CI task isolation smoke", cases: [] } });
+const isolationSource = await readFile(new URL("../tests/fixtures/sandbox-isolation-smoke.spec.js", import.meta.url), "utf8");
+const isolationLines = isolationSource.trimEnd().split("\n");
 const taskId = "sandbox-isolation-smoke";
 const inputPatch = String.raw`diff --git a/smoke/isolation.spec.js b/smoke/isolation.spec.js
 new file mode 100644
 --- /dev/null
 +++ b/smoke/isolation.spec.js
-@@ -0,0 +1 @@
-+require("../isolation.spec.js");
+@@ -0,0 +1,${isolationLines.length} @@
+${isolationLines.map(line => `+${line}`).join("\n")}
 diff --git a/smoke/playwright.config.js b/smoke/playwright.config.js
 new file mode 100644
 --- /dev/null

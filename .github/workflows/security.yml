@@ -42,7 +42,7 @@ jobs:
             --env GIT_CONFIG_VALUE_0=/repo \
             --volume "${GITHUB_WORKSPACE}:/repo:ro" \
             ghcr.io/gitleaks/gitleaks@sha256:aa036a2f4bdfe3cc3c55fa4326308efabb4a6be498c883c864fd1d0d5585438a \
-            git /repo --log-opts=--all --redact --no-banner --no-color
+            git /repo --log-opts=--all --redact --no-banner --no-color --verbose
       - name: Scan the current tracked tree for secrets
         id: current-tree-secret-scan
         continue-on-error: true
@@ -54,7 +54,7 @@ jobs:
           docker run --rm \
             --volume "${current_tree}:/repo:ro" \
             ghcr.io/gitleaks/gitleaks@sha256:aa036a2f4bdfe3cc3c55fa4326308efabb4a6be498c883c864fd1d0d5585438a \
-            dir /repo --redact --no-banner --no-color
+            dir /repo --redact --no-banner --no-color --verbose
       - name: Enforce secret scan results
         if: always()
         env:
